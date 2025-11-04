@@ -54,4 +54,5 @@ yarn-error.log*
 dist/
 build/
 
-.claude
+# Ignore Claude config folder
+.claude/
