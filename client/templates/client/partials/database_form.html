@@ -1,0 +1,522 @@
+<!-- Database Connection Form (Add/Edit Mode) -->
+<div x-data="databaseForm()">
+  <!-- Tab Header -->
+  <div class="mb-6">
+    <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
+      {% if is_update %}Edit{% else %}Add{% endif %} Database Connection
+    </h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+      Configure database connection details
+    </p>
+  </div>
+
+  <!-- Form Loading Spinner -->
+  <div 
+    x-show="isTestingConnection"
+    class="absolute inset-0 bg-white/80 dark:bg-gray-800/80 flex items-center justify-center z-10 rounded-lg">
+    <div class="flex flex-col items-center gap-3">
+      <svg class="animate-spin h-10 w-10 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+      </svg>
+      <p class="text-sm text-gray-900 dark:text-white font-medium">Testing connection...</p>
+    </div>
+  </div>
+
+  <form 
+    method="post"
+    action="{% if is_update %}{% url 'client_database_update' object.pk %}{% else %}{% url 'client_database_add' client.pk %}{% endif %}"
+    @submit.prevent="submitForm"
+    class="space-y-5 relative">
+    {% csrf_token %}
+
+    <!-- Connection Name & DB Type -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <!-- Connection Name -->
+      <div>
+        <label for="id_connection_name" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Connection Name <span class="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          name="connection_name"
+          id="id_connection_name"
+          x-model="formData.connection_name"
+          @blur="validateField('connection_name')"
+          @input="errors.connection_name = ''"
+          :class="errors.connection_name ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+          required
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+          placeholder="e.g., Production DB"
+          value="{{ form.connection_name.value|default:'' }}">
+        <p x-show="errors.connection_name" x-text="errors.connection_name" class="mt-1 text-xs text-red-600"></p>
+        {% if form.connection_name.errors %}
+          <p class="mt-1 text-xs text-red-600">{{ form.connection_name.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      <!-- Database Type -->
+      <div>
+        <label for="id_db_type" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Database Type <span class="text-red-500">*</span>
+        </label>
+        <select 
+          name="db_type" 
+          id="id_db_type"
+          x-model="formData.db_type"
+          @change="updateDefaultPort()"
+          required
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition">
+          <option value="mysql" {% if form.db_type.value == 'mysql' %}selected{% endif %}>MySQL</option>
+          <option value="postgresql" {% if form.db_type.value == 'postgresql' %}selected{% endif %}>PostgreSQL</option>
+          <option value="sqlite" {% if form.db_type.value == 'sqlite' %}selected{% endif %}>SQLite</option>
+          <option value="oracle" {% if form.db_type.value == 'oracle' %}selected{% endif %}>Oracle</option>
+        </select>
+        {% if form.db_type.errors %}
+          <p class="mt-1 text-xs text-red-600">{{ form.db_type.errors.0 }}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Host & Port -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+      <!-- Host -->
+      <div class="md:col-span-2">
+        <label for="id_host" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Host <span class="text-red-500" x-show="formData.db_type !== 'sqlite'">*</span>
+        </label>
+        <input
+          type="text"
+          name="host"
+          id="id_host"
+          x-model="formData.host"
+          @blur="validateField('host')"
+          @input="errors.host = ''"
+          :disabled="formData.db_type === 'sqlite'"
+          :required="formData.db_type !== 'sqlite'"
+          :class="errors.host ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition disabled:opacity-50 disabled:cursor-not-allowed"
+          placeholder="e.g., localhost or 192.168.1.100"
+          value="{{ form.host.value|default:'' }}">
+        <p x-show="errors.host" x-text="errors.host" class="mt-1 text-xs text-red-600"></p>
+        {% if form.host.errors %}
+          <p class="mt-1 text-xs text-red-600">{{ form.host.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      <!-- Port -->
+      <div>
+        <label for="id_port" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Port <span class="text-red-500" x-show="formData.db_type !== 'sqlite'">*</span>
+        </label>
+        <input
+          type="number"
+          name="port"
+          id="id_port"
+          x-model="formData.port"
+          @blur="validateField('port')"
+          @input="errors.port = ''"
+          :disabled="formData.db_type === 'sqlite'"
+          :required="formData.db_type !== 'sqlite'"
+          :class="errors.port ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+          min="1"
+          max="65535"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition disabled:opacity-50 disabled:cursor-not-allowed"
+          value="{{ form.port.value|default:'3306' }}">
+        <p x-show="errors.port" x-text="errors.port" class="mt-1 text-xs text-red-600"></p>
+        {% if form.port.errors %}
+          <p class="mt-1 text-xs text-red-600">{{ form.port.errors.0 }}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Database Name -->
+    <div>
+      <label for="id_database_name" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+        Database Name <span class="text-red-500">*</span>
+      </label>
+      <input
+        type="text"
+        name="database_name"
+        id="id_database_name"
+        x-model="formData.database_name"
+        @blur="validateField('database_name')"
+        @input="errors.database_name = ''"
+        :class="errors.database_name ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+        required
+        class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+        placeholder="e.g., my_database"
+        value="{{ form.database_name.value|default:'' }}">
+      <p x-show="errors.database_name" x-text="errors.database_name" class="mt-1 text-xs text-red-600"></p>
+      {% if form.database_name.errors %}
+        <p class="mt-1 text-xs text-red-600">{{ form.database_name.errors.0 }}</p>
+      {% endif %}
+    </div>
+
+    <!-- Username & Password -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <!-- Username -->
+      <div>
+        <label for="id_username" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Username <span class="text-red-500" x-show="formData.db_type !== 'sqlite'">*</span>
+        </label>
+        <input
+          type="text"
+          name="username"
+          id="id_username"
+          x-model="formData.username"
+          @blur="validateField('username')"
+          @input="errors.username = ''"
+          :disabled="formData.db_type === 'sqlite'"
+          :required="formData.db_type !== 'sqlite'"
+          :class="errors.username ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+          autocomplete="off"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition disabled:opacity-50 disabled:cursor-not-allowed"
+          value="{{ form.username.value|default:'' }}">
+        <p x-show="errors.username" x-text="errors.username" class="mt-1 text-xs text-red-600"></p>
+        {% if form.username.errors %}
+          <p class="mt-1 text-xs text-red-600">{{ form.username.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      <!-- Password -->
+      <div>
+        <label for="id_password" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Password <span class="text-red-500" x-show="formData.db_type !== 'sqlite' && !{{ is_update|yesno:'true,false' }}">*</span>
+          {% if is_update %}<span class="text-xs text-gray-500 font-normal">(leave blank to keep current)</span>{% endif %}
+        </label>
+        <div class="relative">
+          <input
+            :type="showPassword ? 'text' : 'password'"
+            name="password"
+            id="id_password"
+            x-model="formData.password"
+            @blur="validateField('password')"
+            @input="errors.password = ''"
+            :disabled="formData.db_type === 'sqlite'"
+            :required="formData.db_type !== 'sqlite' && !{{ is_update|yesno:'true,false' }}"
+            :class="errors.password ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+            autocomplete="new-password"
+            class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition disabled:opacity-50 disabled:cursor-not-allowed pr-10"
+            {% if is_update %}placeholder="••••••••"{% endif %}
+            value="">
+          <button
+            type="button"
+            @click="showPassword = !showPassword"
+            x-show="formData.db_type !== 'sqlite'"
+            class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+            <svg x-show="!showPassword" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+            </svg>
+            <svg x-show="showPassword" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path>
+            </svg>
+          </button>
+        </div>
+        <p x-show="errors.password" x-text="errors.password" class="mt-1 text-xs text-red-600"></p>
+        {% if form.password.errors %}
+          <p class="mt-1 text-xs text-red-600">{{ form.password.errors.0 }}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Is Primary -->
+    <div class="flex items-center gap-3">
+      <input 
+        type="checkbox" 
+        name="is_primary" 
+        id="id_is_primary"
+        x-model="formData.is_primary"
+        class="w-4 h-4 text-blue-600 bg-gray-50 dark:bg-gray-800 border-gray-300 dark:border-gray-600 rounded focus:ring-2 focus:ring-blue-500"
+        {% if form.is_primary.value %}checked{% endif %}>
+      <label for="id_is_primary" class="text-sm font-medium text-gray-700 dark:text-gray-300">
+        Set as primary database connection
+      </label>
+    </div>
+
+    <!-- Form Actions -->
+    <div class="flex items-center justify-end gap-3 pt-5 border-t border-gray-200 dark:border-gray-700">
+      <button
+        type="button"
+        @click="$dispatch('close-modal')"
+        class="px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 font-medium transition">
+        Cancel
+      </button>
+
+      <!-- For ADD mode: Only Test Connection button -->
+      <template x-if="!{{ is_update|yesno:'true,false' }}">
+        <button
+          type="button"
+          @click="testConnection()"
+          :disabled="isTestingConnection || !canSave"
+          class="inline-flex items-center gap-2 px-5 py-2 text-sm text-white font-semibold bg-blue-600 hover:bg-blue-700 rounded-lg shadow transition disabled:opacity-50 disabled:cursor-not-allowed">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+          </svg>
+          Test Connection
+        </button>
+      </template>
+
+      <!-- For UPDATE mode: Both Test Connection and Save Changes buttons -->
+      <template x-if="{{ is_update|yesno:'true,false' }}">
+        <div class="flex gap-3">
+          <button
+            type="button"
+            @click="testConnection()"
+            :disabled="isTestingConnection || !isFormValid"
+            class="inline-flex items-center gap-2 px-4 py-2 text-sm border-2 border-blue-600 text-blue-600 dark:border-blue-500 dark:text-blue-500 bg-white dark:bg-gray-800 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/10 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+            </svg>
+            Test Connection
+          </button>
+
+          <button
+            type="submit"
+            :disabled="isTestingConnection || isSaving || !canSave"
+            class="px-5 py-2 text-sm text-white font-semibold bg-green-600 hover:bg-green-700 rounded-lg shadow transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+            <svg x-show="!isSaving" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+            <svg x-show="isSaving" class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span x-text="isSaving ? 'Saving...' : 'Save Changes'"></span>
+          </button>
+        </div>
+      </template>
+    </div>
+  </form>
+
+  <!-- Alpine.js Script -->
+  <script>
+  function databaseForm() {
+    return {
+      formData: {
+        connection_name: '{{ form.connection_name.value|default_if_none:"" }}',
+        db_type: '{{ form.db_type.value|default:"mysql" }}',
+        host: '{{ form.host.value|default_if_none:"" }}',
+        port: {{ form.port.value|default:3306 }},
+        database_name: '{{ form.database_name.value|default_if_none:"" }}',
+        username: '{{ form.username.value|default_if_none:"" }}',
+        password: '{{ form.password.value|default_if_none:"" }}',
+        is_primary: {{ form.is_primary.value|yesno:"true,false" }}
+      },
+      originalData: {},
+      errors: {
+        connection_name: '',
+        host: '',
+        port: '',
+        database_name: '',
+        username: '',
+        password: ''
+      },
+      showPassword: false,
+      isTestingConnection: false,
+      isSaving: false,
+      isUpdateMode: {{ is_update|yesno:"true,false" }},
+
+      init() {
+        // Store original data for comparison in update mode
+        if (this.isUpdateMode) {
+          this.originalData = JSON.parse(JSON.stringify(this.formData));
+        }
+      },
+
+      get hasChanges() {
+        // In add mode, always return true
+        if (!this.isUpdateMode) return true;
+
+        // In update mode, compare with original data
+        // Check all fields except password (empty password means "don't change")
+        const fieldsToCheck = ['connection_name', 'db_type', 'host', 'port', 'database_name', 'username', 'is_primary'];
+
+        const hasFieldChanges = fieldsToCheck.some(key => {
+          // Convert to string for comparison to handle type differences
+          return String(this.formData[key]) !== String(this.originalData[key]);
+        });
+
+        // If password has a value (not empty), consider it a change
+        const hasPasswordChange = this.formData.password.trim() !== '';
+
+        return hasFieldChanges || hasPasswordChange;
+      },
+
+      get isFormValid() {
+        // Check if required fields have values (only for non-SQLite)
+        if (this.formData.db_type !== 'sqlite') {
+          if (!this.formData.connection_name.trim()) return false;
+          if (!this.formData.host.trim()) return false;
+          if (!this.formData.port || this.formData.port < 1 || this.formData.port > 65535) return false;
+          if (!this.formData.database_name.trim()) return false;
+          if (!this.formData.username.trim()) return false;
+          // Password required only in add mode
+          if (!this.isUpdateMode && !this.formData.password.trim()) return false;
+        } else {
+          // SQLite only needs connection_name and database_name
+          if (!this.formData.connection_name.trim()) return false;
+          if (!this.formData.database_name.trim()) return false;
+        }
+
+        // Check if there are any validation errors
+        return !Object.values(this.errors).some(error => error !== '');
+      },
+
+      get canSave() {
+        // Form must be valid AND have changes (in update mode)
+        return this.isFormValid && this.hasChanges;
+      },
+
+      validateField(field) {
+        this.errors[field] = '';
+
+        if (this.formData.db_type === 'sqlite' && ['host', 'port', 'username', 'password'].includes(field)) {
+          return; // Skip validation for SQLite-disabled fields
+        }
+
+        const value = typeof this.formData[field] === 'string' ? this.formData[field].trim() : this.formData[field];
+
+        switch (field) {
+          case 'connection_name':
+            if (!value) {
+              this.errors.connection_name = 'Connection name is required';
+            } else if (value.length < 2) {
+              this.errors.connection_name = 'Connection name must be at least 2 characters';
+            }
+            break;
+          case 'host':
+            if (!value) {
+              this.errors.host = 'Host is required';
+            }
+            break;
+          case 'port':
+            if (!value) {
+              this.errors.port = 'Port is required';
+            } else if (value < 1 || value > 65535) {
+              this.errors.port = 'Port must be between 1 and 65535';
+            }
+            break;
+          case 'database_name':
+            if (!value) {
+              this.errors.database_name = 'Database name is required';
+            }
+            break;
+          case 'username':
+            if (!value) {
+              this.errors.username = 'Username is required';
+            }
+            break;
+          case 'password':
+            // Password required only in add mode
+            if (!this.isUpdateMode && !value) {
+              this.errors.password = 'Password is required';
+            }
+            break;
+        }
+      },
+
+      updateDefaultPort() {
+        const defaultPorts = {
+          'mysql': 3306,
+          'postgresql': 5432,
+          'sqlite': 0,
+          'oracle': 1521
+        };
+        this.formData.port = defaultPorts[this.formData.db_type] || 3306;
+      },
+
+      async testConnection() {
+        this.isTestingConnection = true;
+
+        const formData = new FormData();
+        formData.append('connection_name', this.formData.connection_name);
+        formData.append('db_type', this.formData.db_type);
+        formData.append('host', this.formData.host);
+        formData.append('port', this.formData.port);
+        formData.append('database_name', this.formData.database_name);
+        formData.append('username', this.formData.username);
+        formData.append('password', this.formData.password);
+        formData.append('is_primary', this.formData.is_primary);
+        formData.append('test_only', 'true');
+
+        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+        formData.append('csrfmiddlewaretoken', csrfToken);
+
+        try {
+          const url = '{% if is_update %}{% url "client_database_update" object.pk %}{% else %}{% url "client_database_add" client.pk %}{% endif %}';
+          const response = await fetch(url, {
+            method: 'POST',
+            body: formData,
+            headers: {
+              'X-CSRFToken': csrfToken
+            }
+          });
+
+          const result = await response.json();
+          
+          this.isTestingConnection = false;
+
+          // Dispatch event to show test result modal
+          this.$dispatch('show-test-result', {
+            success: result.success,
+            message: result.message,
+            formData: this.formData,
+            url: url,
+            isUpdateMode: this.isUpdateMode
+          });
+
+        } catch (error) {
+          this.isTestingConnection = false;
+          alert('Error testing connection: ' + error.message);
+        }
+      },
+
+      async submitForm(e) {
+        this.isSaving = true;
+        const form = e.target;
+        const formData = new FormData(form);
+        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+        try {
+          const response = await fetch(form.action, {
+            method: 'POST',
+            body: formData,
+            headers: {
+              'X-CSRFToken': csrfToken,
+              'HX-Request': 'true'
+            }
+          });
+
+          if (response.ok) {
+            const html = await response.text();
+            document.getElementById('databases-content').innerHTML = html;
+            this.$dispatch('close-modal');
+
+            // Re-initialize HTMX for new content
+            if (window.htmx) {
+              htmx.process(document.getElementById('databases-content'));
+            }
+
+            // Show success toast
+            if (window.showToast) {
+              window.showToast('success', 'Database connection updated successfully!');
+            }
+          } else {
+            if (window.showToast) {
+              window.showToast('error', 'Failed to save database connection');
+            }
+          }
+        } catch (error) {
+          if (window.showToast) {
+            window.showToast('error', 'Error saving database: ' + error.message);
+          }
+        } finally {
+          this.isSaving = false;
+        }
+      }
+    }
+  }
+  </script>
+</div>

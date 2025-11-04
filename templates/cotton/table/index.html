@@ -1,0 +1,237 @@
+{% load table_filters %}
+
+<div x-data="tableComponent()" class="w-full">
+  
+  <!-- Search Bar -->
+  {% if config.settings.searchable %}
+  <div class="mb-4 flex items-center gap-4">
+    <div class="flex-1">
+      <form method="get" class="relative">
+        <input 
+          type="text" 
+          name="search"
+          value="{{ request.GET.search }}"
+          placeholder="Search clients..."
+          class="w-full px-4 py-2 pl-10 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition">
+        <svg class="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+        </svg>
+      </form>
+    </div>
+    
+    <!-- Selected count -->
+    <div x-show="selectedRows.length > 0" 
+         x-transition
+         class="text-sm font-medium text-blue-600 dark:text-blue-400">
+      <span x-text="selectedRows.length"></span> selected
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Table Container -->
+  <div class="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-sm overflow-hidden">
+    
+    <!-- Table -->
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm text-left">
+        
+        <!-- Header -->
+        <thead class="text-xs text-gray-700 dark:text-gray-300 uppercase bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+          <tr>
+            <!-- Checkbox Column -->
+            {% if config.settings.selectable %}
+            <th scope="col" class="w-12 px-4 py-3">
+              <input 
+                type="checkbox"
+                @change="toggleAll($event)"
+                :checked="allSelected"
+                class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 focus:ring-2 cursor-pointer">
+            </th>
+            {% endif %}
+            
+            <!-- Data Columns -->
+            {% for column in config.columns %}
+            <th scope="col" class="px-6 py-3 whitespace-nowrap">
+              {% if column.sortable %}
+              <a href="?{% if request.GET.search %}search={{ request.GET.search }}&{% endif %}sort={{ column.key }}&order={% if request.GET.sort == column.key and request.GET.order == 'asc' %}desc{% else %}asc{% endif %}"
+                 class="flex items-center gap-2 hover:text-blue-600 dark:hover:text-blue-400 transition">
+                {{ column.label }}
+                {% if request.GET.sort == column.key %}
+                  {% if request.GET.order == 'asc' %}
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                  </svg>
+                  {% else %}
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                  </svg>
+                  {% endif %}
+                {% else %}
+                <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path>
+                </svg>
+                {% endif %}
+              </a>
+              {% else %}
+              {{ column.label }}
+              {% endif %}
+            </th>
+            {% endfor %}
+          </tr>
+        </thead>
+
+        <!-- Body -->
+        <tbody>
+          {% if config.rows %}
+            {% for row in config.rows %}
+            <tr class="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+              
+              <!-- Checkbox -->
+              {% if config.settings.selectable %}
+              <td class="w-12 px-4 py-3">
+                <input 
+                  type="checkbox"
+                  :value="{{ row.id }}"
+                  @change="toggleRow({{ row.id }})"
+                  :checked="selectedRows.includes({{ row.id }})"
+                  class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 focus:ring-2 cursor-pointer">
+              </td>
+              {% endif %}
+
+              <!-- Data Cells -->
+              {% for column in config.columns %}
+              <td class="px-6 py-3 text-gray-900 dark:text-gray-100 whitespace-nowrap">
+                {% if column.type == 'link' and column.clickable %}
+                <a href="{% url config.settings.detail_url_name row.id %}" 
+                   class="text-blue-600 dark:text-blue-400 hover:underline font-medium">
+                  {{ row|get_item:column.key }}
+                </a>
+                {% elif column.type == 'badge' %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                  {% if column.badge_colors %}
+                    {% with status=row|get_item:column.key %}
+                      {% if status == 'active' %}bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200{% endif %}
+                      {% if status == 'inactive' %}bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200{% endif %}
+                      {% if status == 'deleted' %}bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200{% endif %}
+                    {% endwith %}
+                  {% else %}
+                    bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200
+                  {% endif %}">
+                  {{ row|get_item:column.key|capfirst }}
+                </span>
+                {% elif column.type == 'date' %}
+                {{ row|get_item:column.key|date:"Y-m-d H:i" }}
+                {% else %}
+                {{ row|get_item:column.key|default:"—" }}
+                {% endif %}
+              </td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          {% else %}
+            <!-- Empty State -->
+            <tr>
+              <td colspan="{{ config.columns|length|add:1 }}" class="px-6 py-12 text-center">
+                <div class="flex flex-col items-center justify-center text-gray-500 dark:text-gray-400">
+                  <svg class="w-16 h-16 mb-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                  </svg>
+                  <p class="text-lg font-medium mb-2">{{ config.settings.empty_message|default:"No data available" }}</p>
+                  {% if request.GET.search %}
+                  <a href="?" class="mt-2 text-blue-600 dark:text-blue-400 hover:underline text-sm">Clear search</a>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    {% if config.settings.paginate and page_obj %}
+    <div class="px-6 py-3 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
+      <div class="flex items-center justify-between">
+        
+        <!-- Info -->
+        <div class="text-sm text-gray-700 dark:text-gray-300">
+          Showing 
+          <span class="font-medium">{{ page_obj.start_index }}</span>
+          to 
+          <span class="font-medium">{{ page_obj.end_index }}</span>
+          of 
+          <span class="font-medium">{{ page_obj.paginator.count }}</span>
+          results
+        </div>
+
+        <!-- Page Numbers -->
+        <nav class="flex items-center gap-2">
+          {% if page_obj.has_previous %}
+          <a href="?page={{ page_obj.previous_page_number }}{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}{% if request.GET.sort %}&sort={{ request.GET.sort }}&order={{ request.GET.order }}{% endif %}"
+             class="px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 transition">
+            Previous
+          </a>
+          {% endif %}
+
+          {% for num in page_obj.paginator.page_range %}
+            {% if page_obj.number == num %}
+            <span class="px-3 py-1 text-sm font-medium text-white bg-blue-600 border border-blue-600 rounded">
+              {{ num }}
+            </span>
+            {% elif num > page_obj.number|add:'-3' and num < page_obj.number|add:'3' %}
+            <a href="?page={{ num }}{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}{% if request.GET.sort %}&sort={{ request.GET.sort }}&order={{ request.GET.order }}{% endif %}"
+               class="px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 transition">
+              {{ num }}
+            </a>
+            {% endif %}
+          {% endfor %}
+
+          {% if page_obj.has_next %}
+          <a href="?page={{ page_obj.next_page_number }}{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}{% if request.GET.sort %}&sort={{ request.GET.sort }}&order={{ request.GET.order }}{% endif %}"
+             class="px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 transition">
+            Next
+          </a>
+          {% endif %}
+        </nav>
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+
+<script>
+function tableComponent() {
+  return {
+    selectedRows: [],
+    allSelected: false,
+
+    toggleAll(event) {
+      if (event.target.checked) {
+        // Select all visible rows
+        this.selectedRows = [{% for row in config.rows %}{{ row.id }}{% if not forloop.last %},{% endif %}{% endfor %}];
+      } else {
+        this.selectedRows = [];
+      }
+      this.allSelected = event.target.checked;
+    },
+
+    toggleRow(rowId) {
+      const index = this.selectedRows.indexOf(rowId);
+      if (index > -1) {
+        this.selectedRows.splice(index, 1);
+      } else {
+        this.selectedRows.push(rowId);
+      }
+      
+      // Update "select all" state
+      const totalRows = {{ config.rows|length }};
+      this.allSelected = this.selectedRows.length === totalRows;
+    },
+
+    getSelectedRows() {
+      return this.selectedRows;
+    }
+  }
+}
+</script>

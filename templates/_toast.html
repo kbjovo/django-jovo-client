@@ -1,0 +1,32 @@
+<!-- templates/base/_toast.html -->
+<script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
+
+<script>
+    // Initialize Notyf
+    const notyf = new Notyf({
+        duration: 3000,
+        position: { x: 'right', y: 'top' },
+        dismissible: true,
+        ripple: true
+    });
+
+    // Global toast helper
+    window.showToast = function(type, message) {
+        if (type === 'success') notyf.success(message);
+        else if (type === 'error') notyf.error(message);
+        else if (type === 'warning') notyf.open({ type: 'warning', message });
+        else notyf.open({ type: 'info', message });
+    };
+    
+
+    // Global event listeners
+    document.body.addEventListener('clientCreated', () => notyf.success('Client created successfully!'));
+    document.body.addEventListener('clientUpdated', () => notyf.success('Client updated successfully!'));
+    document.body.addEventListener('clientDeleted', () => notyf.success('Client deleted successfully!'));
+    document.body.addEventListener('formError', () => notyf.error('Please fix the errors in the form'));
+
+
+
+
+</script>
+

@@ -1,0 +1,362 @@
+<!-- Basic Details Edit Mode -->
+<div x-data="basicDetailsForm()" @submit.prevent="validateAndSubmit">
+  <!-- Tab Header -->
+  <div class="mb-6">
+    <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Edit Basic Information</h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Update client details below</p>
+  </div>
+
+  <form 
+    method="post"
+    action="{% url 'client_update' client.pk %}"
+    hx-post="{% url 'client_update' client.pk %}"
+    hx-target="#basic-details-content"
+    hx-swap="innerHTML"
+    class="space-y-5">
+    {% csrf_token %}
+
+    <!-- Name & Email Row -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <!-- Name -->
+      <div>
+        <label for="id_name" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Name <span class="text-red-500">*</span>
+        </label>
+        <input 
+          type="text" 
+          name="name" 
+          id="id_name"
+          x-model="formData.name"
+          @blur="validateField('name')"
+          @input="errors.name = ''"
+          :class="errors.name ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+          value="{{ client.name }}">
+        <p x-show="errors.name" x-text="errors.name" class="mt-1 text-xs text-red-600"></p>
+      </div>
+
+      <!-- Email -->
+      <div>
+        <label for="id_email" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Email <span class="text-red-500">*</span>
+        </label>
+        <div class="relative">
+          <input 
+            type="email" 
+            name="email" 
+            id="id_email"
+            x-model="formData.email"
+            @blur="checkUnique('email')"
+            @input="errors.email = ''; success.email = false"
+            :class="{
+              'border-red-500 focus:ring-red-500': errors.email,
+              'border-green-500 focus:ring-green-500': success.email,
+              'border-gray-300 dark:border-gray-700 focus:ring-blue-500': !errors.email && !success.email
+            }"
+            class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+            value="{{ client.email }}">
+          
+          <span x-show="checking.email" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="animate-spin h-4 w-4 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          </span>
+          
+          <span x-show="success.email && !checking.email" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="h-4 w-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+          </span>
+        </div>
+        <p x-show="errors.email" x-text="errors.email" class="mt-1 text-xs text-red-600"></p>
+        <p x-show="success.email" class="mt-1 text-xs text-green-600">✓ Available</p>
+      </div>
+    </div>
+
+    <!-- Phone & Company Row -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <!-- Phone -->
+      <div>
+        <label for="id_phone" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Phone <span class="text-red-500">*</span>
+        </label>
+        <div class="relative">
+          <input 
+            type="text" 
+            name="phone" 
+            id="id_phone"
+            x-model="formData.phone"
+            @blur="checkUnique('phone')"
+            @input="errors.phone = ''; success.phone = false; formData.phone = formData.phone.replace(/[^0-9]/g, '')"
+            maxlength="10"
+            :class="{
+              'border-red-500 focus:ring-red-500': errors.phone,
+              'border-green-500 focus:ring-green-500': success.phone,
+              'border-gray-300 dark:border-gray-700 focus:ring-blue-500': !errors.phone && !success.phone
+            }"
+            class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+            value="{{ client.phone }}">
+          
+          <span x-show="checking.phone" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="animate-spin h-4 w-4 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          </span>
+          
+          <span x-show="success.phone && !checking.phone" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="h-4 w-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+          </span>
+        </div>
+        <p x-show="errors.phone" x-text="errors.phone" class="mt-1 text-xs text-red-600"></p>
+        <p x-show="success.phone" class="mt-1 text-xs text-green-600">✓ Available</p>
+      </div>
+
+      <!-- Company Name -->
+      <div>
+        <label for="id_company_name" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Company Name
+        </label>
+        <input 
+          type="text" 
+          name="company_name" 
+          id="id_company_name"
+          x-model="formData.company_name"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition"
+          value="{{ client.company_name }}">
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <div>
+        <label for="id_status" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Status
+        </label>
+        <select 
+          name="status" 
+          id="id_status"
+          x-model="formData.status"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition">
+          <option value="active" {% if client.status == 'active' %}selected{% endif %}>Active</option>
+          <option value="inactive" {% if client.status == 'inactive' %}selected{% endif %}>Inactive</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Address -->
+    <div>
+      <label for="id_address" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+        Address
+      </label>
+      <textarea 
+        name="address" 
+        id="id_address"
+        x-model="formData.address"
+        rows="2"
+        class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition">{{ client.address }}</textarea>
+    </div>
+
+    <!-- City, State, Country, Postal Code -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-5">
+      <div>
+        <label for="id_city" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          City
+        </label>
+        <input 
+          type="text" 
+          name="city" 
+          id="id_city"
+          x-model="formData.city"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition"
+          value="{{ client.city }}">
+      </div>
+
+      <div>
+        <label for="id_state" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          State
+        </label>
+        <input 
+          type="text" 
+          name="state" 
+          id="id_state"
+          x-model="formData.state"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition"
+          value="{{ client.state }}">
+      </div>
+
+      <div>
+        <label for="id_country" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Country
+        </label>
+        <input 
+          type="text" 
+          name="country" 
+          id="id_country"
+          x-model="formData.country"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition"
+          value="{{ client.country|default:'India' }}">
+      </div>
+
+      <div>
+        <label for="id_postal_code" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Postal Code
+        </label>
+        <input 
+          type="text" 
+          name="postal_code" 
+          id="id_postal_code"
+          x-model="formData.postal_code"
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition"
+          value="{{ client.postal_code }}">
+      </div>
+    </div>
+
+    <!-- Form Actions -->
+    <div class="flex items-center justify-end gap-3 pt-5 border-t border-gray-200 dark:border-gray-700">
+      <button 
+        type="button"
+        @click="editMode = false"
+        class="px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 font-medium transition">
+        Cancel
+      </button>
+      
+      <button 
+        type="submit" 
+        :disabled="!canSubmit"
+        :class="!canSubmit ? 'opacity-50 cursor-not-allowed bg-gray-400' : 'hover:bg-blue-700 bg-blue-600'"
+        class="px-5 py-2 text-sm text-white font-semibold rounded-lg shadow transition flex items-center gap-2">
+        <span x-show="isSubmitting">
+          <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+        </span>
+        <span x-text="isSubmitting ? 'Saving...' : 'Save Changes'"></span>
+      </button>
+    </div>
+  </form>
+
+  <!-- Alpine.js Script for this form -->
+  <script>
+  function basicDetailsForm() {
+    return {
+      formData: {
+        name: '{{ client.name }}',
+        email: '{{ client.email }}',
+        phone: '{{ client.phone }}',
+        company_name: '{{ client.company_name|default_if_none:"" }}',
+        status: '{{ client.status }}',
+        address: `{{ client.address|default_if_none:"" }}`,
+        city: '{{ client.city|default_if_none:"" }}',
+        state: '{{ client.state|default_if_none:"" }}',
+        country: '{{ client.country|default:"India" }}',
+        postal_code: '{{ client.postal_code|default_if_none:"" }}'
+      },
+      originalData: {},
+      errors: {
+        name: '',
+        email: '',
+        phone: ''
+      },
+      success: {
+        email: false,
+        phone: false
+      },
+      checking: {
+        email: false,
+        phone: false
+      },
+      isSubmitting: false,
+      clientId: '{{ client.pk }}',
+
+      init() {
+        this.originalData = JSON.parse(JSON.stringify(this.formData));
+      },
+
+      get hasChanges() {
+        return Object.keys(this.formData).some(key => {
+          return this.formData[key] !== this.originalData[key];
+        });
+      },
+
+      get hasErrors() {
+        return Object.values(this.errors).some(error => error !== '');
+      },
+
+      get canSubmit() {
+        const notChecking = !this.checking.email && !this.checking.phone;
+        return this.hasChanges && !this.hasErrors && notChecking && !this.isSubmitting;
+      },
+
+      async checkUnique(field) {
+        const value = this.formData[field].trim();
+        
+        if (!value) {
+          this.errors[field] = `${field.replace('_', ' ')} is required`;
+          this.success[field] = false;
+          return;
+        }
+
+        if (field === 'phone' && value.length !== 10) {
+          this.errors.phone = 'Phone number must be exactly 10 digits';
+          this.success.phone = false;
+          return;
+        }
+
+        this.checking[field] = true;
+        this.errors[field] = '';
+        this.success[field] = false;
+
+        try {
+          let url = `/api/check-client-unique/?field=${field}&value=${encodeURIComponent(value)}&client_id=${this.clientId}`;
+          const response = await fetch(url);
+          const data = await response.json();
+
+          if (!data.is_unique) {
+            this.errors[field] = data.message;
+            this.success[field] = false;
+          } else {
+            this.success[field] = true;
+          }
+        } catch (error) {
+          console.error('Validation error:', error);
+          this.success[field] = false;
+        } finally {
+          this.checking[field] = false;
+        }
+      },
+
+      validateField(field) {
+        this.errors[field] = '';
+
+        if (field === 'name') {
+          if (!this.formData.name.trim()) {
+            this.errors.name = 'Name is required';
+          } else if (this.formData.name.trim().length < 2) {
+            this.errors.name = 'Name must be at least 2 characters';
+          }
+        }
+      },
+
+      async validateAndSubmit(e) {
+        this.validateField('name');
+
+        if (this.errors.name || this.errors.email || this.errors.phone) {
+          const firstError = document.querySelector('.text-red-600');
+          if (firstError) {
+            firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+          return;
+        }
+
+        this.isSubmitting = true;
+        e.target.submit();
+      }
+    }
+  }
+  </script>
+</div>

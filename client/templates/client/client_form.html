@@ -1,0 +1,510 @@
+{% extends "index.html" %}
+
+{% block content %}
+<div id="client-detail-section" class="max-w-4xl mx-auto py-12 px-4" 
+     x-data="clientForm({{ is_update|yesno:'true,false' }}, {% if is_update %}'{{ client.pk }}'{% else %}null{% endif %})" 
+     @submit.prevent="validateAndSubmit">
+  
+  <div class="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-700 shadow-md rounded-2xl p-8">
+
+    <!-- Header -->
+    <div class="mb-8 text-center">
+      <h2 class="text-3xl font-bold text-gray-900 dark:text-white">
+        {% if is_update %}Edit Client{% else %}Add New Client{% endif %}
+      </h2>
+      <p class="text-gray-500 dark:text-gray-400 mt-2">
+        {% if is_update %}Update the client details{% else %}Fill in the details to create a new client{% endif %}
+      </p>
+    </div>
+
+    <!-- Success Message -->
+    <div x-show="showSuccess" 
+         x-transition
+         class="mb-6 p-4 bg-green-100 border border-green-400 text-green-700 rounded-lg">
+      Client {% if is_update %}updated{% else %}created{% endif %} successfully!
+    </div>
+
+    <form method="post" 
+          action="{% if is_update %}{% url 'client_update' client.pk %}{% else %}{% url 'client_add' %}{% endif %}"
+          {% if is_update %}
+          hx-post="{% url 'client_update' client.pk %}"
+          hx-select="#client-detail-section"
+          hx-target="#client-detail-section"
+          hx-swap="outerHTML"
+          {% endif %}
+          class="space-y-6">
+      {% csrf_token %}
+
+      <!-- Name -->
+      <div>
+        <label for="id_name" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Name <span class="text-red-500">*</span>
+        </label>
+        <input 
+          type="text" 
+          name="name" 
+          id="id_name"
+          x-model="formData.name"
+          @blur="validateField('name')"
+          @input="errors.name = ''"
+          :class="errors.name ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-blue-500'"
+          class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 focus:border-blue-500 outline-none transition"
+          value="{{ form.name.value|default:'' }}">
+        <p x-show="errors.name" x-text="errors.name" class="mt-1 text-sm text-red-600"></p>
+        {% if form.name.errors %}
+          <p class="mt-1 text-sm text-red-600">{{ form.name.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      <!-- Email -->
+      <div>
+        <label for="id_email" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Email <span class="text-red-500">*</span>
+        </label>
+        <div class="relative">
+          <input 
+            type="email" 
+            name="email" 
+            id="id_email"
+            x-model="formData.email"
+            @blur="checkUnique('email')"
+            @input="errors.email = ''; success.email = false"
+            :class="{
+              'border-red-500 focus:ring-red-500': errors.email,
+              'border-green-500 focus:ring-green-500': success.email,
+              'border-gray-300 dark:border-gray-700 focus:ring-blue-500': !errors.email && !success.email
+            }"
+            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+            value="{{ form.email.value|default:'' }}">
+          
+          <!-- Loading spinner -->
+          <span x-show="checking.email" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="animate-spin h-5 w-5 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          </span>
+          
+          <!-- Success checkmark -->
+          <span x-show="success.email && !checking.email" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+          </span>
+        </div>
+        <p x-show="errors.email" x-text="errors.email" class="mt-1 text-sm text-red-600"></p>
+        <p x-show="success.email" class="mt-1 text-sm text-green-600">✓ This email is available</p>
+        {% if form.email.errors %}
+          <p class="mt-1 text-sm text-red-600">{{ form.email.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+
+      <!-- Phone -->
+      <div>
+        <label for="id_phone" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Phone <span class="text-red-500">*</span>
+        </label>
+        <div class="relative">
+          <input 
+            type="text" 
+            name="phone" 
+            id="id_phone"
+            x-model="formData.phone"
+            @blur="checkUnique('phone')"
+            @input="errors.phone = ''; success.phone = false; formData.phone = formData.phone.replace(/[^0-9]/g, '')"
+            maxlength="10"
+            :class="{
+              'border-red-500 focus:ring-red-500': errors.phone,
+              'border-green-500 focus:ring-green-500': success.phone,
+              'border-gray-300 dark:border-gray-700 focus:ring-blue-500': !errors.phone && !success.phone
+            }"
+            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+            value="{{ form.phone.value|default:'' }}">
+          
+          <!-- Loading spinner -->
+          <span x-show="checking.phone" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="animate-spin h-5 w-5 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          </span>
+          
+          <!-- Success checkmark -->
+          <span x-show="success.phone && !checking.phone" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+          </span>
+        </div>
+        <p x-show="errors.phone" x-text="errors.phone" class="mt-1 text-sm text-red-600"></p>
+        <p x-show="success.phone" class="mt-1 text-sm text-green-600">✓ This phone number is available</p>
+        {% if form.phone.errors %}
+          <p class="mt-1 text-sm text-red-600">{{ form.phone.errors.0 }}</p>
+        {% endif %}
+      </div>
+      
+
+      <!-- Database Name (only show in add form) -->
+      {% if not is_update %}
+      <div>
+        <label for="id_db_name" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Database Name <span class="text-red-500">*</span>
+        </label>
+        <div class="relative">
+          <input 
+            type="text" 
+            name="db_name" 
+            id="id_db_name"
+            x-model="formData.db_name"
+            @blur="checkUnique('db_name')"
+            @input="errors.db_name = ''; success.db_name = false; formData.db_name = formData.db_name.toLowerCase().replace(/[^a-z0-9_]/g, '')"
+            maxlength="20"
+            :class="{
+              'border-red-500 focus:ring-red-500': errors.db_name,
+              'border-green-500 focus:ring-green-500': success.db_name,
+              'border-gray-300 dark:border-gray-700 focus:ring-blue-500': !errors.db_name && !success.db_name
+            }"
+            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+            value="{{ form.db_name.value|default:'' }}"
+            placeholder="e.g., client_db_2024">
+          
+          <!-- Loading spinner -->
+          <span x-show="checking.db_name" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="animate-spin h-5 w-5 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          </span>
+          
+          <!-- Success checkmark -->
+          <span x-show="success.db_name && !checking.db_name" class="absolute right-3 top-1/2 transform -translate-y-1/2">
+            <svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+          </span>
+        </div>
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Only lowercase letters, numbers, and underscores allowed</p>
+        <p x-show="errors.db_name" x-text="errors.db_name" class="mt-1 text-sm text-red-600"></p>
+        <p x-show="success.db_name" class="mt-1 text-sm text-green-600">✓ This database name is available</p>
+        {% if form.db_name.errors %}
+          <p class="mt-1 text-sm text-red-600">{{ form.db_name.errors.0 }}</p>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Company Name -->
+      <div>
+        <label for="id_company_name" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Company Name
+        </label>
+        <input 
+          type="text" 
+          name="company_name" 
+          id="id_company_name"
+          x-model="formData.company_name"
+          class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+          value="{{ form.company_name.value|default:'' }}">
+      </div>
+
+    <div>
+      <label for="id_client_status" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Status
+      </label>
+      <select 
+        name="status" 
+        id="id_client_status"
+        x-model="formData.status"
+        class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+      >
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+      </select>
+    </div>
+
+
+      <!-- Address -->
+      <div>
+        <label for="id_address" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Address
+        </label>
+        <textarea 
+          name="address" 
+          id="id_address"
+          x-model="formData.address"
+          rows="3"
+          class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition">{{ form.address.value|default:'' }}</textarea>
+      </div>
+
+      <!-- City / State / Country / Postal Code -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- City -->
+        <div>
+          <label for="id_city" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+            City
+          </label>
+          <input 
+            type="text" 
+            name="city" 
+            id="id_city"
+            x-model="formData.city"
+            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+            value="{{ form.city.value|default:'' }}">
+        </div>
+
+        <!-- State -->
+        <div>
+          <label for="id_state" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+            State
+          </label>
+          <input 
+            type="text" 
+            name="state" 
+            id="id_state"
+            x-model="formData.state"
+            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+            value="{{ form.state.value|default:'' }}">
+        </div>
+
+        <!-- Country -->
+        <div>
+          <label for="id_country" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+            Country
+          </label>
+          <input 
+            type="text" 
+            name="country" 
+            id="id_country"
+            x-model="formData.country"
+            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+            value="{{ form.country.value|default:'India' }}">
+        </div>
+
+        <!-- Postal Code -->
+        <div>
+          <label for="id_postal_code" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+            Postal Code
+          </label>
+          <input 
+            type="text" 
+            name="postal_code" 
+            id="id_postal_code"
+            x-model="formData.postal_code"
+            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+            value="{{ form.postal_code.value|default:'' }}">
+        </div>
+      </div>
+
+      <!-- Form Actions -->
+      <div class="flex items-center justify-end gap-4 pt-6 border-t border-gray-200 dark:border-gray-700">
+        {% if is_update %}
+        <button 
+          type="button"
+          hx-get="{% url 'client_detail' client.pk %}"
+          hx-select="#client-detail-section"
+          hx-target="#client-detail-section"
+          hx-swap="outerHTML"
+          class="px-5 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 font-medium transition">
+          Cancel
+        </button>
+        {% else %}
+        <a href="{% url 'main-dashboard' %}" class="px-5 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 font-medium transition">
+          Cancel
+        </a>
+        {% endif %}
+        
+        <button 
+          type="submit" 
+          :disabled="!canSubmit"
+          :class="!canSubmit ? 'opacity-50 cursor-not-allowed bg-gray-400' : 'hover:bg-blue-700 bg-blue-600'"
+          class="px-6 py-2 text-white font-semibold rounded-lg shadow focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-800 transition flex items-center gap-2">
+          <span x-show="isSubmitting">
+            <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          </span>
+          <span x-text="isSubmitting ? '{% if is_update %}Updating...{% else %}Creating...{% endif %}' : '{% if is_update %}Update Client{% else %}Create Client{% endif %}'"></span>
+        </button>
+
+      </div>
+
+    </form>
+  </div>
+
+  <!-- IMPORTANT: Script must be INSIDE the div that gets extracted -->
+  <script>
+  function clientForm(isUpdate = false, clientId = null) {
+  return {
+    formData: {
+      name: '{{ form.name.value|default_if_none:"" }}',
+      email: '{{ form.email.value|default_if_none:"" }}',
+      phone: '{{ form.phone.value|default_if_none:"" }}',
+      db_name: '{{ form.db_name.value|default_if_none:"" }}',
+      company_name: '{{ form.company_name.value|default_if_none:"" }}',
+      address: `{{ form.address.value|default_if_none:"" }}`,
+      city: '{{ form.city.value|default_if_none:"" }}',
+      state: '{{ form.state.value|default_if_none:"" }}',
+      status: '{{ form.status.value|default_if_none:"" }}',
+      country: '{{ form.country.value|default_if_none:"India" }}',
+      postal_code: '{{ form.postal_code.value|default_if_none:"" }}'
+    },
+    originalData: {},  
+    errors: {
+      name: '',
+      email: '',
+      phone: '',
+      db_name: '',
+    },
+    success: {  
+      email: false,
+      phone: false,
+      db_name: false
+    },
+    checking: {
+      phone: false,
+      email: false,
+      db_name: false
+    },
+    isSubmitting: false,
+    showSuccess: false,
+    isUpdate: isUpdate,
+    clientId: clientId,
+
+    init() {  // NEW: Initialize original data
+      if (this.isUpdate) {
+        this.originalData = JSON.parse(JSON.stringify(this.formData));
+      }
+    },
+
+    get hasChanges() {  // NEW: Check if any field changed
+      if (!this.isUpdate) return true; // Always allow submit for create
+      
+      return Object.keys(this.formData).some(key => {
+        return this.formData[key] !== this.originalData[key];
+      });
+    },
+
+    get hasErrors() {  // NEW: Check if any errors exist
+      return Object.values(this.errors).some(error => error !== '');
+    },
+
+    get canSubmit() {
+      const notChecking = !this.checking.email && !this.checking.phone && !this.checking.db_name;
+      return this.hasChanges && !this.hasErrors && notChecking && !this.isSubmitting;
+    },
+
+    async checkUnique(field) {
+      const value = this.formData[field].trim();
+      
+      if (!value) {
+        this.errors[field] = `${field.replace('_', ' ')} is required`;
+        this.success[field] = false;
+        return;
+      }
+
+      // Validate phone format before checking uniqueness
+      if (field === 'phone') {
+        if (value.length !== 10) {
+          this.errors.phone = 'Phone number must be exactly 10 digits';
+          this.success.phone = false;
+          return;
+        }
+      }
+
+      this.checking[field] = true;
+      this.errors[field] = '';
+      this.success[field] = false;
+
+      try {
+        let url = `/api/check-client-unique/?field=${field}&value=${encodeURIComponent(value)}`;
+        if (this.clientId) {
+          url += `&client_id=${this.clientId}`;
+        }
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (!data.is_unique) {
+          this.errors[field] = data.message;
+          this.success[field] = false;
+        } else {
+          this.success[field] = true;  // Mark as successful
+        }
+      } catch (error) {
+        console.error('Validation error:', error);
+        this.success[field] = false;
+      } finally {
+        this.checking[field] = false;
+      }
+    },
+
+    validateField(field) {
+      this.errors[field] = '';
+
+      if (field === 'name') {
+        if (!this.formData.name.trim()) {
+          this.errors.name = 'Name is required';
+        } else if (this.formData.name.trim().length < 2) {
+          this.errors.name = 'Name must be at least 2 characters';
+        }
+      }
+
+      if (field === 'email') {
+        if (!this.formData.email.trim()) {
+          this.errors.email = 'Email is required';
+        } else if (!this.isValidEmail(this.formData.email)) {
+          this.errors.email = 'Please enter a valid email address';
+        }
+      }
+
+      if (field === 'phone') {
+        if (!this.formData.phone.trim()) {
+          this.errors.phone = 'Phone number is required';
+        } else if (this.formData.phone.length !== 10) {
+          this.errors.phone = 'Phone number must be exactly 10 digits';
+        }
+      }
+
+      if (field === 'db_name') {
+        if (!this.formData.db_name.trim()) {
+          this.errors.db_name = 'Database name is required';
+        } else if (!/^[a-z0-9_]+$/.test(this.formData.db_name)) {
+          this.errors.db_name = 'Only lowercase letters, numbers, and underscores allowed';
+        }
+      }
+    },
+
+    isValidEmail(email) {
+      const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      return re.test(email);
+    },
+
+    async validateAndSubmit(e) {
+      // Validate all required fields
+      this.validateField('name');
+      this.validateField('email');
+      this.validateField('phone');
+      
+      if (!this.isUpdate) {
+        this.validateField('db_name');
+      }
+
+      // Check if there are any errors
+      if (this.errors.name || this.errors.email || this.errors.phone || this.errors.db_name) {
+        const firstError = document.querySelector('.text-red-600');
+        if (firstError) {
+          firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        return;
+      }
+
+      this.isSubmitting = true;
+      e.target.submit();
+    }
+  }
+  }
+  </script>
+
+</div>
+{% endblock %}
