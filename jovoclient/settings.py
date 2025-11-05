@@ -12,7 +12,11 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import pymysql
+import os
 pymysql.install_as_MySQLdb()
+from dotenv import load_dotenv
+
+load_dotenv(".env")
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -104,11 +108,11 @@ WSGI_APPLICATION = 'jovoclient.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'client',
-        'USER': 'jovo_test',
-        'PASSWORD': 'root',
-        'HOST': 'localhost', 
-        'PORT': '3306', 
+        'NAME': os.getenv('DB_NAME', 'client'),
+        'USER': os.getenv('DB_USER', ''),
+        'PASSWORD': os.getenv('DB_PASSWORD', ''),
+        'HOST': os.getenv('DB_HOST', 'localhost'),
+        'PORT': os.getenv('DB_PORT', '3306'),
         'CONN_MAX_AGE': 600,
     }
 }
@@ -152,7 +156,8 @@ STATIC_URL = 'static/'
 
 TAILWIND_APP_NAME = 'theme'
 
-NPM_BIN_PATH = "/usr/bin/npm"
+NPM_BIN_PATH = "/mnt/c/Program Files/nodejs//npm"
+
 
 
 
@@ -164,3 +169,59 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Database password encryption key (symmetric encryption)
 # TODO: Move this to environment variable in production
 DB_PASSWORD_ENCRYPTION_KEY = 'your-32-byte-encryption-key-change-this-in-production!!'
+
+
+# Email Configuration
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'  # Your SMTP server
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'jovo@kaybeebio.com'
+EMAIL_HOST_PASSWORD = 'dchj gcgb hbgh xraf'
+DEFAULT_FROM_EMAIL = 'noreply@yourcompany.com'
+
+# Admin emails for error notifications
+ADMINS = [
+    ('Admin', 'jovo@kaybeebio.com'),
+    ('Dev Team', 'dev@example.com'),
+]
+
+# Environment identifier
+ENVIRONMENT = 'development'  # or 'staging', 'production'
+
+
+
+
+# Logging
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': 'logs/replication.log',
+            'formatter': 'verbose',
+        },
+        'console': {
+            'level': 'DEBUG',
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'client.utils': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+
+

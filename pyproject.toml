@@ -1,22 +1,19 @@
-[tool.poetry]
+[project]
 name = "django-jovo-client"
 version = "0.1.0"
-description = ""
-authors = ["Your Name <you@example.com>"]
+description = "Add your description here"
 readme = "README.md"
-
-[tool.poetry.dependencies]
-python = "3.14.0"
-django = "^5.2.7"
-django-tailwind = {extras = ["reload"], version = "^4.2.0"}
-django-cotton = "^2.1.3"
-mysqlclient = "^2.2.7"
-sqlalchemy = "^2.0.44"
-pymysql = "^1.1.2"
-psycopg2-binary = "^2.9.11"
-oracledb = "^3.4.0"
-
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires-python = ">=3.14.0"
+dependencies = [
+    "confluent-kafka>=2.12.1",
+    "cookiecutter>=2.6.0",
+    "django==5.2.7",
+    "django-cotton==2.1.3",
+    "django-tailwind[cookiecutter,honcho,reload]==4.2.0",
+    "honcho>=2.0.0",
+    "oracledb==3.4.0",
+    "psycopg2-binary==2.9.11",
+    "pymysql==1.1.2",
+    "python-dotenv>=1.2.1",
+    "sqlalchemy==2.0.44",
+]
