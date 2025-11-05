@@ -1,4 +1,5 @@
-from .models import Client, ClientDatabase
+from client.models.client import Client
+from client.models.database import ClientDatabase
 from django import forms
 
 

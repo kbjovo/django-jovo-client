@@ -1,6 +1,8 @@
 # Python
 __pycache__/
 *.py[cod]
+**/__pycache__/
+**/*.pyc
 *.pyo
 *.pyd
 *.so
@@ -56,3 +58,6 @@ build/
 
 # Ignore Claude config folder
 .claude/
+
+theme/static/css/dist/
+node_modules/

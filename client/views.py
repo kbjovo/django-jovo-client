@@ -1,6 +1,7 @@
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import HttpResponse
-from .models import Client, ClientDatabase
+from client.models.client import Client
+from client.models.database import ClientDatabase
 from .forms import ClientForm, ClientDatabaseForm
 from django.views.generic import ListView, DetailView, CreateView, UpdateView, DeleteView, View
 from django.urls import reverse_lazy, reverse

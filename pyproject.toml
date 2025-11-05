@@ -6,7 +6,7 @@ authors = ["Your Name <you@example.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "3.13.7"
+python = "3.14.0"
 django = "^5.2.7"
 django-tailwind = {extras = ["reload"], version = "^4.2.0"}
 django-cotton = "^2.1.3"
