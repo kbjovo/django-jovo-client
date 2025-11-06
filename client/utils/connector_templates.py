@@ -59,13 +59,18 @@ def get_mysql_connector_config(
     """
     connector_name = generate_connector_name(client, db_config)
     
+    hostname = db_config.host
+    if hostname in ['localhost', '127.0.0.1'] and db_config.port == 3306:
+        # If localhost, assume it's the Docker MySQL
+        hostname = 'mysql_wsl'
+        
     # Base configuration
     config = {
         # Connector class
         "connector.class": "io.debezium.connector.mysql.MySqlConnector",
         
         # Database connection
-        "database.hostname": db_config.host,
+        "database.hostname": hostname,
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
