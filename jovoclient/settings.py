@@ -156,7 +156,7 @@ STATIC_URL = 'static/'
 
 TAILWIND_APP_NAME = 'theme'
 
-NPM_BIN_PATH = "/mnt/c/Program Files/nodejs//npm"
+NPM_BIN_PATH = "/usr/local/bin/npm"
 
 
 

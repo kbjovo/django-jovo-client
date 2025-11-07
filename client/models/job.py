@@ -189,7 +189,7 @@ class SchemaVersion(models.Model):
     )
     
     class Meta:
-        db_name = 'schema_versions'
+        db_table = 'schema_versions'
         verbose_name = "Schema Version"
         verbose_name_plural = "Schema Versions"
         unique_together = [['table_mapping', 'version']]

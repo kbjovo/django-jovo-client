@@ -4,8 +4,10 @@ Debezium Connector Configuration Templates
 
 import logging
 from typing import Dict, List, Optional, Any, Tuple
-from client.models.database import ClientDatabase, Client
-from client.models.replication import ReplicationConfig
+from client.models.client import Client
+from client.models.database import ClientDatabase
+from client.models.job import ReplicationConfig
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ def get_mysql_connector_config(
     tables_whitelist: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
+    use_docker_internal_host: bool = True,
 ) -> Dict[str, Any]:
     """
     Generate MySQL Debezium connector configuration
@@ -53,19 +56,30 @@ def get_mysql_connector_config(
         tables_whitelist: List of tables to replicate (e.g., ['users', 'orders'])
         kafka_bootstrap_servers: Kafka bootstrap servers
         schema_registry_url: Schema registry URL
+        use_docker_internal_host: Use Docker internal hostname (default: True)
         
     Returns:
         Dict[str, Any]: Connector configuration
     """
     connector_name = generate_connector_name(client, db_config)
     
+    # Convert localhost/127.0.0.1 to Docker internal hostname for Debezium
+    db_host = db_config.host
+    if use_docker_internal_host:
+        if db_host in ['localhost', '127.0.0.1']:
+            db_host = 'mysql'  # Docker service name
+            logger.info(f"Converting {db_config.host} to 'mysql' for Docker internal connection")
+        elif db_host == 'mysql_wsl':
+            db_host = 'mysql'  # Use hostname instead of container name
+            logger.info(f"Converting {db_config.host} to 'mysql' for Docker internal connection")
+    
     # Base configuration
     config = {
         # Connector class
         "connector.class": "io.debezium.connector.mysql.MySqlConnector",
         
-        # Database connection
-        "database.hostname": db_config.host,
+        # Database connection - use Docker internal hostname
+        "database.hostname": db_host,
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
@@ -76,10 +90,11 @@ def get_mysql_connector_config(
         "database.server.name": connector_name.replace('_connector', ''),
         
         # Topic prefix (this will be used in Kafka topic names)
+        # Format: client_{id}.{source_db}.{table}
         "topic.prefix": f"client_{client.id}",
         
-        # Schema history (uses Kafka topic to track schema changes)
-        "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        # Kafka internal addresses (for Debezium inside Docker)
+        "schema.history.internal.kafka.bootstrap.servers": "kafka:29092",  # Docker internal
         "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",
         
         # Snapshot mode

@@ -10,7 +10,7 @@ from .database_utils import (
     get_table_schema,
     create_client_database,
     check_binary_logging,
-    get_database_size
+    get_database_size,
 )
 
 from .debezium_manager import (
@@ -34,6 +34,11 @@ from .notification_utils import (
     send_error_notification,
     send_replication_status_email,
     log_and_notify_error,
+)
+
+from .kafka_consumer import (
+    DebeziumCDCConsumer,
+    KafkaConsumerException,
 )
 
 __all__ = [
@@ -66,4 +71,8 @@ __all__ = [
     'send_error_notification',
     'send_replication_status_email',
     'log_and_notify_error',
+    
+    # Kafka Consumer
+    'DebeziumCDCConsumer',
+    'KafkaConsumerException',
 ]

@@ -31,6 +31,7 @@ try:
             print(f"DELETE: {before}")
         elif op == 'r': # snapshot
             print(f"SNAPSHOT: {after}")
+            
 
 finally:
     consumer.close()
