@@ -104,14 +104,13 @@ WSGI_APPLICATION = 'jovoclient.wsgi.application'
 
 
 
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
         'NAME': os.getenv('DB_NAME', 'client'),
-        'USER': os.getenv('DB_USER', ''),
+        'USER': os.getenv('DB_USER', 'root'),
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
-        'HOST': os.getenv('DB_HOST', 'localhost'),
+        'HOST': os.getenv('DB_HOST'),
         'PORT': os.getenv('DB_PORT', '3306'),
         'CONN_MAX_AGE': 600,
     }
@@ -225,3 +224,9 @@ LOGGING = {
 }
 
 
+
+
+import pprint
+
+print("🔧 DATABASE CONFIGURATION:")
+pprint.pprint(DATABASES)

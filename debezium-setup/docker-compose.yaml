@@ -173,6 +173,10 @@ services:
     environment:
       BOOTSTRAP_SERVERS: kafka:29092
       GROUP_ID: debezium-cluster
+      REST_HOST_NAME: 0.0.0.0
+      REST_PORT: 8083
+      ADVERTISED_HOST_NAME: kafka-connect
+      ADVERTISED_PORT: 8083
       CONFIG_STORAGE_TOPIC: debezium_connect_configs
       OFFSET_STORAGE_TOPIC: debezium_connect_offsets
       STATUS_STORAGE_TOPIC: debezium_connect_statuses
@@ -187,6 +191,9 @@ services:
       INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_PLUGIN_PATH: /kafka/connect,/usr/share/java,/usr/share/confluent-hub-components
+      OFFSET_FLUSH_INTERVAL_MS: 60000
+      OFFSET_FLUSH_TIMEOUT_MS: 5000
       LOG_LEVEL: INFO
       CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
       CONNECT_LOG4J_LOGGERS: org.apache.kafka.connect.runtime.rest=WARN,org.reflections=ERROR
