@@ -3,365 +3,266 @@
 
 {% block title %}Configure CDC Tables - {{ client.name }}{% endblock %}
 
-{% block extra_css %}
-<style>
-    .table-card {
-        border: 1px solid #e0e0e0;
-        border-radius: 8px;
-        margin-bottom: 20px;
-        overflow: hidden;
-    }
-    .table-card-header {
-        background: #f8f9fa;
-        padding: 15px 20px;
-        border-bottom: 1px solid #e0e0e0;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    .table-card-body {
-        padding: 20px;
-    }
-    .sync-type-selector {
-        display: flex;
-        gap: 10px;
-        margin-bottom: 20px;
-    }
-    .sync-type-option {
-        flex: 1;
-        padding: 15px;
-        border: 2px solid #e0e0e0;
-        border-radius: 8px;
-        cursor: pointer;
-        transition: all 0.3s;
-        text-align: center;
-    }
-    .sync-type-option input[type="radio"] {
-        display: none;
-    }
-    .sync-type-option:hover {
-        border-color: #007bff;
-        background: #f8f9ff;
-    }
-    .sync-type-option input[type="radio"]:checked + label {
-        border-color: #007bff;
-        background: #e7f1ff;
-    }
-    .sync-type-option label {
-        cursor: pointer;
-        margin: 0;
-        font-weight: 500;
-    }
-    .sync-type-description {
-        font-size: 0.875rem;
-        color: #6c757d;
-        margin-top: 5px;
-    }
-    .incremental-config {
-        background: #f8f9fa;
-        padding: 15px;
-        border-radius: 6px;
-        margin-top: 15px;
-        display: none;
-    }
-    .incremental-config.active {
-        display: block;
-    }
-    .column-badge {
-        display: inline-block;
-        padding: 4px 8px;
-        background: #e9ecef;
-        border-radius: 4px;
-        font-size: 0.875rem;
-        margin-right: 5px;
-        margin-bottom: 5px;
-    }
-    .column-badge.primary-key {
-        background: #ffc107;
-        color: #000;
-    }
-    .table-info {
-        display: flex;
-        gap: 20px;
-        font-size: 0.875rem;
-        color: #6c757d;
-    }
-    .progress-steps {
-        display: flex;
-        justify-content: center;
-        margin-bottom: 30px;
-    }
-    .step {
-        display: flex;
-        align-items: center;
-        position: relative;
-    }
-    .step-number {
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-        background: #e9ecef;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: bold;
-        margin-right: 10px;
-    }
-    .step.completed .step-number {
-        background: #28a745;
-        color: white;
-    }
-    .step.active .step-number {
-        background: #007bff;
-        color: white;
-    }
-    .step-connector {
-        width: 100px;
-        height: 2px;
-        background: #e9ecef;
-        margin: 0 10px;
-    }
-    .step.completed .step-connector {
-        background: #28a745;
-    }
-</style>
-{% endblock %}
-
 {% block content %}
-<div class="container-fluid mt-4">
-    <div class="row">
-        <div class="col-12">
-            <!-- Breadcrumb -->
-            <nav aria-label="breadcrumb">
-                <ol class="breadcrumb">
-                    <li class="breadcrumb-item"><a href="{% url 'client_detail' client.pk %}">{{ client.name }}</a></li>
-                    <li class="breadcrumb-item"><a href="{% url 'cdc_dashboard' client.pk %}">CDC Dashboard</a></li>
-                    <li class="breadcrumb-item active">Configure Tables</li>
-                </ol>
-            </nav>
-
-            <!-- Progress Steps -->
-            <div class="progress-steps mb-4">
-                <div class="step completed">
-                    <div class="step-number">1</div>
-                    <span>Discover Tables</span>
-                </div>
-                <div class="step-connector"></div>
-                <div class="step active">
-                    <div class="step-number">2</div>
-                    <span>Configure Tables</span>
-                </div>
-                <div class="step-connector"></div>
-                <div class="step">
-                    <div class="step-number">3</div>
-                    <span>Create Connector</span>
-                </div>
-            </div>
-
-            <!-- Page Header -->
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <div>
-                    <h2>Configure CDC Tables</h2>
-                    <p class="text-muted mb-0">
-                        Configure sync type and incremental columns for {{ tables|length }} selected table{{ tables|length|pluralize }}
-                    </p>
-                </div>
-            </div>
-
-            <!-- Configuration Form -->
-            <form method="POST" id="configureTablesForm">
-                {% csrf_token %}
-
-                <!-- Global Sync Type (Optional) -->
-                <div class="card mb-4">
-                    <div class="card-body">
-                        <h5 class="card-title">Default Sync Type</h5>
-                        <p class="text-muted">Select a default sync type for all tables (can be overridden per table)</p>
-                        <select class="form-control" id="globalSyncType" style="max-width: 300px;">
-                            <option value="">-- Set individually --</option>
-                            <option value="realtime">Real-time CDC</option>
-                            <option value="incremental">Incremental</option>
-                            <option value="full">Full Refresh</option>
-                        </select>
-                    </div>
-                </div>
-
-                <!-- Table Configuration Cards -->
-                {% for table in tables %}
-                <div class="table-card">
-                    <div class="table-card-header">
-                        <div>
-                            <h5 class="mb-1">{{ table.name }}</h5>
-                            <div class="table-info">
-                                <span>📊 {{ table.columns|length }} columns</span>
-                                {% if table.primary_keys %}
-                                <span>🔑 Primary Key: {{ table.primary_keys|join:", " }}</span>
-                                {% endif %}
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="table-card-body">
-                        <!-- Sync Type Selection -->
-                        <div class="sync-type-selector">
-                            <div class="sync-type-option">
-                                <input type="radio" 
-                                       id="realtime_{{ table.name }}" 
-                                       name="sync_type_{{ table.name }}" 
-                                       value="realtime"
-                                       checked>
-                                <label for="realtime_{{ table.name }}">
-                                    <div>🔄 Real-time CDC</div>
-                                    <div class="sync-type-description">Capture changes as they happen</div>
-                                </label>
-                            </div>
-                            
-                            <div class="sync-type-option">
-                                <input type="radio" 
-                                       id="incremental_{{ table.name }}" 
-                                       name="sync_type_{{ table.name }}" 
-                                       value="incremental">
-                                <label for="incremental_{{ table.name }}">
-                                    <div>📈 Incremental</div>
-                                    <div class="sync-type-description">Sync new/updated records only</div>
-                                </label>
-                            </div>
-                            
-                            <div class="sync-type-option">
-                                <input type="radio" 
-                                       id="full_{{ table.name }}" 
-                                       name="sync_type_{{ table.name }}" 
-                                       value="full">
-                                <label for="full_{{ table.name }}">
-                                    <div>🔃 Full Refresh</div>
-                                    <div class="sync-type-description">Replace all data on each sync</div>
-                                </label>
-                            </div>
-                        </div>
-
-                        <!-- Incremental Column Configuration -->
-                        <div class="incremental-config" id="incremental_config_{{ table.name }}">
-                            <label class="font-weight-bold">Select Incremental Column:</label>
-                            <select class="form-control mt-2" name="incremental_col_{{ table.name }}">
-                                <option value="">-- Select a column --</option>
-                                {% for col in table.incremental_candidates %}
-                                <option value="{{ col.name }}">
-                                    {{ col.name }} ({{ col.type }})
-                                    {% if col.name in table.primary_keys %}🔑{% endif %}
-                                </option>
-                                {% endfor %}
-                            </select>
-                            <small class="form-text text-muted mt-1">
-                                Choose a timestamp or auto-incrementing column to track changes
-                            </small>
-                        </div>
-
-                        <!-- Column Preview -->
-                        <div class="mt-3">
-                            <button type="button" 
-                                    class="btn btn-sm btn-outline-secondary" 
-                                    data-toggle="collapse" 
-                                    data-target="#columns_{{ table.name }}">
-                                👁️ View Columns ({{ table.columns|length }})
-                            </button>
-                            <div class="collapse mt-2" id="columns_{{ table.name }}">
-                                <div class="p-3" style="background: #f8f9fa; border-radius: 6px;">
-                                    {% for col in table.columns %}
-                                    <span class="column-badge {% if col.name in table.primary_keys %}primary-key{% endif %}">
-                                        {{ col.name }}
-                                        <small class="text-muted">({{ col.type }})</small>
-                                    </span>
-                                    {% endfor %}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                {% endfor %}
-
-                <!-- Action Buttons -->
-                <div class="card">
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between">
-                            <a href="{% url 'cdc_discover_tables' db_config.pk %}" class="btn btn-outline-secondary">
-                                ← Back to Table Selection
-                            </a>
-                            <button type="submit" class="btn btn-primary btn-lg">
-                                Continue to Connector Setup →
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </form>
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  
+  <!-- Progress Steps -->
+  <div class="mb-8">
+    <div class="flex items-center justify-center">
+      <div class="flex items-center">
+        <!-- Step 1: Completed -->
+        <div class="flex items-center">
+          <div class="flex items-center justify-center w-10 h-10 rounded-full bg-green-600 text-white font-semibold">
+            ✓
+          </div>
+          <span class="ml-2 text-sm font-medium text-green-600">Discover Tables</span>
         </div>
+        
+        <div class="w-16 h-0.5 mx-4 bg-green-600"></div>
+        
+        <!-- Step 2: Active -->
+        <div class="flex items-center">
+          <div class="flex items-center justify-center w-10 h-10 rounded-full bg-blue-600 text-white font-semibold">
+            2
+          </div>
+          <span class="ml-2 text-sm font-medium text-blue-600">Configure</span>
+        </div>
+        
+        <div class="w-16 h-0.5 mx-4 bg-gray-300"></div>
+        
+        <!-- Step 3: Pending -->
+        <div class="flex items-center">
+          <div class="flex items-center justify-center w-10 h-10 rounded-full bg-gray-300 text-gray-600 font-semibold">
+            3
+          </div>
+          <span class="ml-2 text-sm font-medium text-gray-500">Create Connector</span>
+        </div>
+      </div>
     </div>
-</div>
-{% endblock %}
+  </div>
 
-{% block extra_js %}
+  <!-- Header -->
+  <div class="text-center mb-8">
+    <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Configure Tables</h1>
+    <p class="text-gray-600 dark:text-gray-400 mt-2">
+      Configure sync type and incremental columns for {{ tables|length }} selected table{{ tables|length|pluralize }}
+    </p>
+  </div>
+
+  <!-- Global Sync Type -->
+  <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 p-6">
+    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Default Sync Type</h3>
+    <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+      Apply a default sync type to all tables (can be overridden individually)
+    </p>
+    <select id="globalSyncType" class="max-w-xs px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+      <option value="">-- Set individually --</option>
+      <option value="realtime">Real-time CDC</option>
+      <option value="incremental">Incremental</option>
+      <option value="full">Full Refresh</option>
+    </select>
+  </div>
+
+  <!-- Configuration Form -->
+  <form method="POST" id="configureTablesForm">
+    {% csrf_token %}
+
+    <!-- Table Configuration Cards -->
+    <div class="space-y-6 mb-6">
+      {% for table in tables %}
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+        <!-- Card Header -->
+        <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-lg font-semibold text-gray-900 dark:text-white font-mono">
+                {{ table.name }}
+              </h3>
+              <div class="flex items-center gap-4 mt-1 text-sm text-gray-600 dark:text-gray-400">
+                <span>📊 {{ table.columns|length }} columns</span>
+                {% if table.primary_keys %}
+                <span>🔑 PK: {{ table.primary_keys|join:", " }}</span>
+                {% endif %}
+              </div>
+            </div>
+            <button 
+              type="button"
+              class="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+              onclick="document.getElementById('columns_{{ table.name }}').classList.toggle('hidden')">
+              View Columns
+            </button>
+          </div>
+        </div>
+
+        <!-- Card Body -->
+        <div class="p-6">
+          <!-- Sync Type Options -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <!-- Real-time CDC -->
+            <label class="sync-type-option relative flex flex-col p-4 border-2 rounded-lg cursor-pointer transition hover:border-blue-500 dark:hover:border-blue-400">
+              <input 
+                type="radio" 
+                name="sync_type_{{ table.name }}" 
+                value="realtime"
+                checked
+                class="sr-only peer">
+              <div class="peer-checked:border-blue-600 dark:peer-checked:border-blue-400 absolute inset-0 border-2 rounded-lg pointer-events-none"></div>
+              <div class="peer-checked:bg-blue-50 dark:peer-checked:bg-blue-900/20 absolute inset-0 rounded-lg pointer-events-none"></div>
+              <div class="relative z-10">
+                <div class="text-2xl mb-2">🔄</div>
+                <div class="font-semibold text-gray-900 dark:text-white mb-1">Real-time CDC</div>
+                <div class="text-sm text-gray-600 dark:text-gray-400">Capture changes as they happen</div>
+              </div>
+            </label>
+
+            <!-- Incremental -->
+            <label class="sync-type-option relative flex flex-col p-4 border-2 rounded-lg cursor-pointer transition hover:border-blue-500 dark:hover:border-blue-400">
+              <input 
+                type="radio" 
+                name="sync_type_{{ table.name }}" 
+                value="incremental"
+                class="sr-only peer">
+              <div class="peer-checked:border-blue-600 dark:peer-checked:border-blue-400 absolute inset-0 border-2 rounded-lg pointer-events-none"></div>
+              <div class="peer-checked:bg-blue-50 dark:peer-checked:bg-blue-900/20 absolute inset-0 rounded-lg pointer-events-none"></div>
+              <div class="relative z-10">
+                <div class="text-2xl mb-2">📈</div>
+                <div class="font-semibold text-gray-900 dark:text-white mb-1">Incremental</div>
+                <div class="text-sm text-gray-600 dark:text-gray-400">Sync new/updated records only</div>
+              </div>
+            </label>
+
+            <!-- Full Refresh -->
+            <label class="sync-type-option relative flex flex-col p-4 border-2 rounded-lg cursor-pointer transition hover:border-blue-500 dark:hover:border-blue-400">
+              <input 
+                type="radio" 
+                name="sync_type_{{ table.name }}" 
+                value="full"
+                class="sr-only peer">
+              <div class="peer-checked:border-blue-600 dark:peer-checked:border-blue-400 absolute inset-0 border-2 rounded-lg pointer-events-none"></div>
+              <div class="peer-checked:bg-blue-50 dark:peer-checked:bg-blue-900/20 absolute inset-0 rounded-lg pointer-events-none"></div>
+              <div class="relative z-10">
+                <div class="text-2xl mb-2">🔃</div>
+                <div class="font-semibold text-gray-900 dark:text-white mb-1">Full Refresh</div>
+                <div class="text-sm text-gray-600 dark:text-gray-400">Replace all data on each sync</div>
+              </div>
+            </label>
+          </div>
+
+          <!-- Incremental Column Selection -->
+          <div id="incremental_config_{{ table.name }}" class="hidden bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4">
+            <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-2">
+              Select Incremental Column:
+            </label>
+            <select 
+              name="incremental_col_{{ table.name }}"
+              class="w-full max-w-md px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+              <option value="">-- Select a column --</option>
+              {% for col in table.incremental_candidates %}
+              <option value="{{ col.name }}">
+                {{ col.name }} ({{ col.type }})
+                {% if col.name in table.primary_keys %}🔑{% endif %}
+              </option>
+              {% endfor %}
+            </select>
+            <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+              Choose a timestamp or auto-incrementing column to track changes
+            </p>
+          </div>
+
+          <!-- Column Preview (Hidden by default) -->
+          <div id="columns_{{ table.name }}" class="hidden mt-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+            <div class="flex flex-wrap gap-2">
+              {% for col in table.columns %}
+              <span class="inline-flex items-center px-3 py-1 rounded-full text-sm
+                {% if col.name in table.primary_keys %}
+                  bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400
+                {% else %}
+                  bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-300
+                {% endif %}">
+                {{ col.name }}
+                <span class="ml-1 text-xs opacity-75">({{ col.type }})</span>
+              </span>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="flex items-center justify-between">
+      <a 
+        href="{% url 'cdc_discover_tables' db_config.pk %}"
+        class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700">
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+        </svg>
+        Back to Table Selection
+      </a>
+      <button 
+        type="submit"
+        id="continue-btn"
+        class="inline-flex items-center px-6 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">
+        Continue to Connector Setup
+        <svg class="ml-2 w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
+        </svg>
+      </button>
+    </div>
+  </form>
+
+</div>
+
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    // Handle sync type changes
-    document.querySelectorAll('input[type="radio"][name^="sync_type_"]').forEach(function(radio) {
-        radio.addEventListener('change', function() {
-            const tableName = this.name.replace('sync_type_', '');
-            const incrementalConfig = document.getElementById('incremental_config_' + tableName);
-            
-            if (this.value === 'incremental') {
-                incrementalConfig.classList.add('active');
-            } else {
-                incrementalConfig.classList.remove('active');
-            }
-        });
-        
-        // Visual feedback for selected option
-        radio.closest('.sync-type-option').addEventListener('click', function() {
-            const radioInput = this.querySelector('input[type="radio"]');
-            radioInput.checked = true;
-            radioInput.dispatchEvent(new Event('change'));
-            
-            // Update visual state
-            this.closest('.sync-type-selector').querySelectorAll('.sync-type-option').forEach(function(opt) {
-                opt.style.borderColor = '#e0e0e0';
-                opt.style.background = '#fff';
-            });
-            this.style.borderColor = '#007bff';
-            this.style.background = '#e7f1ff';
-        });
-    });
+  const form = document.getElementById('configureTablesForm');
 
-    // Global sync type handler
-    document.getElementById('globalSyncType').addEventListener('change', function() {
-        const globalType = this.value;
-        if (globalType) {
-            document.querySelectorAll('input[type="radio"][value="' + globalType + '"]').forEach(function(radio) {
-                radio.checked = true;
-                radio.dispatchEvent(new Event('change'));
-                radio.closest('.sync-type-option').click();
-            });
-        }
+  // Handle sync type changes
+  document.querySelectorAll('input[type="radio"][name^="sync_type_"]').forEach(function(radio) {
+    radio.addEventListener('change', function() {
+      const tableName = this.name.replace('sync_type_', '');
+      const incrementalConfig = document.getElementById('incremental_config_' + tableName);
+      
+      if (this.value === 'incremental') {
+        incrementalConfig.classList.remove('hidden');
+      } else {
+        incrementalConfig.classList.add('hidden');
+      }
     });
+  });
 
-    // Form validation
-    document.getElementById('configureTablesForm').addEventListener('submit', function(e) {
-        let hasError = false;
-        
-        // Check if incremental tables have a column selected
-        document.querySelectorAll('input[type="radio"][value="incremental"]:checked').forEach(function(radio) {
-            const tableName = radio.name.replace('sync_type_', '');
-            const select = document.querySelector('select[name="incremental_col_' + tableName + '"]');
-            
-            if (!select.value) {
-                hasError = true;
-                alert('Please select an incremental column for table: ' + tableName);
-                select.focus();
-            }
-        });
-        
-        if (hasError) {
-            e.preventDefault();
-        }
+  // Global sync type handler
+  document.getElementById('globalSyncType').addEventListener('change', function() {
+    const globalType = this.value;
+    if (globalType) {
+      document.querySelectorAll('input[type="radio"][value="' + globalType + '"]').forEach(function(radio) {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change'));
+      });
+    }
+  });
+
+  // Form validation
+  form.addEventListener('submit', function(e) {
+    let hasError = false;
+    
+    document.querySelectorAll('input[type="radio"][value="incremental"]:checked').forEach(function(radio) {
+      const tableName = radio.name.replace('sync_type_', '');
+      const select = document.querySelector('select[name="incremental_col_' + tableName + '"]');
+      
+      if (!select.value) {
+        hasError = true;
+        alert('Please select an incremental column for table: ' + tableName);
+        select.focus();
+      }
     });
+    
+    if (hasError) {
+      e.preventDefault();
+    }
+  });
 });
 </script>
+
 {% endblock %}
