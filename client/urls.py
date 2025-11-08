@@ -27,6 +27,63 @@ urlpatterns = [
          views.ClientDatabaseDeleteView.as_view(), 
          name='client_database_delete'),
     
+
+
+
+    # ... your existing URLs ...
+    
+    # ==========================================
+    # CDC Configuration URLs
+    # ==========================================
+    
+    # Main CDC Dashboard
+    path(
+        'client/<int:client_pk>/cdc/dashboard/', 
+        views.cdc_dashboard, 
+        name='cdc_dashboard'
+    ),
+    
+    # Step 1: Discover Tables
+    path(
+        'database/<int:database_pk>/cdc/discover-tables/', 
+        views.cdc_discover_tables, 
+        name='cdc_discover_tables'
+    ),
+    
+    # Step 2: Configure Tables
+    path(
+        'database/<int:database_pk>/cdc/configure-tables/', 
+        views.cdc_configure_tables, 
+        name='cdc_configure_tables'
+    ),
+    
+    # Step 3: Create Connector
+    path(
+        'cdc/config/<int:config_pk>/create-connector/', 
+        views.cdc_create_connector, 
+        name='cdc_create_connector'
+    ),
+    
+    # Step 4: Monitor Connector
+    path(
+        'cdc/config/<int:config_pk>/monitor/', 
+        views.cdc_monitor_connector, 
+        name='cdc_monitor_connector'
+    ),
+    
+    # Connector Actions
+    path(
+        'cdc/config/<int:config_pk>/action/<str:action>/', 
+        views.cdc_connector_action, 
+        name='cdc_connector_action'
+    ),
+    
+    # AJAX Endpoints
+    path(
+        'database/<int:database_pk>/table/<str:table_name>/schema/', 
+        views.ajax_get_table_schema, 
+        name='ajax_get_table_schema'
+    ),
 ]
 
 

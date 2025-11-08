@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}CDC Dashboard - {{ client.name }}{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-8">
+    <div>
+      <h1 class="text-3xl font-bold text-gray-900 dark:text-white">CDC Dashboard</h1>
+      <p class="text-gray-600 dark:text-gray-400 mt-1">
+        Real-time data replication for {{ client.name }}
+      </p>
+    </div>
+    <a 
+      href="{% url 'client_detail' client.pk %}" 
+      class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700">
+      <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+      </svg>
+      Back to Client
+    </a>
+  </div>
+
+  <!-- Statistics Cards -->
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <svg class="h-8 w-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path>
+          </svg>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Connected Databases</p>
+          <p class="text-2xl font-semibold text-gray-900 dark:text-white">{{ databases.count }}</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <svg class="h-8 w-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Active Replications</p>
+          <p class="text-2xl font-semibold text-gray-900 dark:text-white">
+            {{ replication_configs|length }}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <svg class="h-8 w-8 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+          </svg>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Tables Synced</p>
+          <p class="text-2xl font-semibold text-gray-900 dark:text-white">
+            {% for config in replication_configs %}
+              {{ config.table_mappings.count }}
+            {% empty %}
+              0
+            {% endfor %}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <svg class="h-8 w-8 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+          </svg>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Real-time CDC</p>
+          <p class="text-2xl font-semibold text-gray-900 dark:text-white">
+            {{ client.replication_status|default:"Off" }}
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Database Connections Section -->
+  <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-8">
+    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+      <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Database Connections</h2>
+    </div>
+    <div class="p-6">
+      {% if databases %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {% for db in databases %}
+          <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:border-blue-500 dark:hover:border-blue-400 transition">
+            <div class="flex items-start justify-between">
+              <div class="flex-1">
+                <div class="flex items-center gap-2 mb-2">
+                  <h3 class="text-base font-semibold text-gray-900 dark:text-white">
+                    {{ db.connection_name }}
+                  </h3>
+                  <span class="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded
+                    {% if db.connection_status == 'success' %}
+                      bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400
+                    {% else %}
+                      bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400
+                    {% endif %}">
+                    {{ db.get_connection_status_display }}
+                  </span>
+                </div>
+                
+                <p class="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                  {{ db.get_db_type_display }} • {{ db.host }}:{{ db.port }}
+                </p>
+                
+                {% with db.replication_configs.first as rep_config %}
+                  {% if rep_config %}
+                    <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                      <svg class="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                      </svg>
+                      <span>CDC Configured • {{ rep_config.table_mappings.count }} tables</span>
+                    </div>
+                  {% else %}
+                    <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                      </svg>
+                      <span>CDC Not Configured</span>
+                    </div>
+                  {% endif %}
+                {% endwith %}
+              </div>
+              
+              <div class="ml-4">
+                {% with db.replication_configs.first as rep_config %}
+                  {% if rep_config %}
+                    <a 
+                      href="{% url 'cdc_monitor_connector' rep_config.pk %}"
+                      class="inline-flex items-center px-3 py-1.5 text-xs font-medium text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30">
+                      Monitor
+                    </a>
+                  {% else %}
+                    <a 
+                      href="{% url 'cdc_discover_tables' db.pk %}"
+                      class="inline-flex items-center px-3 py-1.5 text-xs font-medium text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 rounded-lg hover:bg-green-100 dark:hover:bg-green-900/30">
+                      Setup CDC
+                    </a>
+                  {% endif %}
+                {% endwith %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="text-center py-12">
+          <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7"></path>
+          </svg>
+          <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No databases connected</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            Add a database connection to start replicating data.
+          </p>
+          <div class="mt-6">
+            <a 
+              href="{% url 'client_detail' client.pk %}"
+              class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700">
+              Add Database
+            </a>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Active Replications Section -->
+  {% if replication_configs %}
+  <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+      <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Active Replication Configurations</h2>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+        <thead class="bg-gray-50 dark:bg-gray-900">
+          <tr>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Database
+            </th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Connector
+            </th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Tables
+            </th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Status
+            </th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Last Sync
+            </th>
+            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Actions
+            </th>
+          </tr>
+        </thead>
+        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+          {% for config in replication_configs %}
+          <tr>
+            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+              {{ config.client_database.connection_name }}
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
+              {{ config.connector_name|default:"-" }}
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+              {{ config.table_mappings.count }} tables
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                {% if config.status == 'active' %}
+                  bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400
+                {% elif config.status == 'paused' %}
+                  bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400
+                {% elif config.status == 'error' %}
+                  bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400
+                {% else %}
+                  bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400
+                {% endif %}">
+                {{ config.get_status_display }}
+              </span>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+              {{ config.last_sync_at|date:"M d, g:i A"|default:"Never" }}
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+              <a 
+                href="{% url 'cdc_monitor_connector' config.pk %}"
+                class="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300 mr-3">
+                Monitor
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}

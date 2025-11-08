@@ -12,8 +12,10 @@ from django.views.decorators.http import require_http_methods
 from django.core.paginator import Paginator
 from django.contrib import messages
 from django.db.models import Q
-
+import logging
 from jovoclient.utils.table_utils import build_paginated_table
+from sqlalchemy import text
+logger = logging.getLogger(__name__)
 
 
 class ClientCreateView(CreateView):
@@ -394,3 +396,454 @@ class ClientDatabaseDeleteView(View):
             )
         
         return redirect('client_detail', pk=client.pk)
+    
+
+
+
+"""
+Add these views to your client/views.py
+These handle CDC configuration workflow
+"""
+
+from django.shortcuts import render, get_object_or_404, redirect
+from django.http import JsonResponse
+from django.views.decorators.http import require_http_methods
+from django.contrib import messages
+from django.db import transaction
+
+from client.models.database import ClientDatabase
+from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping
+from client.utils.database_utils import (
+    get_table_list, 
+    get_table_schema,
+    get_database_engine,
+    check_binary_logging
+)
+from client.utils.debezium_manager import DebeziumConnectorManager
+from client.utils.connector_templates import (
+    get_connector_config_for_database,
+    generate_connector_name
+)
+
+
+# ============================================
+# 1. CDC Dashboard - Show all configurations
+# ============================================
+@require_http_methods(["GET"])
+def cdc_dashboard(request, client_pk):
+    """
+    Main CDC dashboard showing all replication configurations for a client
+    """
+    client = get_object_or_404(Client, pk=client_pk)
+    databases = ClientDatabase.objects.filter(client=client)
+    
+    # Get all replication configs with statistics
+    replication_configs = ReplicationConfig.objects.filter(
+        client_database__client=client
+    ).select_related('client_database')
+    
+    context = {
+        'client': client,
+        'databases': databases,
+        'replication_configs': replication_configs,
+    }
+    
+    return render(request, 'client/cdc/dashboard.html', context)
+
+
+# ============================================
+# 2. Discover Tables - Step 1
+# ============================================
+@require_http_methods(["GET", "POST"])
+def cdc_discover_tables(request, database_pk):
+    """
+    Discover all tables from source database
+    Returns list of tables with metadata
+    """
+    db_config = get_object_or_404(ClientDatabase, pk=database_pk)
+    
+    if request.method == "POST":
+        # User selected tables to replicate
+        selected_tables = request.POST.getlist('selected_tables')
+        
+        if not selected_tables:
+            messages.error(request, 'Please select at least one table')
+            return redirect('cdc_discover_tables', database_pk=database_pk)
+        
+        # Store in session and redirect to configuration
+        request.session['selected_tables'] = selected_tables
+        request.session['database_pk'] = database_pk
+        
+        return redirect('cdc_configure_tables', database_pk=database_pk)
+    
+    # GET: Discover tables
+    try:
+        # Check if binary logging is enabled (for MySQL)
+        if db_config.db_type.lower() == 'mysql':
+            is_enabled, log_format = check_binary_logging(db_config)
+            if not is_enabled:
+                messages.warning(
+                    request, 
+                    'Binary logging is not enabled on this MySQL database. CDC requires binary logging to be enabled.'
+                )
+        
+        # Get list of tables
+        tables = get_table_list(db_config)
+        
+        # Get table details (row count, size estimates)
+        tables_with_info = []
+        engine = get_database_engine(db_config)
+        
+        with engine.connect() as conn:
+            for table_name in tables:
+                try:
+                    # Get row count
+                    result = conn.execute(text(f"SELECT COUNT(*) FROM `{table_name}`"))
+                    row_count = result.scalar() or 0
+                    
+                    # Check if table has timestamp column
+                    schema = get_table_schema(db_config, table_name)
+                    columns = schema.get('columns', [])
+                    has_timestamp = any(
+                        'timestamp' in col.get('type', '').lower() or 
+                        'datetime' in col.get('type', '').lower() or
+                        col.get('name', '').endswith('_at')
+                        for col in columns
+                    )
+                    
+                    tables_with_info.append({
+                        'name': table_name,
+                        'row_count': row_count,
+                        'column_count': len(columns),
+                        'has_timestamp': has_timestamp,
+                        'primary_keys': schema.get('primary_keys', []),
+                    })
+                except Exception as e:
+                    logger.error(f"Error getting info for table {table_name}: {e}")
+                    tables_with_info.append({
+                        'name': table_name,
+                        'row_count': 0,
+                        'column_count': 0,
+                        'has_timestamp': False,
+                        'primary_keys': [],
+                    })
+        
+        engine.dispose()
+        
+        context = {
+            'db_config': db_config,
+            'client': db_config.client,
+            'tables': tables_with_info,
+        }
+        
+        return render(request, 'client/cdc/discover_tables.html', context)
+        
+    except Exception as e:
+        messages.error(request, f'Failed to discover tables: {str(e)}')
+        return redirect('client_detail', pk=db_config.client.pk)
+
+
+# ============================================
+# 3. Configure Tables - Step 2
+# ============================================
+@require_http_methods(["GET", "POST"])
+def cdc_configure_tables(request, database_pk):
+    """
+    Configure selected tables: 
+    - Choose sync type (full/incremental/realtime)
+    - Select incremental column
+    - Configure column mappings
+    """
+    db_config = get_object_or_404(ClientDatabase, pk=database_pk)
+    
+    # Get selected tables from session
+    selected_tables = request.session.get('selected_tables', [])
+    if not selected_tables:
+        messages.error(request, 'No tables selected')
+        return redirect('cdc_discover_tables', database_pk=database_pk)
+    
+    if request.method == "POST":
+        # Save configuration and create replication config
+        try:
+            with transaction.atomic():
+                # Create ReplicationConfig
+                replication_config = ReplicationConfig.objects.create(
+                    client_database=db_config,
+                    sync_type=request.POST.get('sync_type', 'realtime'),
+                    sync_frequency=request.POST.get('sync_frequency', 'realtime'),
+                    status='active',
+                    is_active=True,
+                    auto_create_tables=True,
+                    created_by=request.user if request.user.is_authenticated else None
+                )
+                
+                # Create TableMappings
+                for table_name in selected_tables:
+                    sync_type = request.POST.get(f'sync_type_{table_name}', '')
+                    incremental_col = request.POST.get(f'incremental_col_{table_name}', '')
+                    
+                    TableMapping.objects.create(
+                        replication_config=replication_config,
+                        source_table=table_name,
+                        target_table=table_name,  # Same name in target
+                        is_enabled=True,
+                        sync_type=sync_type,
+                        incremental_column=incremental_col if sync_type == 'incremental' else None,
+                        incremental_column_type='timestamp' if incremental_col else '',
+                    )
+                
+                messages.success(request, 'CDC configuration saved successfully!')
+                
+                # Clear session
+                request.session.pop('selected_tables', None)
+                request.session.pop('database_pk', None)
+                
+                return redirect('cdc_create_connector', config_pk=replication_config.pk)
+                
+        except Exception as e:
+            messages.error(request, f'Failed to save configuration: {str(e)}')
+    
+    # GET: Show configuration form
+    tables_with_columns = []
+    for table_name in selected_tables:
+        try:
+            schema = get_table_schema(db_config, table_name)
+            columns = schema.get('columns', [])
+            
+            # Find potential incremental columns
+            incremental_candidates = [
+                col for col in columns
+                if 'timestamp' in col.get('type', '').lower() or
+                   'datetime' in col.get('type', '').lower() or
+                   col.get('name', '').endswith('_at') or
+                   (col.get('name', '') == 'id' and 'int' in col.get('type', '').lower())
+            ]
+            
+            tables_with_columns.append({
+                'name': table_name,
+                'columns': columns,
+                'primary_keys': schema.get('primary_keys', []),
+                'incremental_candidates': incremental_candidates,
+            })
+        except Exception as e:
+            logger.error(f"Error getting schema for {table_name}: {e}")
+    
+    context = {
+        'db_config': db_config,
+        'client': db_config.client,
+        'tables': tables_with_columns,
+    }
+    
+    return render(request, 'client/cdc/configure_tables.html', context)
+
+
+# ============================================
+# 4. Create Debezium Connector - Step 3
+# ============================================
+@require_http_methods(["GET", "POST"])
+def cdc_create_connector(request, config_pk):
+    """
+    Create Debezium connector for the replication configuration
+    """
+    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+    db_config = replication_config.client_database
+    client = db_config.client
+    
+    if request.method == "POST":
+        try:
+            # Generate connector name
+            connector_name = generate_connector_name(client, db_config)
+            
+            # Get list of tables to replicate
+            table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+            tables_list = [tm.source_table for tm in table_mappings]
+            
+            # Generate connector configuration
+            connector_config = get_connector_config_for_database(
+                db_config=db_config,
+                replication_config=replication_config,
+                tables_whitelist=tables_list,
+            )
+            
+            if not connector_config:
+                raise Exception("Failed to generate connector configuration")
+            
+            # Create connector via Debezium Manager
+            manager = DebeziumConnectorManager()
+            
+            # Check Kafka Connect health
+            is_healthy, health_error = manager.check_kafka_connect_health()
+            if not is_healthy:
+                raise Exception(f"Kafka Connect is not healthy: {health_error}")
+            
+            # Create connector
+            success, error = manager.create_connector(
+                connector_name=connector_name,
+                config=connector_config,
+                notify_on_error=True
+            )
+            
+            if not success:
+                raise Exception(f"Failed to create connector: {error}")
+            
+            # Update replication config
+            replication_config.connector_name = connector_name
+            replication_config.kafka_topic_prefix = f"client_{client.id}"
+            replication_config.status = 'active'
+            replication_config.save()
+            
+            # Update client replication status
+            client.replication_enabled = True
+            client.replication_status = 'active'
+            client.save()
+            
+            messages.success(
+                request, 
+                f'Debezium connector "{connector_name}" created successfully! CDC is now active.'
+            )
+            
+            return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
+            
+        except Exception as e:
+            messages.error(request, f'Failed to create connector: {str(e)}')
+    
+    # GET: Show connector creation confirmation
+    table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+    
+    context = {
+        'replication_config': replication_config,
+        'db_config': db_config,
+        'client': client,
+        'table_mappings': table_mappings,
+    }
+    
+    return render(request, 'client/cdc/create_connector.html', context)
+
+
+# ============================================
+# 5. Monitor Connector Status
+# ============================================
+@require_http_methods(["GET"])
+def cdc_monitor_connector(request, config_pk):
+    """
+    Real-time monitoring of connector status
+    """
+    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+    
+    if not replication_config.connector_name:
+        messages.error(request, 'No connector configured for this replication')
+        return redirect('cdc_dashboard', client_pk=replication_config.client_database.client.pk)
+    
+    try:
+        manager = DebeziumConnectorManager()
+        
+        # Get connector status
+        exists, status_data = manager.get_connector_status(replication_config.connector_name)
+        
+        if not exists:
+            messages.warning(request, 'Connector not found in Kafka Connect')
+            status_data = None
+        
+        # Get connector tasks
+        tasks = manager.get_connector_tasks(replication_config.connector_name) if exists else []
+        
+        context = {
+            'replication_config': replication_config,
+            'client': replication_config.client_database.client,
+            'connector_status': status_data,
+            'tasks': tasks,
+            'exists': exists,
+        }
+        
+        return render(request, 'client/cdc/monitor_connector.html', context)
+        
+    except Exception as e:
+        messages.error(request, f'Failed to get connector status: {str(e)}')
+        return redirect('cdc_dashboard', client_pk=replication_config.client_database.client.pk)
+
+
+# ============================================
+# 6. AJAX: Get Table Schema
+# ============================================
+@require_http_methods(["GET"])
+def ajax_get_table_schema(request, database_pk, table_name):
+    """
+    AJAX endpoint to get table schema details
+    """
+    try:
+        db_config = get_object_or_404(ClientDatabase, pk=database_pk)
+        schema = get_table_schema(db_config, table_name)
+        
+        return JsonResponse({
+            'success': True,
+            'schema': schema
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=400)
+
+
+# ============================================
+# 7. Connector Actions (Pause/Resume/Delete)
+# ============================================
+@require_http_methods(["POST"])
+def cdc_connector_action(request, config_pk, action):
+    """
+    Handle connector actions: pause, resume, restart, delete
+    """
+    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+    connector_name = replication_config.connector_name
+    
+    if not connector_name:
+        return JsonResponse({
+            'success': False,
+            'error': 'No connector configured'
+        }, status=400)
+    
+    try:
+        manager = DebeziumConnectorManager()
+        
+        if action == 'pause':
+            success, error = manager.pause_connector(connector_name)
+            replication_config.status = 'paused' if success else replication_config.status
+            message = 'Connector paused successfully'
+            
+        elif action == 'resume':
+            success, error = manager.resume_connector(connector_name)
+            replication_config.status = 'active' if success else replication_config.status
+            message = 'Connector resumed successfully'
+            
+        elif action == 'restart':
+            success, error = manager.restart_connector(connector_name)
+            message = 'Connector restarted successfully'
+            
+        elif action == 'delete':
+            success, error = manager.delete_connector(connector_name, notify=True)
+            if success:
+                replication_config.status = 'disabled'
+                replication_config.connector_name = None
+            message = 'Connector deleted successfully'
+            
+        else:
+            return JsonResponse({
+                'success': False,
+                'error': f'Unknown action: {action}'
+            }, status=400)
+        
+        if success:
+            replication_config.save()
+            messages.success(request, message)
+            return JsonResponse({'success': True, 'message': message})
+        else:
+            return JsonResponse({
+                'success': False,
+                'error': error
+            }, status=400)
+            
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)

@@ -301,6 +301,7 @@ from django.core.management.base import BaseCommand
 from sqlalchemy import create_engine, inspect, text
 from client.models.database import ClientDatabase
 from client.models.client import Client
+import urllib.parse
 
 from client.utils import (
     DebeziumConnectorManager,
@@ -448,7 +449,8 @@ class Command(BaseCommand):
 
             # Build SQLAlchemy connection for table discovery
             try:
-                url = f"mysql+pymysql://{db.username}:{db.password}@{db.host}:{db.port}/{db.database_name}"
+                password = urllib.parse.quote_plus(db.password)
+                url = f"mysql+pymysql://{db.username}:{password}@{db.host}:{db.port}/{db.database_name}"
                 engine = create_engine(url)
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
