@@ -10,7 +10,7 @@ __pycache__/
 *.egg
 *.manifest
 *.spec
-
+s
 # Virtual environment
 .venv/
 venv/
