@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+
+<!-- Replication Control Panel -->
+<div class="card mb-4">
+    <div class="card-header bg-primary text-white">
+        <h5 class="mb-0">🎯 Replication Control</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-6">
+                <p><strong>Status:</strong> 
+                    <span class="badge badge-{{ config.status }}">
+                        {{ config.get_status_display }}
+                    </span>
+                </p>
+                <p><strong>Active:</strong> 
+                    {% if config.is_active %}
+                        <span class="text-success">✅ Running</span>
+                    {% else %}
+                        <span class="text-secondary">⏹️ Stopped</span>
+                    {% endif %}
+                </p>
+                <p><strong>Connector:</strong> 
+                    {{ config.connector_name|default:"Not created" }}
+                </p>
+                <p><strong>Last Sync:</strong> 
+                    {{ config.last_sync_at|default:"Never" }}
+                </p>
+            </div>
+            <div class="col-md-6 text-right">
+                {% if not config.is_active %}
+                    <form method="post" action="{% url 'start_replication' config.id %}" style="display:inline;">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-success btn-lg">
+                            ▶️ Start Replication
+                        </button>
+                    </form>
+                {% else %}
+                    <form method="post" action="{% url 'stop_replication' config.id %}" style="display:inline;">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-warning btn-lg">
+                            ⏸️ Stop Replication
+                        </button>
+                    </form>
+                    
+                    <form method="post" action="{% url 'restart_replication' config.id %}" style="display:inline;">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-info btn-lg">
+                            🔄 Restart
+                        </button>
+                    </form>
+                {% endif %}
+            </div>
+        </div>
+        
+        <!-- Auto-refresh status -->
+        <div class="mt-3" id="live-status">
+            <small class="text-muted">Status updates automatically every 10 seconds</small>
+        </div>
+    </div>
+</div>
+
+<script>
+// Auto-refresh status every 10 seconds
+setInterval(function() {
+    fetch("{% url 'replication_status' config.id %}")
+        .then(response => response.json())
+        .then(data => {
+            console.log('Status:', data);
+            // Update UI with latest status
+        });
+}, 10000);
+</script>
+
+{% endblock %}

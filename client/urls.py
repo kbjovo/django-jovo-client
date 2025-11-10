@@ -84,7 +84,17 @@ urlpatterns = [
         views.ajax_get_table_schema, 
         name='ajax_get_table_schema'
     ),
+
+
+    path('cdc/config/<int:config_id>/start/', views.start_replication, name='start_replication'),
+    path('cdc/config/<int:config_id>/stop/', views.stop_replication, name='stop_replication'),
+    path('cdc/config/<int:config_id>/restart/', views.restart_replication_view, name='restart_replication'),
+    path('cdc/config/<int:config_id>/status/', views.replication_status, name='replication_status'),
+
+
+
 ]
+
 
 
 

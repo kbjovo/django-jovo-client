@@ -51,6 +51,8 @@ INSTALLED_APPS = [
     'tailwind',
     'theme',
     'django_cotton',
+    'django_celery_beat',
+    'django_celery_results',
    
     # local app
     'client',
@@ -224,9 +226,31 @@ LOGGING = {
 }
 
 
+# ====================================
+# CELERY CONFIGURATION
+# ====================================
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'Asia/Kolkata'
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 1000
+CELERY_WORKER_PREFETCH_MULTIPLIER = 4
 
+# Celery Beat (for scheduled tasks)
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
-import pprint
-
-print("🔧 DATABASE CONFIGURATION:")
-pprint.pprint(DATABASES)
+# ====================================
+# DEBEZIUM / KAFKA CONFIGURATION
+# ====================================
+DEBEZIUM_CONFIG = {
+    'KAFKA_CONNECT_URL': 'http://localhost:8083',
+    'KAFKA_BOOTSTRAP_SERVERS': 'localhost:9092',
+    'KAFKA_INTERNAL_SERVERS': 'kafka:29092',  # For Docker internal
+    'SCHEMA_REGISTRY_URL': 'http://localhost:8081',
+    'CONSUMER_GROUP_PREFIX': 'cdc_consumer',
+}

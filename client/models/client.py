@@ -2,6 +2,7 @@ from django.db import models, connection
 from django.utils import timezone
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
+from django.conf import settings
 
 
 class Client(models.Model):
@@ -94,7 +95,7 @@ class Client(models.Model):
         self.deleted_at = timezone.now()
         self.save(update_fields=["status", "deleted_at"])
         self.drop_database()  
-        self.databases.all().delete()
+        self.client_databases.all().delete()
 
     @property
     def is_active(self):
@@ -112,6 +113,14 @@ class Client(models.Model):
         if self.db_name:
             with connection.cursor() as cursor:
                 cursor.execute(f"DROP DATABASE IF EXISTS `{self.db_name}`;")
+    
+    def get_target_database(self):
+        """Get the target database for this client"""
+        return self.client_databases.filter(is_target=True).first()
+    
+    def get_source_databases(self):
+        """Get all source databases for this client"""
+        return self.client_databases.filter(is_primary=True)
 
 
 # ──────────────────────────────
@@ -120,11 +129,37 @@ class Client(models.Model):
 
 @receiver(post_save, sender=Client)
 def create_client_database(sender, instance, created, **kwargs):
-    """Create database on Client creation"""
+    """
+    Create database on Client creation AND create a ClientDatabase entry for it
+    """
     if created:
         db_name = instance.db_name
+        
+        # 1. Create the physical database
         with connection.cursor() as cursor:
-            cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`;")
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")
+        
+        # 2. Create a ClientDatabase entry for this target database
+        from client.models.database import ClientDatabase
+        
+        # Get database credentials from settings or use defaults
+        db_config = settings.DATABASES.get('default', {})
+        
+        ClientDatabase.objects.get_or_create(
+            client=instance,
+            database_name=db_name,  # Use this as unique identifier
+            defaults={
+                'connection_name': f"{instance.name} - Target DB",
+                'db_type': 'mysql',
+                'host': db_config.get('HOST', 'localhost'),
+                'port': int(db_config.get('PORT', 3306)),
+                'username': db_config.get('USER', 'root'),
+                'password': db_config.get('PASSWORD', ''),
+                'is_primary': False,
+                'is_target': True,  # Mark as target database
+                'connection_status': 'success',
+            }
+        )
 
 
 @receiver(post_delete, sender=Client)

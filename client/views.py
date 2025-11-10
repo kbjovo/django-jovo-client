@@ -3,20 +3,28 @@ from django.http import HttpResponse
 from client.models.client import Client
 from client.models.database import ClientDatabase
 from .forms import ClientForm, ClientDatabaseForm
+from client.models.replication import ReplicationConfig
 from django.views.generic import ListView, DetailView, CreateView, UpdateView, DeleteView, View
 from django.urls import reverse_lazy, reverse
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_http_methods
-from django.core.paginator import Paginator
 from django.contrib import messages
 from django.db.models import Q
 import logging
 from jovoclient.utils.table_utils import build_paginated_table
 from sqlalchemy import text
-logger = logging.getLogger(__name__)
 
+from client.tasks import (
+    create_debezium_connector,
+    start_kafka_consumer,
+    stop_kafka_consumer,
+    delete_debezium_connector,
+    restart_replication
+)
+
+logger = logging.getLogger(__name__)
 
 class ClientCreateView(CreateView):
     model = Client
@@ -973,3 +981,111 @@ def cdc_connector_action(request, config_pk, action):
             'success': False,
             'error': str(e)
         }, status=500)
+    
+
+
+@require_http_methods(["POST"])
+def start_replication(request, config_id):
+    """Start CDC replication for a config"""
+    try:
+        config = get_object_or_404(ReplicationConfig, id=config_id)
+        
+        # Check if already running
+        if config.is_active and config.status == 'active':
+            messages.warning(request, "Replication is already running!")
+            return redirect('cdc_config_detail', config_id=config_id)
+        
+        # Create connector and start consumer
+        task = create_debezium_connector.apply_async(args=[config_id])
+        
+        messages.success(
+            request,
+            f"🚀 Replication started! Task ID: {task.id}"
+        )
+        
+        return redirect('cdc_config_detail', config_id=config_id)
+        
+    except Exception as e:
+        messages.error(request, f"Failed to start replication: {str(e)}")
+        return redirect('cdc_config_detail', config_id=config_id)
+
+
+@require_http_methods(["POST"])
+def stop_replication(request, config_id):
+    """Stop CDC replication for a config"""
+    try:
+        config = get_object_or_404(ReplicationConfig, id=config_id)
+        
+        if not config.is_active:
+            messages.warning(request, "Replication is not running!")
+            return redirect('cdc_config_detail', config_id=config_id)
+        
+        # Stop consumer
+        task = stop_kafka_consumer.apply_async(args=[config_id])
+        
+        messages.success(
+            request,
+            f"⏸️ Replication stopped! Task ID: {task.id}"
+        )
+        
+        return redirect('cdc_config_detail', config_id=config_id)
+        
+    except Exception as e:
+        messages.error(request, f"Failed to stop replication: {str(e)}")
+        return redirect('cdc_config_detail', config_id=config_id)
+
+
+@require_http_methods(["POST"])
+def restart_replication_view(request, config_id):
+    """Restart CDC replication for a config"""
+    try:
+        config = get_object_or_404(ReplicationConfig, id=config_id)
+        
+        # Restart replication
+        task = restart_replication.apply_async(args=[config_id])
+        
+        messages.success(
+            request,
+            f"🔄 Replication restarted! Task ID: {task.id}"
+        )
+        
+        return redirect('cdc_config_detail', config_id=config_id)
+        
+    except Exception as e:
+        messages.error(request, f"Failed to restart replication: {str(e)}")
+        return redirect('cdc_config_detail', config_id=config_id)
+
+
+@require_http_methods(["GET"])
+def replication_status(request, config_id):
+    """Get replication status (AJAX endpoint)"""
+    try:
+        config = get_object_or_404(ReplicationConfig, id=config_id)
+        
+        data = {
+            'is_active': config.is_active,
+            'status': config.status,
+            'connector_name': config.connector_name,
+            'last_sync_at': config.last_sync_at.isoformat() if config.last_sync_at else None,
+            'table_count': config.table_mappings.filter(is_enabled=True).count(),
+        }
+        
+        # Get connector status if exists
+        if config.connector_name:
+            from client.utils.debezium_manager import DebeziumConnectorManager
+            manager = DebeziumConnectorManager()
+            
+            exists, status_data = manager.get_connector_status(config.connector_name)
+            
+            if exists and status_data:
+                data['connector_state'] = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                data['tasks'] = status_data.get('tasks', [])
+        
+        return JsonResponse(data)
+        
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+
+

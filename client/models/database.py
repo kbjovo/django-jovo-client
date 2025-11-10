@@ -6,8 +6,6 @@ import socket
 
 from ..encryption import encrypt_password, decrypt_password
 from .client import Client
-from django.db.models.signals import post_save
-from django.dispatch import receiver
 
 
 class ClientDatabase(models.Model):
@@ -46,10 +44,13 @@ class ClientDatabase(models.Model):
     database_name = models.CharField(max_length=100)
 
     # Settings
-    is_primary = models.BooleanField(default=True)
+    is_primary = models.BooleanField(
+        default=False,  # ✅ CHANGED: Don't auto-set as primary
+        help_text="Source database for CDC"
+    )
     is_target = models.BooleanField(
         default=False,
-        help_text="Indicates if this is the target database for replication"
+        help_text="Target database where replicated data will be stored"
     )
 
     # Status
@@ -69,9 +70,18 @@ class ClientDatabase(models.Model):
         verbose_name = "Client Database"
         verbose_name_plural = "Client Databases"
         ordering = ['-created_at']
+        # ✅ ADDED: Prevent duplicate target databases per client
+        constraints = [
+            models.UniqueConstraint(
+                fields=['client', 'is_target'],
+                condition=models.Q(is_target=True),
+                name='unique_target_per_client'
+            )
+        ]
 
     def __str__(self):
-        return f"{self.client.name} → {self.connection_name} ({self.db_type})"
+        db_type_display = "Source" if self.is_primary else "Target" if self.is_target else "Database"
+        return f"{self.client.name} → {self.connection_name} ({db_type_display})"
 
     def save(self, *args, **kwargs):
         """Encrypt password before storing."""
@@ -137,14 +147,3 @@ class ClientDatabase(models.Model):
             if save:
                 self.save(update_fields=["connection_status", "last_checked"])
         return self.connection_status
-
-
-# ✅ Moved outside the class
-@receiver(post_save, sender=ClientDatabase)
-def auto_set_target_database(sender, instance, created, **kwargs):
-    """Automatically mark the first client database as target if none exists."""
-    if created:
-        client = instance.client
-        if not client.client_databases.filter(is_target=True).exists():
-            instance.is_target = True
-            instance.save(update_fields=["is_target"])
