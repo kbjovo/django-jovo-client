@@ -1,327 +1,289 @@
-{% extends "base.html" %}
-{% load static %}
-
-{% block title %}Create CDC Connector - {{ client.name }}{% endblock %}
+{% extends "index.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+<div class="max-w-7xl mx-auto py-3 px-3 h-[calc(100vh-50px)] flex flex-col overflow-hidden"
+     x-data="{
+       isCreating: false,
+       showAdvanced: false,
+       
+       async createConnector() {
+         this.isCreating = true;
+         // Form will submit normally
+       }
+     }">
   
-  <!-- Progress Steps -->
-  <div class="mb-8">
-    <div class="flex items-center justify-center">
-      <div class="flex items-center">
-        <!-- Step 1: Completed -->
+  <!-- Breadcrumbs -->
+  <nav class="flex mb-4 flex-shrink-0" aria-label="Breadcrumb">
+    <ol class="inline-flex items-center space-x-1 md:space-x-3">
+      <li class="inline-flex items-center">
+        <a href="{% url 'main-dashboard' %}" class="inline-flex items-center text-sm font-medium text-gray-700 hover:text-blue-600 dark:text-gray-400 dark:hover:text-white">
+          <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20">
+            <path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"></path>
+          </svg>
+          Dashboard
+        </a>
+      </li>
+      <li>
         <div class="flex items-center">
-          <div class="flex items-center justify-center w-10 h-10 rounded-full bg-green-600 text-white font-semibold">
-            ✓
-          </div>
-          <span class="ml-2 text-sm font-medium text-green-600">Discover Tables</span>
+          <svg class="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+          </svg>
+          <a href="{% url 'client_detail' client.pk %}" class="ml-1 text-sm font-medium text-gray-700 hover:text-blue-600 md:ml-2 dark:text-gray-400 dark:hover:text-white">{{ client.name }}</a>
+        </div>
+      </li>
+      <li aria-current="page">
+        <div class="flex items-center">
+          <svg class="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+          </svg>
+          <span class="ml-1 text-sm font-medium text-gray-500 md:ml-2 dark:text-gray-400">Create Connector</span>
+        </div>
+      </li>
+    </ol>
+  </nav>
+
+  <!-- Main Card -->
+  <div class="bg-white dark:bg-gray-900 shadow-md rounded-2xl border border-gray-100 dark:border-gray-700 flex flex-col flex-1 overflow-hidden">
+    
+    <!-- Header -->
+    <div class="px-8 py-6 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Create CDC Connector</h1>
+          <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+            Review configuration and create Debezium connector
+          </p>
         </div>
         
-        <div class="w-16 h-0.5 mx-4 bg-green-600"></div>
-        
-        <!-- Step 2: Completed -->
-        <div class="flex items-center">
-          <div class="flex items-center justify-center w-10 h-10 rounded-full bg-green-600 text-white font-semibold">
-            ✓
-          </div>
-          <span class="ml-2 text-sm font-medium text-green-600">Configure</span>
-        </div>
-        
-        <div class="w-16 h-0.5 mx-4 bg-green-600"></div>
-        
-        <!-- Step 3: Active -->
-        <div class="flex items-center">
-          <div class="flex items-center justify-center w-10 h-10 rounded-full bg-blue-600 text-white font-semibold">
-            3
-          </div>
-          <span class="ml-2 text-sm font-medium text-blue-600">Create Connector</span>
+        <!-- Progress Badge -->
+        <div class="flex items-center gap-2">
+          <span class="inline-flex items-center px-3 py-1 text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">
+            Step 3 of 3
+          </span>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- Header -->
-  <div class="text-center mb-8">
-    <h1 class="text-3xl font-bold text-gray-900 dark:text-white">🚀 Deploy Connector</h1>
-    <p class="text-gray-600 dark:text-gray-400 mt-2">
-      Review configuration and deploy CDC connector
-    </p>
-  </div>
+    <!-- Scrollable Content -->
+    <div class="flex-1 overflow-y-auto">
+      <div class="p-8 space-y-6">
 
-  <!-- Pre-Deployment Checklist -->
-  <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6 mb-6">
-    <h3 class="text-lg font-semibold text-blue-900 dark:text-blue-300 mb-3">
-      📋 Pre-Deployment Checklist
-    </h3>
-    <ul class="space-y-2">
-      <li class="flex items-center text-blue-800 dark:text-blue-300">
-        <svg class="w-5 h-5 mr-2 text-green-600" fill="currentColor" viewBox="0 0 20 20">
-          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
-        </svg>
-        Database configuration verified
-      </li>
-      <li class="flex items-center text-blue-800 dark:text-blue-300">
-        <svg class="w-5 h-5 mr-2 text-green-600" fill="currentColor" viewBox="0 0 20 20">
-          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
-        </svg>
-        {{ table_mappings.count }} table{{ table_mappings.count|pluralize }} configured for replication
-      </li>
-      <li class="flex items-center text-blue-800 dark:text-blue-300">
-        <svg class="w-5 h-5 mr-2 text-green-600" fill="currentColor" viewBox="0 0 20 20">
-          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
-        </svg>
-        Sync types and incremental columns defined
-      </li>
-      <li class="flex items-center text-blue-800 dark:text-blue-300">
-        <svg class="w-5 h-5 mr-2 text-green-600" fill="currentColor" viewBox="0 0 20 20">
-          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
-        </svg>
-        Kafka Connect cluster available
-      </li>
-    </ul>
-  </div>
-
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-    <!-- Configuration Summary -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">📊 Configuration Summary</h2>
-      </div>
-      <div class="p-6">
-        <dl class="space-y-3">
-          <div>
-            <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Client</dt>
-            <dd class="mt-1 text-sm text-gray-900 dark:text-white">{{ client.name }}</dd>
-          </div>
-          <div>
-            <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Database</dt>
-            <dd class="mt-1 text-sm text-gray-900 dark:text-white">
-              {{ db_config.db_type|upper }} - {{ db_config.db_name }}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Host</dt>
-            <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">
-              {{ db_config.db_host }}:{{ db_config.db_port }}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Connector Type</dt>
-            <dd class="mt-1 text-sm text-gray-900 dark:text-white">
-              {% if db_config.db_type == 'mysql' %}
-                Debezium MySQL
-              {% elif db_config.db_type == 'postgresql' %}
-                Debezium PostgreSQL
-              {% else %}
-                Debezium {{ db_config.db_type|title }}
-              {% endif %}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Tables</dt>
-            <dd class="mt-1 text-sm text-gray-900 dark:text-white">
-              {{ table_mappings.count }} table{{ table_mappings.count|pluralize }}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Status</dt>
-            <dd class="mt-1">
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
-                Pending Deployment
-              </span>
-            </dd>
-          </div>
-        </dl>
-
-        {% if db_config.db_type == 'mysql' %}
-        <div class="mt-4 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
-          <div class="flex">
+        <!-- Success Alert -->
+        <div class="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/10 dark:to-indigo-900/10 border border-blue-200 dark:border-blue-800 rounded-lg p-6">
+          <div class="flex items-start gap-3">
             <div class="flex-shrink-0">
-              <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+              <svg class="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
               </svg>
             </div>
-            <div class="ml-3">
-              <h3 class="text-sm font-medium text-yellow-800 dark:text-yellow-300">MySQL Requirements</h3>
-              <ul class="mt-2 text-sm text-yellow-700 dark:text-yellow-400 space-y-1">
-                <li>• Binary logging must be enabled</li>
-                <li>• Binary log format should be ROW</li>
-                <li>• User needs REPLICATION SLAVE, REPLICATION CLIENT privileges</li>
+            <div>
+              <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Configuration Complete</h3>
+              <p class="text-sm text-gray-600 dark:text-gray-400">
+                Your CDC configuration is ready. Click "Create Connector" below to start real-time data replication.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Configuration Summary -->
+        <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+          <div class="px-6 py-4 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white">Configuration Summary</h3>
+          </div>
+          
+          <div class="p-6">
+            <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Source Database</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-medium">{{ db_config.connection_name }}</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Database Type</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white">{{ db_config.get_db_type_display }}</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Host</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">{{ db_config.host }}:{{ db_config.port }}</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Tables Selected</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-semibold">{{ table_mappings.count }} tables</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Sync Type</dt>
+                <dd class="mt-1">
+                  <span class="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 rounded">
+                    {{ replication_config.get_sync_type_display }}
+                  </span>
+                </dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Target Database</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">{{ client.db_name }}</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+
+        <!-- Tables to Replicate -->
+        <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+          <div class="px-6 py-4 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white">Tables to Replicate</h3>
+          </div>
+          
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+              <thead class="bg-gray-50 dark:bg-gray-900">
+                <tr>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    Source Table
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    Target Table
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    Sync Type
+                  </th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    Incremental Column
+                  </th>
+                </tr>
+              </thead>
+              <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                {% for mapping in table_mappings %}
+                <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                  <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white font-mono">
+                    {{ mapping.source_table }}
+                  </td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-400 font-mono">
+                    {{ mapping.target_table }}
+                  </td>
+                  <td class="px-6 py-4 whitespace-nowrap">
+                    <span class="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded">
+                      {{ mapping.get_effective_sync_type|title }}
+                    </span>
+                  </td>
+                  <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-400 font-mono">
+                    {{ mapping.incremental_column|default:"—" }}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Advanced Options (Collapsible) -->
+        <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+          <button
+            type="button"
+            @click="showAdvanced = !showAdvanced"
+            class="w-full px-6 py-4 bg-gray-50 dark:bg-gray-900 flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-800 transition">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white">Advanced Configuration</h3>
+            <svg 
+              class="w-5 h-5 text-gray-500 dark:text-gray-400 transform transition-transform"
+              :class="showAdvanced ? 'rotate-180' : ''"
+              fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+            </svg>
+          </button>
+          
+          <div x-show="showAdvanced" x-collapse class="p-6 border-t border-gray-200 dark:border-gray-700">
+            <dl class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Snapshot Mode</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white">Initial</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Binary Log Format</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white">ROW</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Kafka Topic Prefix</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">client_{{ client.id }}</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Connector Name</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">{{ client.name|slugify }}_{{ db_config.connection_name|slugify }}_connector</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Max Queue Size</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white">8192</dd>
+              </div>
+              
+              <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Max Batch Size</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white">2048</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+
+        <!-- Important Notes -->
+        <div class="bg-yellow-50 dark:bg-yellow-900/10 border border-yellow-200 dark:border-yellow-800 rounded-lg p-5">
+          <div class="flex items-start gap-3">
+            <svg class="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+            </svg>
+            <div>
+              <h4 class="text-sm font-semibold text-yellow-800 dark:text-yellow-400 mb-2">Important Notes</h4>
+              <ul class="text-sm text-yellow-700 dark:text-yellow-500 space-y-1 list-disc list-inside">
+                <li>Binary logging must be enabled on the source MySQL database</li>
+                <li>The source database user needs REPLICATION SLAVE and REPLICATION CLIENT privileges</li>
+                <li>Initial snapshot will be taken for all selected tables</li>
+                <li>Kafka and Kafka Connect must be running and accessible</li>
+                <li>This process may take a few seconds to complete</li>
               </ul>
             </div>
           </div>
         </div>
-        {% endif %}
+
       </div>
     </div>
 
-    <!-- Tables to Replicate -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">📑 Tables to Replicate</h2>
-      </div>
-      <div class="p-6">
-        <div class="space-y-3 max-h-96 overflow-y-auto">
-          {% for mapping in table_mappings %}
-          <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900 rounded-lg">
-            <div class="flex-1">
-              <div class="text-sm font-medium text-gray-900 dark:text-white font-mono">
-                {{ mapping.source_table }}
-              </div>
-              {% if mapping.incremental_column %}
-              <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Incremental: {{ mapping.incremental_column }}
-              </div>
-              {% endif %}
-            </div>
-            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-              {% if mapping.sync_type == 'realtime' %}
-                bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400
-              {% elif mapping.sync_type == 'incremental' %}
-                bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400
-              {% else %}
-                bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400
-              {% endif %}">
-              {% if mapping.sync_type == 'realtime' %}
-                🔄 Real-time
-              {% elif mapping.sync_type == 'incremental' %}
-                📈 Incremental
-              {% else %}
-                🔃 Full
-              {% endif %}
-            </span>
-          </div>
-          {% empty %}
-          <div class="text-center py-8 text-gray-500 dark:text-gray-400">
-            No tables configured
-          </div>
-          {% endfor %}
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Connector Configuration Details -->
-  <div class="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6 mb-6">
-    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">⚙️ Connector Configuration</h3>
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-      <!-- Source Configuration -->
-      <div>
-        <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Source Configuration</h4>
-        <dl class="space-y-2 text-sm">
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Database Type:</dt>
-            <dd class="text-gray-900 dark:text-white font-medium">{{ db_config.db_type|upper }}</dd>
-          </div>
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Connection:</dt>
-            <dd class="text-gray-900 dark:text-white font-mono text-xs">{{ db_config.db_host }}:{{ db_config.db_port }}</dd>
-          </div>
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Database:</dt>
-            <dd class="text-gray-900 dark:text-white font-medium">{{ db_config.db_name }}</dd>
-          </div>
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Username:</dt>
-            <dd class="text-gray-900 dark:text-white font-medium">{{ db_config.db_user }}</dd>
-          </div>
-        </dl>
-      </div>
-
-      <!-- Kafka Configuration -->
-      <div>
-        <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Kafka Configuration</h4>
-        <dl class="space-y-2 text-sm">
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Topic Prefix:</dt>
-            <dd class="text-gray-900 dark:text-white font-mono text-xs">client_{{ client.id }}</dd>
-          </div>
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Connector Name:</dt>
-            <dd class="text-gray-900 dark:text-white font-mono text-xs">{{ client.name|slugify }}-{{ db_config.db_name }}-connector</dd>
-          </div>
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Snapshot Mode:</dt>
-            <dd class="text-gray-900 dark:text-white font-medium">initial</dd>
-          </div>
-          <div class="flex justify-between">
-            <dt class="text-gray-600 dark:text-gray-400">Schema Changes:</dt>
-            <dd class="text-gray-900 dark:text-white font-medium">warn</dd>
-          </div>
-        </dl>
-      </div>
-    </div>
-  </div>
-
-  <!-- Action Buttons -->
-  <div class="flex items-center justify-between">
-    <a 
-      href="{% url 'cdc_configure_tables' db_config.pk %}"
-      class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700">
-      <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
-      </svg>
-      Back to Configuration
-    </a>
-
-    <form method="POST" id="createConnectorForm" class="inline">
-      {% csrf_token %}
-      <button 
-        type="submit"
-        id="deployButton"
-        class="inline-flex items-center px-6 py-3 border border-transparent rounded-lg shadow-sm text-base font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500">
-        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"></path>
+    <!-- Footer Actions -->
+    <div class="border-t border-gray-200 dark:border-gray-700 px-8 py-4 flex items-center justify-between flex-shrink-0">
+      <a 
+        href="{% url 'cdc_configure_tables' db_config.pk %}"
+        class="inline-flex items-center px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 font-medium transition">
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
         </svg>
-        Deploy Connector
-      </button>
-    </form>
+        Back
+      </a>
+      
+      <form method="post" @submit="isCreating = true">
+        {% csrf_token %}
+        <button 
+          type="submit"
+          :disabled="isCreating"
+          class="inline-flex items-center px-6 py-2 border border-transparent rounded-lg shadow-sm text-sm font-semibold text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+          <svg 
+            x-show="!isCreating"
+            class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+          </svg>
+          <svg 
+            x-show="isCreating"
+            class="animate-spin w-4 h-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span x-text="isCreating ? 'Creating Connector...' : 'Create Connector'"></span>
+        </button>
+      </form>
+    </div>
+
   </div>
-
 </div>
-
-<!-- Loading Overlay -->
-<div id="loadingOverlay" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 z-50 flex items-center justify-center">
-  <div class="bg-white dark:bg-gray-800 rounded-lg p-8 max-w-sm mx-4 text-center">
-    <div class="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
-    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Creating Connector...</h3>
-    <p class="text-sm text-gray-600 dark:text-gray-400">This may take a few moments</p>
-  </div>
-</div>
-
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  const form = document.getElementById('createConnectorForm');
-  const overlay = document.getElementById('loadingOverlay');
-  const deployButton = document.getElementById('deployButton');
-
-  form.addEventListener('submit', function(e) {
-    overlay.classList.remove('hidden');
-    deployButton.disabled = true;
-    deployButton.innerHTML = `
-      <svg class="animate-spin h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24">
-        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-      </svg>
-      Deploying...
-    `;
-  });
-
-  // Prevent accidental navigation
-  let formSubmitted = false;
-  form.addEventListener('submit', function() {
-    formSubmitted = true;
-  });
-
-  window.addEventListener('beforeunload', function(e) {
-    if (!formSubmitted) {
-      e.preventDefault();
-      e.returnValue = 'Are you sure you want to leave? Your connector has not been created yet.';
-      return e.returnValue;
-    }
-  });
-});
-</script>
 
 {% endblock %}

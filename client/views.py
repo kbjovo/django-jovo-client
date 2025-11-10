@@ -451,14 +451,12 @@ def cdc_dashboard(request, client_pk):
     return render(request, 'client/cdc/dashboard.html', context)
 
 
-# ============================================
-# 2. Discover Tables - Step 1
-# ============================================
+
 @require_http_methods(["GET", "POST"])
 def cdc_discover_tables(request, database_pk):
     """
     Discover all tables from source database
-    Returns list of tables with metadata
+    Returns list of tables with metadata including totals
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
@@ -489,6 +487,7 @@ def cdc_discover_tables(request, database_pk):
         
         # Get list of tables
         tables = get_table_list(db_config)
+        logger.info(f"Found {len(tables)} tables in database")
         
         # Get table details (row count, size estimates)
         tables_with_info = []
@@ -497,17 +496,27 @@ def cdc_discover_tables(request, database_pk):
         with engine.connect() as conn:
             for table_name in tables:
                 try:
-                    # Get row count
-                    result = conn.execute(text(f"SELECT COUNT(*) FROM `{table_name}`"))
-                    row_count = result.scalar() or 0
+                    # Get row count - use proper text() wrapper
+                    if db_config.db_type.lower() == 'mysql':
+                        count_query = text(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+                    elif db_config.db_type.lower() == 'postgresql':
+                        count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
+                    else:
+                        count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
                     
-                    # Check if table has timestamp column
+                    result = conn.execute(count_query)
+                    row = result.fetchone()
+                    row_count = row[0] if row else 0
+                    
+                    # Get table schema
                     schema = get_table_schema(db_config, table_name)
                     columns = schema.get('columns', [])
+                    
+                    # Check if table has timestamp column
                     has_timestamp = any(
-                        'timestamp' in col.get('type', '').lower() or 
-                        'datetime' in col.get('type', '').lower() or
-                        col.get('name', '').endswith('_at')
+                        'timestamp' in str(col.get('type', '')).lower() or 
+                        'datetime' in str(col.get('type', '')).lower() or
+                        str(col.get('name', '')).endswith('_at')
                         for col in columns
                     )
                     
@@ -518,41 +527,61 @@ def cdc_discover_tables(request, database_pk):
                         'has_timestamp': has_timestamp,
                         'primary_keys': schema.get('primary_keys', []),
                     })
+                    
+                    logger.debug(f"Table {table_name}: {row_count} rows, {len(columns)} columns")
+                    
                 except Exception as e:
-                    logger.error(f"Error getting info for table {table_name}: {e}")
+                    logger.error(f"Error getting info for table {table_name}: {str(e)}", exc_info=True)
                     tables_with_info.append({
                         'name': table_name,
                         'row_count': 0,
                         'column_count': 0,
                         'has_timestamp': False,
                         'primary_keys': [],
+                        'error': str(e)
                     })
         
         engine.dispose()
+        
+        # Calculate totals
+        total_rows = sum(t['row_count'] for t in tables_with_info)
+        total_cols = sum(t['column_count'] for t in tables_with_info)
+        logger.info(f"Discovery complete: {len(tables_with_info)} tables, {total_rows} total rows, {total_cols} total columns")
         
         context = {
             'db_config': db_config,
             'client': db_config.client,
             'tables': tables_with_info,
+            'total_tables': len(tables_with_info),
+            'total_rows': total_rows,
+            'total_columns': total_cols,
         }
         
         return render(request, 'client/cdc/discover_tables.html', context)
         
     except Exception as e:
+        logger.error(f'Failed to discover tables: {str(e)}', exc_info=True)
         messages.error(request, f'Failed to discover tables: {str(e)}')
         return redirect('client_detail', pk=db_config.client.pk)
-
 
 # ============================================
 # 3. Configure Tables - Step 2
 # ============================================
+"""
+File: client/views/cdc_views.py
+Action: REPLACE your cdc_configure_tables function with this
+
+Find this function in your file and REPLACE it entirely
+"""
+
 @require_http_methods(["GET", "POST"])
 def cdc_configure_tables(request, database_pk):
     """
-    Configure selected tables: 
-    - Choose sync type (full/incremental/realtime)
-    - Select incremental column
-    - Configure column mappings
+    Configure selected tables with column selection and mapping
+    - Select which columns to replicate
+    - Map column names (source -> target)
+    - Map table names (source -> target)
+    - Auto-create tables in target database
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
@@ -563,7 +592,6 @@ def cdc_configure_tables(request, database_pk):
         return redirect('cdc_discover_tables', database_pk=database_pk)
     
     if request.method == "POST":
-        # Save configuration and create replication config
         try:
             with transaction.atomic():
                 # Create ReplicationConfig
@@ -571,26 +599,117 @@ def cdc_configure_tables(request, database_pk):
                     client_database=db_config,
                     sync_type=request.POST.get('sync_type', 'realtime'),
                     sync_frequency=request.POST.get('sync_frequency', 'realtime'),
-                    status='active',
-                    is_active=True,
-                    auto_create_tables=True,
+                    status='configured',
+                    is_active=False,
+                    auto_create_tables=request.POST.get('auto_create_tables') == 'on',
                     created_by=request.user if request.user.is_authenticated else None
                 )
                 
-                # Create TableMappings
+                logger.info(f"Created ReplicationConfig: {replication_config.id}")
+                
+                # Create TableMappings for each table
                 for table_name in selected_tables:
+                    # Get table-specific settings
                     sync_type = request.POST.get(f'sync_type_{table_name}', '')
-                    incremental_col = request.POST.get(f'incremental_col_{table_name}', '')
+                    if not sync_type:  # Use global if not specified
+                        sync_type = request.POST.get('sync_type', 'realtime')
                     
-                    TableMapping.objects.create(
+                    incremental_col = request.POST.get(f'incremental_col_{table_name}', '')
+                    conflict_resolution = request.POST.get(f'conflict_resolution_{table_name}', 'source_wins')
+                    
+                    # Get target table name (mapped name)
+                    target_table_name = request.POST.get(f'target_table_name_{table_name}', table_name)
+                    if not target_table_name:
+                        target_table_name = table_name
+                    
+                    # Create TableMapping
+                    table_mapping = TableMapping.objects.create(
                         replication_config=replication_config,
                         source_table=table_name,
-                        target_table=table_name,  # Same name in target
+                        target_table=target_table_name,
                         is_enabled=True,
                         sync_type=sync_type,
                         incremental_column=incremental_col if sync_type == 'incremental' else None,
                         incremental_column_type='timestamp' if incremental_col else '',
+                        conflict_resolution=conflict_resolution,
                     )
+                    
+                    logger.info(f"Created TableMapping: {table_name} -> {target_table_name}")
+                    
+                    # Get selected columns for this table
+                    selected_columns = request.POST.getlist(f'selected_columns_{table_name}')
+                    
+                    if selected_columns:
+                        # Create ColumnMapping for each selected column
+                        for source_column in selected_columns:
+                            # Get mapped target column name
+                            target_column = request.POST.get(
+                                f'column_mapping_{table_name}_{source_column}', 
+                                source_column
+                            )
+                            
+                            # Get column type from schema
+                            try:
+                                schema = get_table_schema(db_config, table_name)
+                                columns = schema.get('columns', [])
+                                column_info = next(
+                                    (col for col in columns if col.get('name') == source_column), 
+                                    None
+                                )
+                                
+                                source_type = str(column_info.get('type', 'VARCHAR')) if column_info else 'VARCHAR'
+                                
+                                # Create ColumnMapping
+                                ColumnMapping.objects.create(
+                                    table_mapping=table_mapping,
+                                    source_column=source_column,
+                                    target_column=target_column or source_column,
+                                    source_type=source_type,
+                                    target_type=source_type,  # Same type by default
+                                    is_enabled=True,
+                                )
+                                
+                                logger.debug(f"Created ColumnMapping: {source_column} -> {target_column}")
+                                
+                            except Exception as e:
+                                logger.error(f"Error creating column mapping for {source_column}: {e}")
+                    else:
+                        # If no columns selected, include all columns by default
+                        logger.warning(f"No columns selected for {table_name}, including all columns")
+                        try:
+                            schema = get_table_schema(db_config, table_name)
+                            columns = schema.get('columns', [])
+                            
+                            for col in columns:
+                                col_name = col.get('name')
+                                col_type = str(col.get('type', 'VARCHAR'))
+                                
+                                # Get mapped name if provided
+                                target_column = request.POST.get(
+                                    f'column_mapping_{table_name}_{col_name}', 
+                                    col_name
+                                )
+                                
+                                ColumnMapping.objects.create(
+                                    table_mapping=table_mapping,
+                                    source_column=col_name,
+                                    target_column=target_column or col_name,
+                                    source_type=col_type,
+                                    target_type=col_type,
+                                    is_enabled=True,
+                                )
+                        except Exception as e:
+                            logger.error(f"Error creating default column mappings: {e}")
+                
+                # Auto-create tables in target database if option is checked
+                if replication_config.auto_create_tables:
+                    try:
+                        from client.utils.table_creator import create_target_tables
+                        create_target_tables(replication_config)
+                        messages.success(request, 'Target tables created successfully!')
+                    except Exception as e:
+                        logger.error(f"Failed to create target tables: {e}")
+                        messages.warning(request, f'Configuration saved, but failed to create target tables: {str(e)}')
                 
                 messages.success(request, 'CDC configuration saved successfully!')
                 
@@ -601,6 +720,7 @@ def cdc_configure_tables(request, database_pk):
                 return redirect('cdc_create_connector', config_pk=replication_config.pk)
                 
         except Exception as e:
+            logger.error(f'Failed to save configuration: {e}', exc_info=True)
             messages.error(request, f'Failed to save configuration: {str(e)}')
     
     # GET: Show configuration form
@@ -613,10 +733,12 @@ def cdc_configure_tables(request, database_pk):
             # Find potential incremental columns
             incremental_candidates = [
                 col for col in columns
-                if 'timestamp' in col.get('type', '').lower() or
-                   'datetime' in col.get('type', '').lower() or
+                if 'timestamp' in str(col.get('type', '')).lower() or
+                   'datetime' in str(col.get('type', '')).lower() or
                    col.get('name', '').endswith('_at') or
-                   (col.get('name', '') == 'id' and 'int' in col.get('type', '').lower())
+                   col.get('name', '').endswith('_time') or
+                   (col.get('name', '') in ['id', 'created_at', 'updated_at'] and 
+                    'int' in str(col.get('type', '')).lower())
             ]
             
             tables_with_columns.append({
@@ -625,8 +747,12 @@ def cdc_configure_tables(request, database_pk):
                 'primary_keys': schema.get('primary_keys', []),
                 'incremental_candidates': incremental_candidates,
             })
+            
+            logger.debug(f"Table {table_name}: {len(columns)} columns, {len(incremental_candidates)} incremental candidates")
+            
         except Exception as e:
-            logger.error(f"Error getting schema for {table_name}: {e}")
+            logger.error(f"Error getting schema for {table_name}: {e}", exc_info=True)
+            messages.warning(request, f'Could not load schema for table {table_name}')
     
     context = {
         'db_config': db_config,

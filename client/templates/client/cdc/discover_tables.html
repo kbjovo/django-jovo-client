@@ -48,6 +48,60 @@
     </p>
   </div>
 
+  <!-- Statistics Summary Cards -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    <!-- Total Tables -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm font-medium text-gray-600 dark:text-gray-400">Total Tables</p>
+          <p class="text-3xl font-bold text-gray-900 dark:text-white mt-1">
+            {{ total_tables|default:0 }}
+          </p>
+        </div>
+        <div class="p-3 bg-blue-100 dark:bg-blue-900/30 rounded-full">
+          <svg class="w-8 h-8 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Total Rows -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm font-medium text-gray-600 dark:text-gray-400">Total Rows</p>
+          <p class="text-3xl font-bold text-gray-900 dark:text-white mt-1">
+            {{ total_rows|default:0|floatformat:0 }}
+          </p>
+        </div>
+        <div class="p-3 bg-green-100 dark:bg-green-900/30 rounded-full">
+          <svg class="w-8 h-8 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h16M4 17h16"></path>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Total Columns -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm font-medium text-gray-600 dark:text-gray-400">Total Columns</p>
+          <p class="text-3xl font-bold text-gray-900 dark:text-white mt-1">
+            {{ total_columns|default:0 }}
+          </p>
+        </div>
+        <div class="p-3 bg-purple-100 dark:bg-purple-900/30 rounded-full">
+          <svg class="w-8 h-8 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"></path>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Search and Filter -->
   <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 p-4">
     <div class="flex items-center gap-4">
@@ -135,10 +189,10 @@
                 </span>
               </td>
               <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                {{ table.row_count|default:"0" }}
+                {{ table.row_count|default:"0"|floatformat:0 }}
               </td>
               <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                {{ table.column_count }}
+                {{ table.column_count|default:"0" }}
               </td>
               <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                 {% if table.primary_keys %}
@@ -163,6 +217,18 @@
                     Needs Config
                   </span>
                 {% endif %}
+              </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="6" class="px-6 py-8 text-center">
+                <div class="flex flex-col items-center justify-center text-gray-500 dark:text-gray-400">
+                  <svg class="w-12 h-12 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                  </svg>
+                  <p class="text-lg font-medium">No tables found</p>
+                  <p class="text-sm mt-1">The database doesn't contain any tables.</p>
+                </div>
               </td>
             </tr>
             {% endfor %}
@@ -204,14 +270,12 @@ document.addEventListener('DOMContentLoaded', function() {
   const filterTimestamp = document.getElementById('filter-timestamp');
   const tableRows = document.querySelectorAll('.table-row');
 
-  // Update selected count and button state
   function updateCount() {
     const count = document.querySelectorAll('.table-checkbox:checked').length;
     selectedCount.textContent = `${count} selected`;
     continueBtn.disabled = count === 0;
   }
 
-  // Select/deselect all
   selectAllCheckbox.addEventListener('change', function() {
     const visibleCheckboxes = Array.from(checkboxes).filter(cb => 
       !cb.closest('tr').classList.contains('hidden')
@@ -220,34 +284,25 @@ document.addEventListener('DOMContentLoaded', function() {
     updateCount();
   });
 
-  // Individual checkbox change
   checkboxes.forEach(cb => cb.addEventListener('change', updateCount));
 
-  // Select all button
   document.getElementById('select-all').addEventListener('click', function() {
     const visibleCheckboxes = Array.from(checkboxes).filter(cb => 
       !cb.closest('tr').classList.contains('hidden')
     );
     visibleCheckboxes.forEach(cb => cb.checked = true);
+    selectAllCheckbox.checked = true;
     updateCount();
   });
 
-  // Deselect all button
   document.getElementById('deselect-all').addEventListener('click', function() {
     checkboxes.forEach(cb => cb.checked = false);
+    selectAllCheckbox.checked = false;
     updateCount();
   });
 
-  // Search functionality
-  searchInput.addEventListener('input', function() {
-    const searchTerm = this.value.toLowerCase();
-    filterTables();
-  });
-
-  // Filter by timestamp
-  filterTimestamp.addEventListener('change', function() {
-    filterTables();
-  });
+  searchInput.addEventListener('input', filterTables);
+  filterTimestamp.addEventListener('change', filterTables);
 
   function filterTables() {
     const searchTerm = searchInput.value.toLowerCase();
@@ -266,6 +321,13 @@ document.addEventListener('DOMContentLoaded', function() {
         row.classList.add('hidden');
       }
     });
+
+    const visibleCheckboxes = Array.from(checkboxes).filter(cb => 
+      !cb.closest('tr').classList.contains('hidden')
+    );
+    const allVisibleChecked = visibleCheckboxes.length > 0 && 
+                              visibleCheckboxes.every(cb => cb.checked);
+    selectAllCheckbox.checked = allVisibleChecked;
   }
 
   updateCount();

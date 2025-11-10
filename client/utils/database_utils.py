@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from contextlib import contextmanager
 from sqlalchemy import create_engine, text, inspect, MetaData, Table
 from sqlalchemy.engine import Engine
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 import pymysql
 import psycopg2
