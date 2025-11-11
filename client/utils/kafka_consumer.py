@@ -140,6 +140,9 @@ class DebeziumCDCConsumer:
                 elif isinstance(value, datetime):
                     # If value is already a datetime object (after conversion)
                     col_type = DateTime
+                elif isinstance(value, date):
+                    # If value is a date object (not datetime)
+                    col_type = Date
                 elif isinstance(value, int):
                     # Check if this might be a timestamp field that will be converted
                     if (field_name.endswith(('_at', '_time', 'date', 'timestamp')) and
@@ -320,7 +323,7 @@ class DebeziumCDCConsumer:
         - ISO datetime strings
         - Weird integers like 20238
         - Mixed date/datetime fields
-        Returns: dict with all date fields converted to ISO strings
+        Returns: dict with all date fields converted to ISO strings or datetime objects
         """
         if not row:
             return row
@@ -360,20 +363,32 @@ class DebeziumCDCConsumer:
                     elif value > 1000000000:  # seconds
                         parsed = datetime.fromtimestamp(value)
                     else:
+                        # Handle short numeric dates
                         s = str(value)
                         try:
                             if len(s) == 8:  # YYYYMMDD
                                 parsed = datetime.strptime(s, "%Y%m%d")
-                            elif len(s) == 6:  # YYYYMM
-                                parsed = datetime.strptime(s, "%Y%m")
-                            elif len(s) == 5:  # 20238 -> 2023-08
-                                parsed = datetime(int(s[:4]), int(s[4:]), 1)
-                            elif len(s) == 4:  # just a year
+                            elif len(s) == 6:  # YYYYMM - treat as first day of month
+                                parsed = datetime.strptime(s + "01", "%Y%m%d")
+                            elif len(s) == 5:  # 20238 -> 2023-08-01
+                                year = int(s[:4])
+                                month = int(s[4:])
+                                if 1 <= month <= 12:
+                                    parsed = datetime(year, month, 1)
+                                else:
+                                    logger.warning(f"Invalid month in {key}={value}, defaulting to None")
+                                    converted[key] = None
+                                    continue
+                            elif len(s) == 4:  # just a year - first day of year
                                 parsed = datetime(int(s), 1, 1)
                             else:
-                                logger.debug(f"Invalid short numeric date {key}: {value}")
-                        except Exception as e:
-                            logger.warning(f"Failed to interpret numeric date {key}={value}: {e}")
+                                logger.warning(f"Cannot parse short numeric date {key}={value}, setting to None")
+                                converted[key] = None
+                                continue
+                        except (ValueError, OverflowError) as e:
+                            logger.warning(f"Failed to interpret numeric date {key}={value}: {e}, setting to None")
+                            converted[key] = None
+                            continue
 
                 # ---- Case 3: String timestamp/date ----
                 elif isinstance(value, str):
@@ -395,21 +410,26 @@ class DebeziumCDCConsumer:
 
                 # ---- Final Conversion ----
                 if parsed:
-                    # if parsed has time part
+                    # Convert to appropriate Python type
+                    # SQLAlchemy will handle the conversion to MySQL DATE/DATETIME
                     if isinstance(parsed, datetime):
+                        # Check if it's a date-only field (no time component)
                         if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
-                            converted[key] = parsed.strftime("%Y-%m-%d")
+                            # Return as date object for DATE columns
+                            converted[key] = parsed.date()
                         else:
-                            converted[key] = parsed.strftime("%Y-%m-%d %H:%M:%S")
+                            # Return as datetime for DATETIME/TIMESTAMP columns
+                            converted[key] = parsed
                     elif isinstance(parsed, date):
-                        converted[key] = parsed.strftime("%Y-%m-%d")
+                        converted[key] = parsed
                 else:
-                    # fallback to original
-                    converted[key] = value
+                    # Could not parse - set to None to avoid MySQL errors
+                    logger.warning(f"Could not parse {key}={value}, setting to None")
+                    converted[key] = None
 
             except Exception as e:
-                logger.warning(f"Failed to convert {key}={value}: {e}")
-                converted[key] = value
+                logger.error(f"Unexpected error converting {key}={value}: {e}, setting to None")
+                converted[key] = None
 
         return converted
 
