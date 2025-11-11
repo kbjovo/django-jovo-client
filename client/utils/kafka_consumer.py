@@ -1,20 +1,13 @@
 """
 Kafka Consumer for Debezium CDC Events (multi-topic + table prefixing)
 
-Place this at: client/utils/kafka_consumer.py
-
-Behavior:
-- Accepts 'topics' (list or single topic).
-- Subscribes to topics via confluent_kafka.Consumer.
-- Writes events to a centralized target_engine (SQLAlchemy Engine).
-- Prefixes target table names with source DB name to avoid collisions:
-    source_db.table  ->  source_db_table
+FIXED: Proper timestamp conversion for Debezium events
 """
 
 import json
 import logging
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime
+from datetime import datetime, date
 from confluent_kafka import Consumer, KafkaError
 from sqlalchemy import MetaData, Table, Column, inspect, text
 from sqlalchemy import Integer, String, Text, Float, Boolean, DateTime, Date, Time
@@ -245,27 +238,192 @@ class DebeziumCDCConsumer:
         return None, parts[-1] if parts else None
 
     # -------------------------
-    # Apply operations
+    # Timestamp conversion - FIXED
     # -------------------------
-    def convert_debezium_timestamps(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert Debezium timestamp fields (milliseconds) to Python datetime"""
+    # def convert_debezium_timestamps(self, row: Dict[str, Any]) -> Dict[str, Any]:
+    #     """
+    #     Convert Debezium timestamp fields to Python datetime objects.
+        
+    #     Debezium sends timestamps in different formats:
+    #     - Unix milliseconds (int) for TIMESTAMP/DATETIME columns
+    #     - Can also be strings in some cases
+        
+    #     This method converts them to Python datetime objects.
+    #     """
+    #     if not row:
+    #         return row
+            
+    #     converted = {}
+    #     for key, value in row.items():
+    #         # Skip None values
+    #         if value is None:
+    #             converted[key] = value
+    #             continue
+            
+    #         # Check if this looks like a timestamp field
+    #         is_timestamp_field = any([
+    #             key.endswith('_at'),
+    #             key.endswith('_time'),
+    #             key.endswith('_date'),
+    #             'date' in key.lower(),
+    #             'time' in key.lower(),
+    #             'timestamp' in key.lower(),
+    #             key in ['created', 'updated', 'modified', 'deleted']
+    #         ])
+            
+    #         if is_timestamp_field and isinstance(value, int):
+    #             # Debezium timestamps are typically in milliseconds
+    #             # Check if value is in milliseconds (> 1000000000000) or seconds
+    #             try:
+    #                 if value > 1000000000000:  # Milliseconds
+    #                     converted[key] = datetime.fromtimestamp(value / 1000.0)
+    #                     logger.debug(f"Converted {key}: {value} ms -> {converted[key]}")
+    #                 elif value > 1000000000:  # Seconds
+    #                     converted[key] = datetime.fromtimestamp(value)
+    #                     logger.debug(f"Converted {key}: {value} s -> {converted[key]}")
+    #                 else:
+    #                     # Value too small to be a timestamp, keep as-is
+    #                     converted[key] = value
+    #             except (ValueError, OSError) as e:
+    #                 logger.warning(f"Failed to convert timestamp {key}={value}: {e}")
+    #                 converted[key] = value
+    #         elif is_timestamp_field and isinstance(value, str):
+    #             # Try to parse string timestamps
+    #             try:
+    #                 # Try common formats
+    #                 for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d']:
+    #                     try:
+    #                         converted[key] = datetime.strptime(value, fmt)
+    #                         logger.debug(f"Converted {key}: '{value}' -> {converted[key]}")
+    #                         break
+    #                     except ValueError:
+    #                         continue
+    #                 else:
+    #                     # Couldn't parse, keep as string
+    #                     converted[key] = value
+    #             except Exception as e:
+    #                 logger.warning(f"Failed to parse timestamp string {key}='{value}': {e}")
+    #                 converted[key] = value
+    #         else:
+    #             # Not a timestamp field or not an int/string, keep as-is
+    #             converted[key] = value
+        
+    #     return converted
+
+
+    def convert_debezium_timestamps(self, row: dict) -> dict:
+        """
+        Convert Debezium timestamp/date fields to MySQL-safe strings.
+
+        Handles:
+        - Unix timestamps (seconds or milliseconds)
+        - ISO datetime strings
+        - Weird integers like 20238
+        - Mixed date/datetime fields
+        Returns: dict with all date fields converted to ISO strings
+        """
+        if not row:
+            return row
+
         converted = {}
+
         for key, value in row.items():
-            # Check if field name suggests it's a timestamp and value is a large integer
-            if isinstance(value, int) and value > 1000000000000 and key.endswith(('_at', '_time', 'date', 'timestamp')):
-                # Debezium timestamps are in milliseconds
-                try:
-                    converted[key] = datetime.fromtimestamp(value / 1000.0)
-                except:
-                    converted[key] = value
-            else:
+            if value is None:
+                converted[key] = None
+                continue
+
+            is_timestamp_field = any([
+                key.endswith('_at'),
+                key.endswith('_time'),
+                key.endswith('_date'),
+                'date' in key.lower(),
+                'time' in key.lower(),
+                'timestamp' in key.lower(),
+                key in ['created', 'updated', 'modified', 'deleted']
+            ])
+
+            if not is_timestamp_field:
                 converted[key] = value
+                continue
+
+            try:
+                parsed = None
+
+                # ---- Case 1: Already datetime/date ----
+                if isinstance(value, (datetime, date)):
+                    parsed = value
+
+                # ---- Case 2: Integer timestamp or malformed numeric ----
+                elif isinstance(value, int):
+                    if value > 1000000000000:  # ms
+                        parsed = datetime.fromtimestamp(value / 1000.0)
+                    elif value > 1000000000:  # seconds
+                        parsed = datetime.fromtimestamp(value)
+                    else:
+                        s = str(value)
+                        try:
+                            if len(s) == 8:  # YYYYMMDD
+                                parsed = datetime.strptime(s, "%Y%m%d")
+                            elif len(s) == 6:  # YYYYMM
+                                parsed = datetime.strptime(s, "%Y%m")
+                            elif len(s) == 5:  # 20238 -> 2023-08
+                                parsed = datetime(int(s[:4]), int(s[4:]), 1)
+                            elif len(s) == 4:  # just a year
+                                parsed = datetime(int(s), 1, 1)
+                            else:
+                                logger.debug(f"Invalid short numeric date {key}: {value}")
+                        except Exception as e:
+                            logger.warning(f"Failed to interpret numeric date {key}={value}: {e}")
+
+                # ---- Case 3: String timestamp/date ----
+                elif isinstance(value, str):
+                    v = value.strip()
+                    for fmt in (
+                        "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%dT%H:%M:%S",
+                        "%Y/%m/%d %H:%M:%S",
+                        "%Y-%m-%d",
+                        "%d-%m-%Y",
+                        "%Y/%m/%d",
+                        "%Y%m%d"
+                    ):
+                        try:
+                            parsed = datetime.strptime(v, fmt)
+                            break
+                        except ValueError:
+                            continue
+
+                # ---- Final Conversion ----
+                if parsed:
+                    # if parsed has time part
+                    if isinstance(parsed, datetime):
+                        if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
+                            converted[key] = parsed.strftime("%Y-%m-%d")
+                        else:
+                            converted[key] = parsed.strftime("%Y-%m-%d %H:%M:%S")
+                    elif isinstance(parsed, date):
+                        converted[key] = parsed.strftime("%Y-%m-%d")
+                else:
+                    # fallback to original
+                    converted[key] = value
+
+            except Exception as e:
+                logger.warning(f"Failed to convert {key}={value}: {e}")
+                converted[key] = value
+
         return converted
 
+
+
+
+    # -------------------------
+    # Apply operations
+    # -------------------------
     def apply_insert(self, prefixed_table: str, row: Dict[str, Any]):
         try:
-            # Convert timestamps
+            # CRITICAL: Convert timestamps BEFORE inserting
             row = self.convert_debezium_timestamps(row)
+            logger.debug(f"Final row before insert into {prefixed_table}: {row}") 
 
             with self.target_engine.connect() as conn:
                 table = self.table_cache.get(prefixed_table)
@@ -292,6 +450,9 @@ class DebeziumCDCConsumer:
 
     def apply_update(self, prefixed_table: str, before: Dict[str, Any], after: Dict[str, Any]):
         try:
+            # CRITICAL: Convert timestamps in the 'after' data
+            after = self.convert_debezium_timestamps(after)
+            
             with self.target_engine.connect() as conn:
                 table = self.table_cache.get(prefixed_table)
                 if table is None:
@@ -304,11 +465,11 @@ class DebeziumCDCConsumer:
                     logger.warning(f"No PK for update on {prefixed_table}, skipping")
                     return
 
-                stmt = table.update().where(table.c.id == pk_val).values(**(after or {}))
+                stmt = table.update().where(table.c.id == pk_val).values(**after)
                 conn.execute(stmt)
                 conn.commit()
             self.stats["updates"] += 1
-            logger.debug(f"Updated row in {prefixed_table}")
+            logger.debug(f"✅ Updated row in {prefixed_table}")
         except Exception as e:
             self.stats["errors"] += 1
             logger.exception(f"Failed to update {prefixed_table}: {e}")
@@ -331,7 +492,7 @@ class DebeziumCDCConsumer:
                 conn.execute(stmt)
                 conn.commit()
             self.stats["deletes"] += 1
-            logger.debug(f"Deleted row from {prefixed_table}")
+            logger.debug(f"✅ Deleted row from {prefixed_table}")
         except Exception as e:
             self.stats["errors"] += 1
             logger.exception(f"Failed to delete from {prefixed_table}: {e}")
