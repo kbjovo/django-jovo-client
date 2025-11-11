@@ -637,6 +637,7 @@ def cdc_configure_tables(request, database_pk):
         try:
             with transaction.atomic():
                 # Create ReplicationConfig
+                logger.info(f"drop_before_sync: {request.POST.get('drop_before_sync')}")
                 replication_config = ReplicationConfig.objects.create(
                     client_database=db_config,
                     sync_type=request.POST.get('sync_type', 'realtime'),
@@ -644,6 +645,7 @@ def cdc_configure_tables(request, database_pk):
                     status='configured',
                     is_active=False,
                     auto_create_tables=request.POST.get('auto_create_tables') == 'on',
+                    drop_before_sync=request.POST.get('drop_before_sync') == 'on',
                     created_by=request.user if request.user.is_authenticated else None
                 )
                 
@@ -828,18 +830,15 @@ def cdc_create_connector(request, config_pk):
         try:
             # Generate connector name
             connector_name = generate_connector_name(client, db_config)
-            
             # Get list of tables to replicate
             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
             tables_list = [tm.source_table for tm in table_mappings]
-            
             # Generate connector configuration
             connector_config = get_connector_config_for_database(
                 db_config=db_config,
                 replication_config=replication_config,
                 tables_whitelist=tables_list,
             )
-            
             if not connector_config:
                 raise Exception("Failed to generate connector configuration")
             

@@ -5,7 +5,6 @@ Create tables in target database based on replication configuration
 
 import logging
 import re
-from typing import Optional
 from sqlalchemy import MetaData, Table, Column, inspect, text
 from sqlalchemy import Integer, String, Text, Float, Boolean, DateTime, Date, Time, DECIMAL
 from sqlalchemy.dialects.mysql import BIGINT, TINYINT
@@ -73,6 +72,11 @@ def create_target_tables(replication_config):
     logger.info(f"   - Database: {target_db.database_name}")
     logger.info(f"   ✓ Confirmed: Target ({target_db.database_name}) is DIFFERENT from source ({source_db.database_name})")
     
+    # Check drop_before_sync setting
+    drop_before_sync = replication_config.drop_before_sync
+    if drop_before_sync:
+        logger.warning(f"⚠️ DROP BEFORE SYNC is ENABLED - Tables will be dropped if they exist!")
+    
     # Create database engines
     try:
         target_engine = get_database_engine(target_db)
@@ -83,6 +87,7 @@ def create_target_tables(replication_config):
     
     metadata = MetaData()
     created_count = 0
+    dropped_count = 0
     skipped_count = 0
     
     try:
@@ -108,17 +113,17 @@ def create_target_tables(replication_config):
             source_table = table_mapping.source_table
             target_table = table_mapping.target_table
             
-            logger.info(f"🔄 Creating table: {target_table} (from {source_table})")
+            logger.info(f"🔄 Processing table: {target_table} (from {source_table})")
             
             try:
                 # Get source schema
                 source_schema = get_table_schema(source_db, source_table)
                 
                 # Get column mappings
-                column_mappings = table_mapping.column_mappings.filter(is_enabled=True)
-                logger.info(f"   ✓ Found {column_mappings.count()} column mappings")
+                column_mappings = list(table_mapping.column_mappings.filter(is_enabled=True))
+                logger.info(f"   ✓ Found {len(column_mappings)} column mappings")
                 
-                if not column_mappings.exists():
+                if not column_mappings:
                     logger.warning(f"   ⚠️ No column mappings, skipping")
                     skipped_count += 1
                     continue
@@ -126,26 +131,70 @@ def create_target_tables(replication_config):
                 # Check if table already exists in TARGET
                 inspector = inspect(target_engine)
                 existing_tables = inspector.get_table_names()
+                table_exists = target_table in existing_tables
                 
-                if target_table in existing_tables:
-                    logger.info(f"   ℹ️ Table {target_table} already exists, skipping creation")
-                    skipped_count += 1
-                    
-                    # Verify it exists
-                    with target_engine.connect() as conn:
-                        result = conn.execute(text(f"SHOW TABLES LIKE '{target_table}'"))
-                        if result.fetchone():
-                            logger.info(f"   ✔️ VERIFIED: Table {target_table} exists in database")
+                if table_exists:
+                    if drop_before_sync:
+                        # DROP TABLE with CASCADE
+                        logger.warning(f"   🗑️ Table {target_table} exists - DROPPING (drop_before_sync=True)...")
+                        
+                        with target_engine.begin() as conn:
+                            # Double-check we're in the right database
+                            result = conn.execute(text("SELECT DATABASE()"))
+                            current_db = result.scalar()
                             
-                            # Check column count
-                            result = conn.execute(text(f"DESCRIBE `{target_table}`"))
-                            col_count = len(result.fetchall())
-                            logger.info(f"   ✔️ VERIFIED: Table has {col_count} columns")
-                    continue
+                            if current_db != target_db.database_name:
+                                raise Exception(f"Wrong database! Expected {target_db.database_name}, got {current_db}")
+                            
+                            # Drop table with CASCADE to remove foreign key constraints
+                            drop_sql = f"DROP TABLE IF EXISTS `{target_table}` CASCADE"
+                            conn.execute(text(drop_sql))
+                            logger.warning(f"   ✅ Table '{target_table}' dropped successfully")
+                            
+                            # Verify drop was successful
+                            result = conn.execute(text(f"SHOW TABLES LIKE '{target_table}'"))
+                            if result.fetchone():
+                                logger.error(f"   ❌ Table drop verification failed - table still exists!")
+                                skipped_count += 1
+                                continue
+                            else:
+                                logger.info(f"   ✔️ VERIFIED: Table '{target_table}' no longer exists")
+                                dropped_count += 1
+                        
+                        # Table is now dropped, continue to create it
+                        table_exists = False
+                    else:
+                        # Table exists but drop_before_sync is False, skip
+                        logger.info(f"   ℹ️ Table {target_table} already exists, skipping creation (drop_before_sync=False)")
+                        skipped_count += 1
+                        
+                        # Verify it exists
+                        with target_engine.connect() as conn:
+                            result = conn.execute(text(f"SHOW TABLES LIKE '{target_table}'"))
+                            if result.fetchone():
+                                logger.info(f"   ✔️ VERIFIED: Table {target_table} exists in database")
+                                
+                                # Check column count
+                                result = conn.execute(text(f"DESCRIBE `{target_table}`"))
+                                col_count = len(result.fetchall())
+                                logger.info(f"   ✔️ VERIFIED: Table has {col_count} columns")
+                        continue
+                
+                # Create a mapping of source column names to their positions
+                source_columns = source_schema.get('columns', [])
+                column_order = {col.get('name'): idx for idx, col in enumerate(source_columns)}
+                
+                # Sort column mappings by source column order
+                column_mappings_sorted = sorted(
+                    column_mappings,
+                    key=lambda cm: column_order.get(cm.source_column, float('inf'))
+                )
+                
+                logger.info(f"   ✓ Sorted columns by source table order")
                 
                 # Build columns
                 columns = []
-                for col_mapping in column_mappings:
+                for col_mapping in column_mappings_sorted:
                     source_col = col_mapping.source_column
                     target_col = col_mapping.target_column
                     col_type_str = col_mapping.source_type or col_mapping.source_data_type or 'VARCHAR(255)'
@@ -157,7 +206,6 @@ def create_target_tables(replication_config):
                     is_pk = source_col in source_schema.get('primary_keys', [])
                     
                     # Check nullable
-                    source_columns = source_schema.get('columns', [])
                     source_col_info = next(
                         (c for c in source_columns if c.get('name') == source_col),
                         None
@@ -177,7 +225,7 @@ def create_target_tables(replication_config):
                     skipped_count += 1
                     continue
                 
-                logger.info(f"   ✓ Built {len(columns)} columns")
+                logger.info(f"   ✓ Built {len(columns)} columns in source order")
                 
                 # Create table
                 table = Table(target_table, metadata, *columns, extend_existing=True)
@@ -205,13 +253,15 @@ def create_target_tables(replication_config):
                         skipped_count += 1
                 
             except Exception as e:
-                logger.error(f"   ❌ Error creating table {target_table}: {e}")
+                logger.error(f"   ❌ Error processing table {target_table}: {e}")
                 skipped_count += 1
         
         # Summary
         logger.info(f"{'='*80}")
         logger.info(f"📊 TABLE CREATION SUMMARY:")
         logger.info(f"   ✅ Successfully created: {created_count} tables")
+        if dropped_count > 0:
+            logger.info(f"   🗑️ Dropped & recreated: {dropped_count} tables")
         logger.info(f"   ⏭️ Skipped (already exist): {skipped_count} tables")
         logger.info(f"   🎯 Target Database: {target_db.database_name} on {target_db.host}")
         logger.info(f"{'='*80}")
@@ -257,3 +307,5 @@ def map_type_to_sqlalchemy(type_str: str):
         return Time
     else:
         return String(255)
+
+
