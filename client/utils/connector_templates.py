@@ -142,11 +142,11 @@ def get_mysql_connector_config(
     # Add configuration from ReplicationConfig if provided
     if replication_config:
         # Snapshot mode from config
-        if replication_config.snapshot_mode:
+        if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
-        
+
         # Custom configuration (JSON field in ReplicationConfig)
-        if replication_config.custom_config:
+        if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
     
     logger.info(f"Generated MySQL connector config for: {connector_name}")
@@ -228,13 +228,13 @@ def get_postgresql_connector_config(
         tables_full = [f"{schema_name}.{table}" for table in tables_whitelist]
         config["table.include.list"] = ",".join(tables_full)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
-    
+
     # Add custom configuration
     if replication_config:
-        if replication_config.snapshot_mode:
+        if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
-        
-        if replication_config.custom_config:
+
+        if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
     
     logger.info(f"Generated PostgreSQL connector config for: {connector_name}")
@@ -300,13 +300,13 @@ def get_oracle_connector_config(
     if tables_whitelist:
         config["table.include.list"] = ",".join(tables_whitelist)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
-    
+
     # Add custom configuration
     if replication_config:
-        if replication_config.snapshot_mode:
+        if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
-        
-        if replication_config.custom_config:
+
+        if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
     
     logger.info(f"Generated Oracle connector config for: {connector_name}")

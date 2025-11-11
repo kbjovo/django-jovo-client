@@ -15,7 +15,7 @@
            syncType: '',
            incrementalColumn: '',
            conflictResolution: 'source_wins',
-           targetTableName: '{{ table.name }}',
+           targetTableName: '{{ table.target_name|default:table.name }}',
            selectedColumns: [{% for col in table.columns %}'{{ col.name }}'{% if not forloop.last %}, {% endif %}{% endfor %}],
            columnMappings: {
              {% for col in table.columns %}'{{ col.name }}': '{{ col.name }}'{% if not forloop.last %},{% endif %}

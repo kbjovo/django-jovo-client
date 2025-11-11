@@ -344,7 +344,7 @@
         <!-- Databases Tab -->
         <div x-show="activeTab === 'databases'" x-transition>
           <div id="databases-content">
-            {% include 'client/partials/databases_list.html' with databases=client.databases.all %}
+            {% include 'client/partials/databases_list.html' with databases=client.client_databases.all %}
           </div>
         </div>
 

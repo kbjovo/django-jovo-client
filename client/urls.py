@@ -35,14 +35,14 @@ urlpatterns = [
     # ==========================================
     # CDC Configuration URLs
     # ==========================================
-    
-    # Main CDC Dashboard
-    path(
-        'client/<int:client_pk>/cdc/dashboard/', 
-        views.cdc_dashboard, 
-        name='cdc_dashboard'
-    ),
-    
+
+    # Main CDC Dashboard (REMOVED - Direct to monitor/setup instead)
+    # path(
+    #     'clients/<int:client_pk>/cdc/dashboard/',
+    #     views.cdc_dashboard,
+    #     name='cdc_dashboard'
+    # ),
+
     # Step 1: Discover Tables
     path(
         'database/<int:database_pk>/cdc/discover-tables/', 

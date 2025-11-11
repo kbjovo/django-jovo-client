@@ -5,7 +5,53 @@
 
 {% block content %}
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-  
+
+  <!-- Breadcrumb -->
+  <nav class="flex mb-6" aria-label="Breadcrumb">
+    <ol class="inline-flex items-center space-x-1 md:space-x-3">
+      <li class="inline-flex items-center">
+        <a href="{% url 'main-dashboard' %}" class="inline-flex items-center text-sm font-medium text-gray-700 hover:text-blue-600 dark:text-gray-400 dark:hover:text-white">
+          <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20">
+            <path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"></path>
+          </svg>
+          Dashboard
+        </a>
+      </li>
+      <li>
+        <div class="flex items-center">
+          <svg class="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+          </svg>
+          <span class="ml-1 text-sm font-medium text-gray-500 dark:text-gray-400 cursor-pointer" onclick="window.location.href='{% url 'main-dashboard' %}'; setTimeout(() => { const tab = document.querySelector('[\\@click*=replications]'); if(tab) tab.click(); }, 100);">Replications</span>
+        </div>
+      </li>
+      <li>
+        <div class="flex items-center">
+          <svg class="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+          </svg>
+          <a href="{% url 'client_detail' client.pk %}" class="ml-1 text-sm font-medium text-gray-700 hover:text-blue-600 dark:text-gray-400 dark:hover:text-white">{{ client.name }}</a>
+        </div>
+      </li>
+      <li>
+        <div class="flex items-center">
+          <svg class="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+          </svg>
+          <span class="ml-1 text-sm font-medium text-gray-500 dark:text-gray-400">{{ replication_config.client_database.connection_name }}</span>
+        </div>
+      </li>
+      <li aria-current="page">
+        <div class="flex items-center">
+          <svg class="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+          </svg>
+          <span class="ml-1 text-sm font-medium text-gray-500 dark:text-gray-400">Monitor</span>
+        </div>
+      </li>
+    </ol>
+  </nav>
+
   <!-- Header -->
   <div class="flex items-center justify-between mb-8">
     <div>
@@ -15,7 +61,7 @@
       </p>
     </div>
     <div class="flex items-center gap-3">
-      <button 
+      <button
         onclick="location.reload()"
         class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700">
         <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -23,16 +69,18 @@
         </svg>
         Refresh
       </button>
-      <a 
-        href="{% url 'cdc_dashboard' client.pk %}"
+      <button
+        onclick="window.location.href='{% url 'main-dashboard' %}'; setTimeout(() => { const tab = document.querySelector('[\\@click*=replications]'); if(tab) tab.click(); }, 100);"
         class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700">
         <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
         </svg>
-        Back to Dashboard
-      </a>
+        Back to Replications
+      </button>
     </div>
   </div>
+
+  {% csrf_token %}
 
   {% if not exists %}
   <!-- Connector Not Found -->
@@ -406,7 +454,8 @@ function performAction(action) {
     if (data.success) {
       alert(data.message || action + ' completed successfully');
       if (action === 'delete') {
-        window.location.href = '{% url "cdc_dashboard" client.pk %}';
+        window.location.href = '{% url "main-dashboard" %}';
+        setTimeout(() => { const tab = document.querySelector('[\\@click*=replications]'); if(tab) tab.click(); }, 100);
       } else {
         location.reload();
       }

@@ -3,11 +3,12 @@ from django.http import HttpResponse
 from client.models.client import Client
 from client.models.database import ClientDatabase
 from .forms import ClientForm, ClientDatabaseForm
-from client.models.replication import ReplicationConfig
+from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping
+from client.utils.debezium_manager import DebeziumConnectorManager
 from django.views.generic import ListView, DetailView, CreateView, UpdateView, DeleteView, View
 from django.urls import reverse_lazy, reverse
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
+from django.db import transaction
 from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
@@ -15,6 +16,17 @@ from django.db.models import Q
 import logging
 from jovoclient.utils.table_utils import build_paginated_table
 from sqlalchemy import text
+from client.utils.connector_templates import (
+    get_connector_config_for_database,
+    generate_connector_name
+)
+from client.utils.database_utils import (
+    get_table_list, 
+    get_table_schema,
+    get_database_engine,
+    check_binary_logging
+)
+
 
 from client.tasks import (
     create_debezium_connector,
@@ -163,10 +175,10 @@ def check_client_unique_field(request):
 
 def dashboard(request):
     """
-    Main dashboard view with automatic client table.
+    Main dashboard view with automatic client table and replications data.
     """
     clients = Client.objects.filter(status__in=["active", "inactive"]).order_by('-id')
-    
+
     table_config = {
         'exclude': ['country', 'updated_at', 'deleted_at'],
         'searchable': ['name', 'email', 'phone', 'company_name', 'db_name'],
@@ -189,13 +201,53 @@ def dashboard(request):
             },
         }
     }
-    
+
     table_data = build_paginated_table(
         queryset=clients,
         request=request,
         config=table_config
     )
-    
+
+    # Get replication data for Replications tab - only show configs with connector_name
+    all_replications = ReplicationConfig.objects.select_related(
+        'client_database', 'client_database__client'
+    ).prefetch_related('table_mappings').exclude(
+        connector_name__isnull=True
+    ).exclude(
+        connector_name=''
+    ).order_by('-created_at')
+
+    # Calculate statistics
+    total_replications = all_replications.count()
+    active_count = all_replications.filter(status='active').count()
+    total_tables = sum(config.table_mappings.filter(is_enabled=True).count() for config in all_replications)
+    has_errors = all_replications.filter(status='error').exists()
+
+    # Build replication rows for table display
+    replication_rows = []
+    for config in all_replications:
+        replication_rows.append({
+            'id': config.id,
+            'client_name': config.client_database.client.name,
+            'client_id': config.client_database.client.id,
+            'database_name': config.client_database.connection_name,
+            'database_type': config.client_database.get_db_type_display(),
+            'status': config.status,
+            'status_display': config.get_status_display(),
+            'connector_name': config.connector_name,
+            'tables_count': config.table_mappings.filter(is_enabled=True).count(),
+            'last_sync': config.last_sync_at,
+            'sync_type': config.get_sync_type_display(),
+        })
+
+    # Add replication data to context
+    table_data['replication_rows'] = replication_rows
+    table_data['total_replications'] = total_replications
+    table_data['active_count'] = active_count
+    table_data['total_tables'] = total_tables
+    table_data['has_errors'] = has_errors
+    table_data['all_clients'] = clients
+
     return render(request, "dashboard.html", table_data)
 
 
@@ -407,56 +459,30 @@ class ClientDatabaseDeleteView(View):
     
 
 
-
-"""
-Add these views to your client/views.py
-These handle CDC configuration workflow
-"""
-
-from django.shortcuts import render, get_object_or_404, redirect
-from django.http import JsonResponse
-from django.views.decorators.http import require_http_methods
-from django.contrib import messages
-from django.db import transaction
-
-from client.models.database import ClientDatabase
-from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping
-from client.utils.database_utils import (
-    get_table_list, 
-    get_table_schema,
-    get_database_engine,
-    check_binary_logging
-)
-from client.utils.debezium_manager import DebeziumConnectorManager
-from client.utils.connector_templates import (
-    get_connector_config_for_database,
-    generate_connector_name
-)
-
-
 # ============================================
 # 1. CDC Dashboard - Show all configurations
 # ============================================
-@require_http_methods(["GET"])
-def cdc_dashboard(request, client_pk):
-    """
-    Main CDC dashboard showing all replication configurations for a client
-    """
-    client = get_object_or_404(Client, pk=client_pk)
-    databases = ClientDatabase.objects.filter(client=client)
-    
-    # Get all replication configs with statistics
-    replication_configs = ReplicationConfig.objects.filter(
-        client_database__client=client
-    ).select_related('client_database')
-    
-    context = {
-        'client': client,
-        'databases': databases,
-        'replication_configs': replication_configs,
-    }
-    
-    return render(request, 'client/cdc/dashboard.html', context)
+# REMOVED: CDC Dashboard - Now using direct navigation to monitor/setup
+# @require_http_methods(["GET"])
+# def cdc_dashboard(request, client_pk):
+#     """
+#     Main CDC dashboard showing all replication configurations for a client
+#     """
+#     client = get_object_or_404(Client, pk=client_pk)
+#     databases = ClientDatabase.objects.filter(client=client)
+#
+#     # Get all replication configs with statistics
+#     replication_configs = ReplicationConfig.objects.filter(
+#         client_database__client=client
+#     ).select_related('client_database')
+#
+#     context = {
+#         'client': client,
+#         'databases': databases,
+#         'replication_configs': replication_configs,
+#     }
+#
+#     return render(request, 'client/cdc/dashboard.html', context)
 
 
 
@@ -528,8 +554,13 @@ def cdc_discover_tables(request, database_pk):
                         for col in columns
                     )
                     
+                    # Generate prefixed target table name
+                    source_db_name = db_config.database_name
+                    target_table_name = f"{source_db_name}_{table_name}"
+
                     tables_with_info.append({
                         'name': table_name,
+                        'target_name': target_table_name,
                         'row_count': row_count,
                         'column_count': len(columns),
                         'has_timestamp': has_timestamp,
@@ -540,8 +571,11 @@ def cdc_discover_tables(request, database_pk):
                     
                 except Exception as e:
                     logger.error(f"Error getting info for table {table_name}: {str(e)}", exc_info=True)
+                    source_db_name = db_config.database_name
+                    target_table_name = f"{source_db_name}_{table_name}"
                     tables_with_info.append({
                         'name': table_name,
+                        'target_name': target_table_name,
                         'row_count': 0,
                         'column_count': 0,
                         'has_timestamp': False,
@@ -624,11 +658,13 @@ def cdc_configure_tables(request, database_pk):
                     
                     incremental_col = request.POST.get(f'incremental_col_{table_name}', '')
                     conflict_resolution = request.POST.get(f'conflict_resolution_{table_name}', 'source_wins')
-                    
-                    # Get target table name (mapped name)
-                    target_table_name = request.POST.get(f'target_table_name_{table_name}', table_name)
+
+                    # Get target table name (mapped name) - default to prefixed name
+                    target_table_name = request.POST.get(f'target_table_name_{table_name}', '')
                     if not target_table_name:
-                        target_table_name = table_name
+                        # Auto-prefix with source database name to avoid collisions
+                        source_db_name = db_config.database_name
+                        target_table_name = f"{source_db_name}_{table_name}"
                     
                     # Create TableMapping
                     table_mapping = TableMapping.objects.create(
@@ -749,8 +785,13 @@ def cdc_configure_tables(request, database_pk):
                     'int' in str(col.get('type', '')).lower())
             ]
             
+            # Generate prefixed target table name
+            source_db_name = db_config.database_name
+            target_table_name = f"{source_db_name}_{table_name}"
+
             tables_with_columns.append({
                 'name': table_name,
+                'target_name': target_table_name,
                 'columns': columns,
                 'primary_keys': schema.get('primary_keys', []),
                 'incremental_candidates': incremental_candidates,
@@ -824,6 +865,7 @@ def cdc_create_connector(request, config_pk):
             replication_config.connector_name = connector_name
             replication_config.kafka_topic_prefix = f"client_{client.id}"
             replication_config.status = 'active'
+            replication_config.is_active = True
             replication_config.save()
             
             # Update client replication status
@@ -866,7 +908,7 @@ def cdc_monitor_connector(request, config_pk):
     
     if not replication_config.connector_name:
         messages.error(request, 'No connector configured for this replication')
-        return redirect('cdc_dashboard', client_pk=replication_config.client_database.client.pk)
+        return redirect('client_detail', pk=replication_config.client_database.client.pk)
     
     try:
         manager = DebeziumConnectorManager()
@@ -893,7 +935,7 @@ def cdc_monitor_connector(request, config_pk):
         
     except Exception as e:
         messages.error(request, f'Failed to get connector status: {str(e)}')
-        return redirect('cdc_dashboard', client_pk=replication_config.client_database.client.pk)
+        return redirect('client_detail', pk=replication_config.client_database.client.pk)
 
 
 # ============================================

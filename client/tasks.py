@@ -158,7 +158,7 @@ def start_kafka_consumer(self, replication_config_id):
         ]
         
         logger.info(f"📡 Subscribing to topics: {topics}")
-        
+
         # Create and start consumer
         consumer = DebeziumCDCConsumer(
             consumer_group_id=f"cdc_consumer_{client.id}_{config.id}",
