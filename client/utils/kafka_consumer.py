@@ -284,7 +284,7 @@ class DebeziumCDCConsumer:
                 conn.execute(stmt)
                 conn.commit()
             self.stats["inserts"] += 1
-            logger.debug(f"Inserted/Updated into {prefixed_table}")
+            logger.debug(f"✅ Inserted/Updated into {prefixed_table}")
         except Exception as e:
             self.stats["errors"] += 1
             logger.exception(f"Failed to insert into {prefixed_table}: {e}")

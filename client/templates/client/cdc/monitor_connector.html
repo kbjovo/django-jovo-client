@@ -195,42 +195,59 @@
     </div>
   </div>
 
-  <!-- Connector Actions -->
+    <!-- Connector Actions -->
   <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6">
     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
       <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Connector Actions</h2>
     </div>
     <div class="p-6">
       <div class="flex flex-wrap gap-3">
-        {% if connector_status.connector.state == 'RUNNING' %}
+        
+        {% if not replication_config.is_active %}
+        <!-- START BUTTON - Show when replication is not active -->
+        <button 
+          onclick="performAction('start')"
+          class="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500">
+          <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path>
+          </svg>
+          Start Replication
+        </button>
+        {% endif %}
+        
+        {% if connector_status.connector.state == 'RUNNING' and replication_config.is_active %}
+        <!-- PAUSE BUTTON - Show when connector is running AND replication is active -->
         <button 
           onclick="performAction('pause')"
           class="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500">
           <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20">
             <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path>
           </svg>
-          Pause Connector
+          Pause Replication
         </button>
         {% elif connector_status.connector.state == 'PAUSED' %}
+        <!-- RESUME BUTTON - Show when connector is paused -->
         <button 
           onclick="performAction('resume')"
           class="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500">
           <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20">
             <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path>
           </svg>
-          Resume Connector
+          Resume Replication
         </button>
         {% endif %}
         
+        <!-- RESTART BUTTON - Always available -->
         <button 
           onclick="performAction('restart')"
           class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700">
           <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
           </svg>
-          Restart Connector
+          Restart
         </button>
 
+        <!-- DELETE BUTTON - Always available -->
         <button 
           onclick="confirmDelete()"
           class="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
@@ -240,8 +257,26 @@
           Delete Connector
         </button>
       </div>
+      
+      <!-- Status Info Banner -->
+      {% if not replication_config.is_active %}
+      <div class="mt-4 bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+        <div class="flex items-start gap-3">
+          <svg class="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+          <div>
+            <h4 class="text-sm font-semibold text-blue-800 dark:text-blue-400 mb-1">Connector Ready</h4>
+            <p class="text-sm text-blue-700 dark:text-blue-500">
+              The Debezium connector has been created successfully. Click <strong>"Start Replication"</strong> to begin consuming CDC events and replicating data to the target database.
+            </p>
+          </div>
+        </div>
+      </div>
+      {% endif %}
     </div>
   </div>
+  
 
   <!-- Connector Details -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">

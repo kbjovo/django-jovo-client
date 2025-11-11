@@ -456,33 +456,6 @@ class ClientDatabaseDeleteView(View):
             )
         
         return redirect('client_detail', pk=client.pk)
-    
-
-
-# ============================================
-# 1. CDC Dashboard - Show all configurations
-# ============================================
-# REMOVED: CDC Dashboard - Now using direct navigation to monitor/setup
-# @require_http_methods(["GET"])
-# def cdc_dashboard(request, client_pk):
-#     """
-#     Main CDC dashboard showing all replication configurations for a client
-#     """
-#     client = get_object_or_404(Client, pk=client_pk)
-#     databases = ClientDatabase.objects.filter(client=client)
-#
-#     # Get all replication configs with statistics
-#     replication_configs = ReplicationConfig.objects.filter(
-#         client_database__client=client
-#     ).select_related('client_database')
-#
-#     context = {
-#         'client': client,
-#         'databases': databases,
-#         'replication_configs': replication_configs,
-#     }
-#
-#     return render(request, 'client/cdc/dashboard.html', context)
 
 
 
@@ -817,6 +790,84 @@ def cdc_configure_tables(request, database_pk):
 # ============================================
 # 4. Create Debezium Connector - Step 3
 # ============================================
+# @require_http_methods(["GET", "POST"])
+# def cdc_create_connector(request, config_pk):
+#     """
+#     Create Debezium connector for the replication configuration
+#     """
+#     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+#     db_config = replication_config.client_database
+#     client = db_config.client
+    
+#     if request.method == "POST":
+#         try:
+#             # Generate connector name
+#             connector_name = generate_connector_name(client, db_config)
+#             # Get list of tables to replicate
+#             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+#             tables_list = [tm.source_table for tm in table_mappings]
+#             # Generate connector configuration
+#             connector_config = get_connector_config_for_database(
+#                 db_config=db_config,
+#                 replication_config=replication_config,
+#                 tables_whitelist=tables_list,
+#             )
+#             if not connector_config:
+#                 raise Exception("Failed to generate connector configuration")
+            
+#             # Create connector via Debezium Manager
+#             manager = DebeziumConnectorManager()
+            
+#             # Check Kafka Connect health
+#             is_healthy, health_error = manager.check_kafka_connect_health()
+#             if not is_healthy:
+#                 raise Exception(f"Kafka Connect is not healthy: {health_error}")
+            
+#             # Create connector
+#             success, error = manager.create_connector(
+#                 connector_name=connector_name,
+#                 config=connector_config,
+#                 notify_on_error=True
+#             )
+            
+#             if not success:
+#                 raise Exception(f"Failed to create connector: {error}")
+            
+#             # Update replication config
+#             replication_config.connector_name = connector_name
+#             replication_config.kafka_topic_prefix = f"client_{client.id}"
+#             replication_config.status = 'active'
+#             replication_config.is_active = True
+#             replication_config.save()
+            
+#             # Update client replication status
+#             client.replication_enabled = True
+#             client.replication_status = 'active'
+#             client.save()
+            
+#             messages.success(
+#                 request, 
+#                 f'Debezium connector "{connector_name}" created successfully! CDC is now active.'
+#             )
+            
+#             return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
+            
+#         except Exception as e:
+#             messages.error(request, f'Failed to create connector: {str(e)}')
+    
+#     # GET: Show connector creation confirmation
+#     table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+    
+#     context = {
+#         'replication_config': replication_config,
+#         'db_config': db_config,
+#         'client': client,
+#         'table_mappings': table_mappings,
+#     }
+    
+#     return render(request, 'client/cdc/create_connector.html', context)
+
+
 @require_http_methods(["GET", "POST"])
 def cdc_create_connector(request, config_pk):
     """
@@ -830,15 +881,18 @@ def cdc_create_connector(request, config_pk):
         try:
             # Generate connector name
             connector_name = generate_connector_name(client, db_config)
+            
             # Get list of tables to replicate
             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
             tables_list = [tm.source_table for tm in table_mappings]
+            
             # Generate connector configuration
             connector_config = get_connector_config_for_database(
                 db_config=db_config,
                 replication_config=replication_config,
                 tables_whitelist=tables_list,
             )
+            
             if not connector_config:
                 raise Exception("Failed to generate connector configuration")
             
@@ -860,26 +914,23 @@ def cdc_create_connector(request, config_pk):
             if not success:
                 raise Exception(f"Failed to create connector: {error}")
             
-            # Update replication config
+            # Update replication config (but don't start replication yet)
             replication_config.connector_name = connector_name
             replication_config.kafka_topic_prefix = f"client_{client.id}"
-            replication_config.status = 'active'
-            replication_config.is_active = True
+            replication_config.status = 'configured'  # Changed from 'active'
+            replication_config.is_active = False  # Changed from True
             replication_config.save()
-            
-            # Update client replication status
-            client.replication_enabled = True
-            client.replication_status = 'active'
-            client.save()
             
             messages.success(
                 request, 
-                f'Debezium connector "{connector_name}" created successfully! CDC is now active.'
+                f'✅ Debezium connector "{connector_name}" created successfully! '
+                f'You can now start replication from the monitoring page.'
             )
             
             return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
             
         except Exception as e:
+            logger.error(f"Failed to create connector: {e}", exc_info=True)
             messages.error(request, f'Failed to create connector: {str(e)}')
     
     # GET: Show connector creation confirmation
@@ -893,6 +944,7 @@ def cdc_create_connector(request, config_pk):
     }
     
     return render(request, 'client/cdc/create_connector.html', context)
+
 
 
 # ============================================
@@ -963,10 +1015,72 @@ def ajax_get_table_schema(request, database_pk, table_name):
 # ============================================
 # 7. Connector Actions (Pause/Resume/Delete)
 # ============================================
+# @require_http_methods(["POST"])
+# def cdc_connector_action(request, config_pk, action):
+#     """
+#     Handle connector actions: pause, resume, restart, delete
+#     """
+#     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+#     connector_name = replication_config.connector_name
+    
+#     if not connector_name:
+#         return JsonResponse({
+#             'success': False,
+#             'error': 'No connector configured'
+#         }, status=400)
+    
+#     try:
+#         manager = DebeziumConnectorManager()
+        
+#         if action == 'pause':
+#             success, error = manager.pause_connector(connector_name)
+#             replication_config.status = 'paused' if success else replication_config.status
+#             message = 'Connector paused successfully'
+            
+#         elif action == 'resume':
+#             success, error = manager.resume_connector(connector_name)
+#             replication_config.status = 'active' if success else replication_config.status
+#             message = 'Connector resumed successfully'
+            
+#         elif action == 'restart':
+#             success, error = manager.restart_connector(connector_name)
+#             message = 'Connector restarted successfully'
+            
+#         elif action == 'delete':
+#             success, error = manager.delete_connector(connector_name, notify=True)
+#             if success:
+#                 replication_config.status = 'disabled'
+#                 replication_config.connector_name = None
+#             message = 'Connector deleted successfully'
+            
+#         else:
+#             return JsonResponse({
+#                 'success': False,
+#                 'error': f'Unknown action: {action}'
+#             }, status=400)
+        
+#         if success:
+#             replication_config.save()
+#             messages.success(request, message)
+#             return JsonResponse({'success': True, 'message': message})
+#         else:
+#             return JsonResponse({
+#                 'success': False,
+#                 'error': error
+#             }, status=400)
+            
+#     except Exception as e:
+#         return JsonResponse({
+#             'success': False,
+#             'error': str(e)
+#         }, status=500)
+    
+
+
 @require_http_methods(["POST"])
 def cdc_connector_action(request, config_pk, action):
     """
-    Handle connector actions: pause, resume, restart, delete
+    Handle connector actions: start, pause, resume, restart, delete
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     connector_name = replication_config.connector_name
@@ -980,26 +1094,83 @@ def cdc_connector_action(request, config_pk, action):
     try:
         manager = DebeziumConnectorManager()
         
-        if action == 'pause':
+        if action == 'start':
+            # Start the Kafka consumer to begin replication
+            logger.info(f"🚀 Starting replication for config {config_pk}")
+            
+            # Check connector is running first
+            exists, status_data = manager.get_connector_status(connector_name)
+            if not exists:
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Connector not found'
+                }, status=400)
+            
+            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            if connector_state != 'RUNNING':
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Connector is not running. Current state: {connector_state}'
+                }, status=400)
+            
+            # Start Kafka consumer task
+            task = start_kafka_consumer.apply_async(
+                args=[config_pk],
+                countdown=2  # Start after 2 seconds
+            )
+            
+            # Update status
+            replication_config.status = 'active'
+            replication_config.is_active = True
+            replication_config.save()
+            
+            # Update client replication status
+            client = replication_config.client_database.client
+            client.replication_enabled = True
+            client.replication_status = 'active'
+            client.save()
+            
+            message = f'Replication started successfully! Task ID: {task.id}'
+            success = True
+            error = None
+            
+        elif action == 'pause':
             success, error = manager.pause_connector(connector_name)
-            replication_config.status = 'paused' if success else replication_config.status
-            message = 'Connector paused successfully'
+            if success:
+                # Also stop the consumer
+                stop_kafka_consumer(replication_config.pk)
+                replication_config.status = 'paused'
+                replication_config.is_active = False
+            message = 'Connector paused and consumer stopped successfully'
             
         elif action == 'resume':
             success, error = manager.resume_connector(connector_name)
-            replication_config.status = 'active' if success else replication_config.status
-            message = 'Connector resumed successfully'
+            if success:
+                # Restart consumer
+                start_kafka_consumer.apply_async(
+                    args=[replication_config.pk],
+                    countdown=2
+                )
+                replication_config.status = 'active'
+                replication_config.is_active = True
+            message = 'Connector resumed and consumer restarted successfully'
             
         elif action == 'restart':
             success, error = manager.restart_connector(connector_name)
-            message = 'Connector restarted successfully'
+            if success:
+                # Restart consumer
+                restart_replication.apply_async(args=[replication_config.pk])
+            message = 'Connector and consumer restarted successfully'
             
         elif action == 'delete':
             success, error = manager.delete_connector(connector_name, notify=True)
             if success:
+                # Stop consumer first
+                stop_kafka_consumer(replication_config.pk)
                 replication_config.status = 'disabled'
                 replication_config.connector_name = None
-            message = 'Connector deleted successfully'
+                replication_config.is_active = False
+            message = 'Connector deleted and consumer stopped successfully'
             
         else:
             return JsonResponse({
@@ -1018,11 +1189,12 @@ def cdc_connector_action(request, config_pk, action):
             }, status=400)
             
     except Exception as e:
+        logger.error(f"❌ Error performing action {action}: {e}", exc_info=True)
         return JsonResponse({
             'success': False,
             'error': str(e)
         }, status=500)
-    
+
 
 
 @require_http_methods(["POST"])
