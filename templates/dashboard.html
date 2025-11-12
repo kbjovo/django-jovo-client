@@ -14,81 +14,178 @@
 </script>
 {% endif %}
 
+<!-- Dashboard Container (no vertical scroll on container) -->
+<div class="h-full flex flex-col overflow-hidden">
 
-<div class="max-w-7xl mx-auto py-8 px-4" x-data="{ activeTab: 'clients' }">
-
-  <!-- Tab Navigation -->
-  <div class="border-b border-gray-200 dark:border-gray-700 mb-6">
-    <nav class="flex space-x-8" aria-label="Tabs">
-      <button
-        @click="activeTab = 'clients'"
-        :class="activeTab === 'clients' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
-        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition flex items-center gap-2">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
-        </svg>
-        Clients
-      </button>
-
-      <button
-        @click="activeTab = 'replications'"
-        :class="activeTab === 'replications' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
-        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition flex items-center gap-2">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path>
-        </svg>
-        Replications
-      </button>
-
-      <button
-        @click="activeTab = 'monitoring'"
-        :class="activeTab === 'monitoring' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
-        class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition flex items-center gap-2">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
-        </svg>
-        Monitoring
-      </button>
-    </nav>
-  </div>
-
-  <!-- Clients Tab -->
-  <div x-show="activeTab === 'clients'" x-transition>
-    <!-- Dashboard Summary -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-      <c-dashboard-card>
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Total Clients</h3>
-        <p class="text-3xl font-bold text-blue-600 dark:text-blue-400">{{ page_obj.paginator.count|default:0 }}</p>
-      </c-dashboard-card>
-    </div>
-
-    <!-- Header -->
-    <div class="flex justify-between items-center mb-6">
+  <!-- Header Section (fixed, no scroll) -->
+  <div class="flex-shrink-0 px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+    <div class="flex justify-between items-center">
       <div>
-        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Clients</h2>
-        <p class="text-gray-500 dark:text-gray-400 mt-1">Manage your client relationships</p>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Dashboard</h1>
+        <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Welcome back! Here's your overview</p>
       </div>
       <a href="{% url 'client_add' %}"
-         class="inline-flex text-sm items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 px-4 rounded-lg shadow transition">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+         class="inline-flex text-sm items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 px-4 rounded-lg shadow-sm hover:shadow transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
         </svg>
         Add Client
       </a>
     </div>
-
-    <!-- Table Component -->
-    <c-table :config="config" :page_obj="page_obj" />
   </div>
 
-  <!-- Replications Tab -->
-  <div x-show="activeTab === 'replications'" x-transition>
-    {% include 'partials/replications_tab.html' %}
-  </div>
+  <!-- Scrollable Content Area -->
+  <div class="flex-1 overflow-y-auto px-6 py-6">
 
-  <!-- Monitoring Tab -->
-  <div x-show="activeTab === 'monitoring'" x-transition>
-    {% include 'partials/monitoring_tab.html' %}
+    <!-- Stat Cards Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
+
+      <!-- Total Clients -->
+      <c-stat-card
+        title="Total Clients"
+        value="{{ total_clients }}"
+        icon="users"
+        color="blue"
+        href="{% url 'clients_list' %}"
+      />
+
+      <!-- Active Clients -->
+      <c-stat-card
+        title="Active Clients"
+        value="{{ active_clients }}"
+        icon="users"
+        color="green"
+        href="{% url 'clients_list' %}"
+      />
+
+      <!-- Total Replications -->
+      <c-stat-card
+        title="Total Replications"
+        value="{{ total_replications }}"
+        icon="sync"
+        color="purple"
+        href="{% url 'replications_list' %}"
+      />
+
+      <!-- Active Replications -->
+      <c-stat-card
+        title="Active Replications"
+        value="{{ active_replications }}"
+        icon="chart"
+        color="green"
+        href="{% url 'monitoring_dashboard' %}"
+      />
+
+      <!-- Failed Replications -->
+      {% if failed_replications > 0 %}
+      <c-stat-card
+        title="Failed Replications"
+        value="{{ failed_replications }}"
+        icon="alert"
+        color="red"
+        href="{% url 'replications_list' %}?status_filter=error"
+      />
+      {% else %}
+      <c-stat-card
+        title="Failed Replications"
+        value="{{ failed_replications }}"
+        icon="alert"
+        color="red"
+      />
+      {% endif %}
+
+    </div>
+
+    <!-- Quick Links / Recent Activity Section -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+      <!-- Recent Clients -->
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Recent Clients</h3>
+            <a href="{% url 'clients_list' %}" class="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium">
+              View all →
+            </a>
+          </div>
+        </div>
+        <div class="p-5">
+          {% if recent_clients %}
+          <ul class="space-y-3">
+            {% for client in recent_clients %}
+            <li>
+              <a href="{% url 'client_detail' client.pk %}" class="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition group">
+                <div class="flex items-center gap-3 min-w-0 flex-1">
+                  <div class="flex-shrink-0 w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
+                    <span class="text-sm font-semibold text-blue-600 dark:text-blue-400">{{ client.name|slice:":2"|upper }}</span>
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-medium text-gray-900 dark:text-white truncate">{{ client.name }}</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ client.email }}</p>
+                  </div>
+                </div>
+                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium flex-shrink-0
+                  {% if client.status == 'active' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
+                  {% else %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400{% endif %}">
+                  {{ client.status|capfirst }}
+                </span>
+              </a>
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <p class="text-center text-gray-500 dark:text-gray-400 py-8">No clients yet</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- Recent Issues / Failed Replications -->
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Recent Issues</h3>
+            <a href="{% url 'replications_list' %}?status_filter=error" class="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium">
+              View all →
+            </a>
+          </div>
+        </div>
+        <div class="p-5">
+          {% if recent_failed %}
+          <ul class="space-y-3">
+            {% for replication in recent_failed %}
+            <li>
+              <div class="flex items-start gap-3 p-3 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30">
+                <div class="flex-shrink-0 w-8 h-8 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mt-0.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 text-red-600 dark:text-red-400">
+                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+                  </svg>
+                </div>
+                <div class="min-w-0 flex-1">
+                  <p class="text-sm font-medium text-gray-900 dark:text-white">{{ replication.client_database.client.name }}</p>
+                  <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">{{ replication.client_database.connection_name }}</p>
+                  <p class="text-xs text-red-600 dark:text-red-400 mt-1">Replication error detected</p>
+                </div>
+                <a href="{% url 'cdc_monitor_connector' replication.pk %}" class="flex-shrink-0 text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
+                  View →
+                </a>
+              </div>
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <div class="text-center py-8">
+            <svg class="mx-auto h-12 w-12 text-green-500 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white">All systems operational</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">No issues detected</p>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+
+    </div>
+
   </div>
 
 </div>

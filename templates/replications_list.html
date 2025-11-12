@@ -1,0 +1,229 @@
+{% extends "index.html" %}
+{% load cotton %}
+
+{% block content %}
+
+<!-- Show Django messages as toasts -->
+{% if messages %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        {% for message in messages %}
+            showToast('{{ message.tags }}', '{{ message }}');
+        {% endfor %}
+    });
+</script>
+{% endif %}
+
+<!-- Replications List Container (no vertical scroll on container) -->
+<div class="h-full flex flex-col overflow-hidden">
+
+  <!-- Header Section (fixed, no scroll) -->
+  <div class="flex-shrink-0 px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+    <div class="flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Replications</h1>
+        <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Manage all replication configurations across clients</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scrollable Content Area -->
+  <div class="flex-1 overflow-y-auto px-6 py-6">
+
+    <!-- Statistics Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
+      <c-stat-card
+        title="Total"
+        value="{{ total_replications|default:0 }}"
+        icon="sync"
+        color="blue"
+      />
+
+      <c-stat-card
+        title="Active"
+        value="{{ active_count|default:0 }}"
+        icon="chart"
+        color="green"
+      />
+
+      <c-stat-card
+        title="Configured"
+        value="{{ configured_count|default:0 }}"
+        icon="database"
+        color="purple"
+      />
+
+      {% if error_count > 0 %}
+      <c-stat-card
+        title="Error"
+        value="{{ error_count|default:0 }}"
+        icon="alert"
+        color="red"
+        href="?status_filter=error"
+      />
+      {% else %}
+      <c-stat-card
+        title="Error"
+        value="{{ error_count|default:0 }}"
+        icon="alert"
+        color="red"
+      />
+      {% endif %}
+
+      {% if incomplete_count > 0 %}
+      <c-stat-card
+        title="Incomplete"
+        value="{{ incomplete_count|default:0 }}"
+        icon="alert"
+        color="yellow"
+        href="?status_filter=incomplete"
+      />
+      {% else %}
+      <c-stat-card
+        title="Incomplete"
+        value="{{ incomplete_count|default:0 }}"
+        icon="alert"
+        color="yellow"
+      />
+      {% endif %}
+    </div>
+
+    <!-- Compact Filters (Auto-apply) -->
+    <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm p-4 mb-6">
+      <form method="get" id="filterForm">
+        <div class="flex items-center gap-3">
+          <!-- Search Box -->
+          <div class="w-72">
+            <input
+              type="text"
+              id="search"
+              name="search"
+              value="{{ search_query }}"
+              placeholder="Search client, database, or connector..."
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              oninput="debounceSearch()"
+            >
+          </div>
+
+          <!-- Status Filter -->
+          <div class="w-48">
+            <select
+              id="status_filter"
+              name="status_filter"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              onchange="document.getElementById('filterForm').submit()"
+            >
+              <option value="">All Statuses</option>
+              <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Active ({{ active_count }})</option>
+              <option value="configured" {% if status_filter == 'configured' %}selected{% endif %}>Configured ({{ configured_count }})</option>
+              <option value="paused" {% if status_filter == 'paused' %}selected{% endif %}>Paused ({{ paused_count }})</option>
+              <option value="error" {% if status_filter == 'error' %}selected{% endif %}>Error ({{ error_count }})</option>
+              <option value="incomplete" {% if status_filter == 'incomplete' %}selected{% endif %}>Incomplete ({{ incomplete_count }})</option>
+            </select>
+          </div>
+
+          <!-- Client Filter -->
+          <div class="w-48">
+            <select
+              id="client_filter"
+              name="client_filter"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              onchange="document.getElementById('filterForm').submit()"
+            >
+              <option value="">All Clients</option>
+              {% for client in all_clients %}
+              <option value="{{ client.id }}" {% if client_filter == client.id|stringformat:"s" %}selected{% endif %}>{{ client.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <!-- Clear Filters Button -->
+          {% if search_query or status_filter or client_filter %}
+          <a
+            href="{% url 'replications_list' %}"
+            class="inline-flex items-center justify-center p-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 rounded-lg transition"
+            title="Clear all filters"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+          </a>
+          {% endif %}
+        </div>
+      </form>
+    </div>
+
+    <script>
+      // Debounce search input to avoid too many requests
+      let searchTimeout;
+      function debounceSearch() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(function() {
+          document.getElementById('filterForm').submit();
+        }, 500); // Wait 500ms after user stops typing
+      }
+    </script>
+
+    <!-- Replication Tables by Status -->
+    <div class="space-y-6">
+
+      <!-- Active Replications -->
+      {% if replication_rows_by_status.active %}
+      {% include 'partials/replication_table.html' with replications=replication_rows_by_status.active title="Active Replications" status_color="green" %}
+      {% endif %}
+
+      <!-- Error Replications -->
+      {% if replication_rows_by_status.error %}
+      {% include 'partials/replication_table.html' with replications=replication_rows_by_status.error title="Error Replications" status_color="red" %}
+      {% endif %}
+
+      <!-- Paused Replications -->
+      {% if replication_rows_by_status.paused %}
+      {% include 'partials/replication_table.html' with replications=replication_rows_by_status.paused title="Paused Replications" status_color="yellow" %}
+      {% endif %}
+
+      <!-- Configured Replications -->
+      {% if replication_rows_by_status.configured %}
+      {% include 'partials/replication_table.html' with replications=replication_rows_by_status.configured title="Configured Replications" status_color="blue" %}
+      {% endif %}
+
+      <!-- Incomplete Replications -->
+      {% if replication_rows_by_status.incomplete %}
+      {% include 'partials/replication_table.html' with replications=replication_rows_by_status.incomplete title="Incomplete Setups" status_color="gray" %}
+      {% endif %}
+
+      <!-- Empty State -->
+      {% if not replication_rows_by_status.active and not replication_rows_by_status.error and not replication_rows_by_status.paused and not replication_rows_by_status.configured and not replication_rows_by_status.incomplete %}
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm p-12">
+        <div class="text-center">
+          <svg class="mx-auto h-16 w-16 text-gray-300 dark:text-gray-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path>
+          </svg>
+          <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">No replications found</h3>
+          <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+            {% if search_query or status_filter or client_filter %}
+              No replications match your current filters. Try adjusting your search criteria.
+            {% else %}
+              Get started by setting up CDC for a client's datasource connection.
+            {% endif %}
+          </p>
+          {% if search_query or status_filter or client_filter %}
+          <a href="{% url 'replications_list' %}" class="inline-flex items-center text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
+            Clear all filters →
+          </a>
+          {% else %}
+          <a href="{% url 'clients_list' %}" class="inline-flex items-center text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
+            View clients →
+          </a>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+    </div>
+
+  </div>
+
+</div>
+
+{% endblock %}

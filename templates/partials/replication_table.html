@@ -1,4 +1,22 @@
-<div class="overflow-x-auto">
+<div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
+
+  <!-- Section Header -->
+  {% if title %}
+  <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
+    <h3 class="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+      <span class="w-2 h-2 rounded-full
+        {% if status_color == 'green' %}bg-green-500
+        {% elif status_color == 'red' %}bg-red-500
+        {% elif status_color == 'yellow' %}bg-yellow-500
+        {% elif status_color == 'blue' %}bg-blue-500
+        {% else %}bg-gray-500{% endif %}">
+      </span>
+      {{ title }}
+    </h3>
+  </div>
+  {% endif %}
+
+  <div class="overflow-x-auto">
   <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
     <thead class="bg-gray-50 dark:bg-gray-900">
       <tr>
@@ -29,7 +47,7 @@
       </tr>
     </thead>
     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-      {% for row in rows %}
+      {% for row in replications %}
       <tr class="hover:bg-gray-50 dark:hover:bg-gray-700 transition {% if section_type == 'incomplete' %}opacity-75{% endif %}">
         <!-- Client -->
         <td class="px-6 py-4 whitespace-nowrap">
@@ -268,4 +286,11 @@ function deleteConfig(configId) {
     });
   }
 }
+
+function openEditModal(configId) {
+  // Navigate to the configuration edit page
+  window.location.href = `/cdc/config/${configId}/edit/`;
+}
 </script>
+
+</div>

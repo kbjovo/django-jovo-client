@@ -100,10 +100,14 @@ def get_mysql_connector_config(
         # Snapshot mode
         # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
         # initial: Snapshot only on first connector creation (strict, production)
-        "snapshot.mode": "when_needed",  # Options: initial, when_needed, never, schema_only
-        
+        "snapshot.mode": "initial",  # Options: initial, when_needed, never, schema_only
+
         # Include schema changes
         "include.schema.changes": "true",
+
+        # Incremental snapshot configuration (for adding new tables after creation)
+        "incremental.snapshot.allow.schema.changes": "true",
+        "incremental.snapshot.chunk.size": "1024",
         
         # Decimal handling
         "decimal.handling.mode": "precise",  # Options: precise, double, string
@@ -138,8 +142,17 @@ def get_mysql_connector_config(
     if tables_whitelist:
         # Format: database.table1,database.table2
         tables_full = [f"{db_config.database_name}.{table}" for table in tables_whitelist]
+
+        # CRITICAL: Add signal table for incremental snapshots
+        # This allows Debezium to receive signals for snapshotting new tables
+        signal_table = "debezium_signal"
+        tables_full.append(f"{db_config.database_name}.{signal_table}")
+
         config["table.include.list"] = ",".join(tables_full)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
+        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables + signal table")
+
+        # Configure signal table
+        config["signal.data.collection"] = f"{db_config.database_name}.{signal_table}"
     
     # Add configuration from ReplicationConfig if provided
     if replication_config:
@@ -212,10 +225,14 @@ def get_postgresql_connector_config(
         # Snapshot mode
         # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
         # initial: Snapshot only on first connector creation (strict, production)
-        "snapshot.mode": "when_needed",
+        "snapshot.mode": "initial",
 
         # Include schema changes
         "include.schema.changes": "true",
+
+        # Incremental snapshot configuration (for adding new tables after creation)
+        "incremental.snapshot.allow.schema.changes": "true",
+        "incremental.snapshot.chunk.size": "1024",
         
         # Decimal handling
         "decimal.handling.mode": "precise",
@@ -230,8 +247,16 @@ def get_postgresql_connector_config(
     # Add table whitelist if specified
     if tables_whitelist:
         tables_full = [f"{schema_name}.{table}" for table in tables_whitelist]
+
+        # CRITICAL: Add signal table for incremental snapshots
+        signal_table = "debezium_signal"
+        tables_full.append(f"{schema_name}.{signal_table}")
+
         config["table.include.list"] = ",".join(tables_full)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
+        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables + signal table")
+
+        # Configure signal table
+        config["signal.data.collection"] = f"{schema_name}.{signal_table}"
 
     # Add custom configuration
     if replication_config:
@@ -291,7 +316,11 @@ def get_oracle_connector_config(
         # Snapshot mode
         # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
         # initial: Snapshot only on first connector creation (strict, production)
-        "snapshot.mode": "when_needed",
+        "snapshot.mode": "initial",
+
+        # Incremental snapshot configuration (for adding new tables after creation)
+        "incremental.snapshot.allow.schema.changes": "true",
+        "incremental.snapshot.chunk.size": "1024",
 
         # Log mining settings
         "log.mining.strategy": "online_catalog",
@@ -304,8 +333,15 @@ def get_oracle_connector_config(
     
     # Add table whitelist if specified
     if tables_whitelist:
-        config["table.include.list"] = ",".join(tables_whitelist)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
+        # CRITICAL: Add signal table for incremental snapshots
+        signal_table = "debezium_signal"
+        tables_with_signal = list(tables_whitelist) + [signal_table]
+
+        config["table.include.list"] = ",".join(tables_with_signal)
+        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables + signal table")
+
+        # Configure signal table
+        config["signal.data.collection"] = signal_table
 
     # Add custom configuration
     if replication_config:

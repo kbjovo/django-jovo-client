@@ -1,2 +1,3 @@
 django: python manage.py runserver
 tailwind: python manage.py tailwind start
+celery_beat: celery -A jovoclient beat -l info

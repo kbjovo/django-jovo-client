@@ -1,0 +1,221 @@
+{% extends "index.html" %}
+{% load cotton %}
+
+{% block content %}
+
+<!-- Show Django messages as toasts -->
+{% if messages %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        {% for message in messages %}
+            showToast('{{ message.tags }}', '{{ message }}');
+        {% endfor %}
+    });
+</script>
+{% endif %}
+
+<!-- Monitoring Dashboard Container (no vertical scroll on container) -->
+<div class="h-full flex flex-col overflow-hidden">
+
+  <!-- Header Section (fixed, no scroll) -->
+  <div class="flex-shrink-0 px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+    <div class="flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Real-Time Monitoring</h1>
+        <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Monitor active replication connectors and their health status</p>
+      </div>
+      <button
+        onclick="window.location.reload()"
+        class="inline-flex text-sm items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 px-4 rounded-lg shadow-sm hover:shadow transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+        </svg>
+        Refresh
+      </button>
+    </div>
+  </div>
+
+  <!-- Scrollable Content Area -->
+  <div class="flex-1 overflow-y-auto px-6 py-6">
+
+    <!-- Statistics Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+      <c-stat-card
+        title="Active Connectors"
+        value="{{ total_active|default:0 }}"
+        icon="sync"
+        color="blue"
+      />
+
+      <c-stat-card
+        title="Healthy"
+        value="{{ healthy_count|default:0 }}"
+        icon="chart"
+        color="green"
+      />
+
+      <c-stat-card
+        title="Unhealthy"
+        value="{{ unhealthy_count|default:0 }}"
+        icon="alert"
+        color="{% if unhealthy_count > 0 %}red{% else %}gray{% endif %}"
+      />
+
+      <c-stat-card
+        title="Total Errors"
+        value="{{ total_errors|default:0 }}"
+        icon="alert"
+        color="{% if total_errors > 0 %}red{% else %}gray{% endif %}"
+      />
+    </div>
+
+    <!-- Monitoring Grid -->
+    {% if monitoring_data %}
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {% for item in monitoring_data %}
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
+
+        <!-- Header -->
+        <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700 {% if item.is_healthy %}bg-green-50 dark:bg-green-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3 min-w-0 flex-1">
+              <!-- Status Indicator -->
+              <div class="flex-shrink-0">
+                {% if item.is_healthy %}
+                <div class="w-10 h-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
+                  <svg class="w-5 h-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                  </svg>
+                </div>
+                {% else %}
+                <div class="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+                  <svg class="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                  </svg>
+                </div>
+                {% endif %}
+              </div>
+
+              <!-- Client Info -->
+              <div class="min-w-0 flex-1">
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white truncate">
+                  {{ item.config.client_database.client.name }}
+                </h3>
+                <p class="text-xs text-gray-600 dark:text-gray-400 truncate">
+                  {{ item.config.client_database.connection_name }}
+                </p>
+              </div>
+            </div>
+
+            <!-- Status Badge -->
+            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold flex-shrink-0
+              {% if item.connector_state == 'RUNNING' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
+              {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400
+              {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400
+              {% else %}bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300{% endif %}">
+              {{ item.connector_state }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Body -->
+        <div class="p-5 space-y-4">
+
+          <!-- Connector Name -->
+          <div>
+            <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Connector Name</p>
+            <p class="text-sm text-gray-900 dark:text-white font-mono">{{ item.config.connector_name }}</p>
+          </div>
+
+          <!-- Tasks -->
+          {% if item.tasks %}
+          <div>
+            <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Tasks ({{ item.tasks|length }})</p>
+            <div class="space-y-2">
+              {% for task in item.tasks %}
+              <div class="flex items-center justify-between p-2 rounded-lg bg-gray-50 dark:bg-gray-700/50">
+                <div class="flex items-center gap-2 min-w-0 flex-1">
+                  {% if task.state == 'RUNNING' %}
+                  <div class="flex-shrink-0 w-2 h-2 rounded-full bg-green-500"></div>
+                  {% elif task.state == 'FAILED' %}
+                  <div class="flex-shrink-0 w-2 h-2 rounded-full bg-red-500"></div>
+                  {% else %}
+                  <div class="flex-shrink-0 w-2 h-2 rounded-full bg-gray-400"></div>
+                  {% endif %}
+                  <span class="text-xs text-gray-700 dark:text-gray-300 font-mono truncate">Task {{ task.id }}</span>
+                </div>
+                <span class="text-xs font-medium flex-shrink-0
+                  {% if task.state == 'RUNNING' %}text-green-600 dark:text-green-400
+                  {% elif task.state == 'FAILED' %}text-red-600 dark:text-red-400
+                  {% else %}text-gray-600 dark:text-gray-400{% endif %}">
+                  {{ task.state }}
+                </span>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+
+          <!-- Error Message -->
+          {% if item.error_message %}
+          <div class="p-3 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30">
+            <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Error</p>
+            <p class="text-xs text-red-700 dark:text-red-300">{{ item.error_message }}</p>
+          </div>
+          {% endif %}
+
+          <!-- Actions -->
+          <div class="flex items-center gap-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+            <a href="{% url 'cdc_monitor_connector' item.config.pk %}"
+               class="flex-1 inline-flex justify-center items-center gap-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+              </svg>
+              View Details
+            </a>
+            <a href="{% url 'client_detail' item.config.client_database.client.pk %}"
+               class="flex-1 inline-flex justify-center items-center gap-1 px-3 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 text-xs font-medium rounded-lg transition">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+              </svg>
+              View Client
+            </a>
+          </div>
+        </div>
+
+      </div>
+      {% endfor %}
+    </div>
+
+    {% else %}
+    <!-- Empty State -->
+    <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm p-12">
+      <div class="text-center">
+        <svg class="mx-auto h-16 w-16 text-gray-300 dark:text-gray-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+        </svg>
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">No active replications</h3>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Start a replication to see real-time monitoring data here.
+        </p>
+        <a href="{% url 'replications_list' %}" class="inline-flex items-center text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
+          View all replications →
+        </a>
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+
+</div>
+
+<!-- Auto-refresh script -->
+<script>
+// Auto-refresh every 30 seconds
+setTimeout(function() {
+  window.location.reload();
+}, 30000);
+</script>
+
+{% endblock %}

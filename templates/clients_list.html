@@ -1,0 +1,47 @@
+{% extends "index.html" %}
+{% load cotton %}
+
+{% block content %}
+
+<!-- Show Django messages as toasts -->
+{% if messages %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        {% for message in messages %}
+            showToast('{{ message.tags }}', '{{ message }}');
+        {% endfor %}
+    });
+</script>
+{% endif %}
+
+<!-- Clients List Container (no vertical scroll on container) -->
+<div class="h-full flex flex-col overflow-hidden">
+
+  <!-- Header Section (fixed, no scroll) -->
+  <div class="flex-shrink-0 px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+    <div class="flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Clients</h1>
+        <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Manage your client relationships and configurations</p>
+      </div>
+      <a href="{% url 'client_add' %}"
+         class="inline-flex text-sm items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 px-4 rounded-lg shadow-sm hover:shadow transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+        </svg>
+        Add Client
+      </a>
+    </div>
+  </div>
+
+  <!-- Scrollable Content Area -->
+  <div class="flex-1 overflow-y-auto px-6 py-6">
+
+    <!-- Table Component -->
+    <c-table :config="config" :page_obj="page_obj" />
+
+  </div>
+
+</div>
+
+{% endblock %}
