@@ -98,7 +98,7 @@ class ReplicationConfig(models.Model):
         default=False,
         help_text="Drop and recreate tables (only for full refresh)"
     )
-    
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -178,6 +178,12 @@ class TableMapping(models.Model):
         blank=True,
         help_text="Leave empty to inherit from ReplicationConfig"
     )
+    sync_frequency = models.CharField(
+        max_length=20,
+        choices=ReplicationConfig.SYNC_FREQUENCY_CHOICES,
+        blank=True,
+        help_text="Leave empty to inherit from ReplicationConfig"
+    )
     
     # Incremental sync settings
     incremental_column = models.CharField(
@@ -249,6 +255,10 @@ class TableMapping(models.Model):
     def get_effective_sync_type(self):
         """Get sync type (from table or config)"""
         return self.sync_type or self.replication_config.sync_type
+
+    def get_effective_sync_frequency(self):
+        """Get sync frequency (from table or config)"""
+        return self.sync_frequency or self.replication_config.sync_frequency
     
     def get_selected_columns(self):
         """Get list of enabled column mappings"""

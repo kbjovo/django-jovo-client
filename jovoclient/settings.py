@@ -254,3 +254,74 @@ DEBEZIUM_CONFIG = {
     'SCHEMA_REGISTRY_URL': 'http://localhost:8081',
     'CONSUMER_GROUP_PREFIX': 'cdc_consumer',
 }
+
+# ====================================
+# KAFKA TOPIC CONFIGURATION
+# ====================================
+# These settings control how Kafka topics are created and managed
+# Can be overridden via environment variables for different environments
+KAFKA_TOPIC_CONFIG = {
+    # Number of partitions per topic
+    # - 1 partition = strict message ordering (recommended for CDC)
+    # - Multiple partitions = higher throughput but no ordering guarantee
+    # Override: KAFKA_TOPIC_PARTITIONS=3
+    'PARTITIONS': int(os.getenv('KAFKA_TOPIC_PARTITIONS', '1')),
+
+    # Replication factor (number of copies)
+    # - Must be <= number of Kafka brokers
+    # - 1 broker (dev) = replication factor 1
+    # - 3+ brokers (prod) = replication factor 2 or 3
+    # Override: KAFKA_TOPIC_REPLICATION_FACTOR=3
+    'REPLICATION_FACTOR': int(os.getenv('KAFKA_TOPIC_REPLICATION_FACTOR', '1')),
+
+    # Retention time in milliseconds
+    # How long Kafka keeps messages before deletion
+    # - 1 hour = 3600000
+    # - 1 day = 86400000
+    # - 7 days = 604800000 (default, recommended for CDC)
+    # - 30 days = 2592000000
+    # - Forever = -1
+    # Override: KAFKA_TOPIC_RETENTION_MS=2592000000
+    'RETENTION_MS': int(os.getenv('KAFKA_TOPIC_RETENTION_MS', '604800000')),  # 7 days default
+
+    # Retention size in bytes per partition
+    # Maximum size per partition before old messages are deleted
+    # -1 = unlimited (default)
+    # Override: KAFKA_TOPIC_RETENTION_BYTES=1073741824
+    'RETENTION_BYTES': int(os.getenv('KAFKA_TOPIC_RETENTION_BYTES', '-1')),
+
+    # Cleanup policy
+    # - 'delete': Delete old messages after retention period (recommended for CDC)
+    # - 'compact': Keep only latest value per key
+    # Override: KAFKA_TOPIC_CLEANUP_POLICY=compact
+    'CLEANUP_POLICY': os.getenv('KAFKA_TOPIC_CLEANUP_POLICY', 'delete'),
+
+    # Compression type
+    # - 'none': No compression (fastest, uses most disk)
+    # - 'gzip': Good compression, moderate CPU
+    # - 'snappy': Balanced (recommended)
+    # - 'lz4': Fast compression/decompression
+    # - 'zstd': Best compression ratio
+    # Override: KAFKA_TOPIC_COMPRESSION=lz4
+    'COMPRESSION_TYPE': os.getenv('KAFKA_TOPIC_COMPRESSION_TYPE', 'snappy'),
+
+    # Minimum in-sync replicas
+    # Number of replicas that must acknowledge write before success
+    # Must be <= replication factor
+    # - 1 broker = 1
+    # - 3 brokers with RF=3 = 2 (recommended for production)
+    # Override: KAFKA_TOPIC_MIN_ISR=2
+    'MIN_INSYNC_REPLICAS': int(os.getenv('KAFKA_TOPIC_MIN_ISR', '1')),
+
+    # Segment size in bytes
+    # Kafka rolls to new log segment after this size
+    # Default: 1GB (1073741824)
+    # Override: KAFKA_TOPIC_SEGMENT_BYTES=536870912
+    'SEGMENT_BYTES': int(os.getenv('KAFKA_TOPIC_SEGMENT_BYTES', '1073741824')),
+
+    # Segment time in milliseconds
+    # Kafka rolls to new log segment after this time
+    # Default: 7 days (604800000)
+    # Override: KAFKA_TOPIC_SEGMENT_MS=86400000
+    'SEGMENT_MS': int(os.getenv('KAFKA_TOPIC_SEGMENT_MS', '604800000')),
+}

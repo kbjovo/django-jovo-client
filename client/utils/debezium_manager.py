@@ -98,11 +98,19 @@ class DebeziumConnectorManager:
                 return False, None, f"Unsupported HTTP method: {method}"
             
             # Check if request was successful
-            if response.status_code in [200, 201, 204]:
+            # 200: OK, 201: Created, 202: Accepted (async operations), 204: No Content
+            if response.status_code in [200, 201, 202, 204]:
                 # Some DELETE requests return 204 with no content
                 if response.status_code == 204:
                     return True, {}, None
-                
+
+                # 202 Accepted may have no response body
+                if response.status_code == 202:
+                    try:
+                        return True, response.json() if response.text else {}, None
+                    except json.JSONDecodeError:
+                        return True, {}, None
+
                 try:
                     return True, response.json(), None
                 except json.JSONDecodeError:

@@ -1,0 +1,608 @@
+<!-- Connector Edit Modal -->
+<div
+  x-data="connectorEditModal()"
+  x-show="$store.editModal.isOpen"
+  x-cloak
+  @keydown.escape.window="$store.editModal.close()"
+  class="fixed inset-0 z-50 overflow-y-auto"
+  style="display: none;"
+>
+  <!-- Backdrop -->
+  <div
+    x-show="$store.editModal.isOpen"
+    x-transition:enter="ease-out duration-300"
+    x-transition:enter-start="opacity-0"
+    x-transition:enter-end="opacity-100"
+    x-transition:leave="ease-in duration-200"
+    x-transition:leave-start="opacity-100"
+    x-transition:leave-end="opacity-0"
+    class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity"
+    @click="$store.editModal.close()"
+  ></div>
+
+  <!-- Modal Content -->
+  <div class="flex min-h-full items-center justify-center p-4">
+    <div
+      x-show="$store.editModal.isOpen"
+      x-transition:enter="ease-out duration-300"
+      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+      x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+      x-transition:leave="ease-in duration-200"
+      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+      class="relative transform overflow-hidden rounded-lg bg-white dark:bg-gray-800 shadow-xl transition-all w-full max-w-6xl"
+      @click.away="$store.editModal.close()"
+    >
+      <!-- Header -->
+      <div class="bg-gray-50 dark:bg-gray-900 px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Edit Connector Configuration</h3>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1" x-show="configData">
+              <span x-text="configData?.client_name"></span> &rarr; <span x-text="configData?.database_name"></span>
+            </p>
+          </div>
+          <button
+            @click="$store.editModal.close()"
+            class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+          >
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Loading State -->
+      <div x-show="loading" class="p-12 text-center">
+        <svg class="animate-spin h-12 w-12 mx-auto text-blue-600" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <p class="mt-4 text-gray-600 dark:text-gray-400">Loading configuration...</p>
+      </div>
+
+      <!-- Error State -->
+      <div x-show="error && !loading" class="p-12 text-center">
+        <svg class="w-12 h-12 mx-auto text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+        </svg>
+        <p class="mt-4 text-red-600 dark:text-red-400" x-text="error"></p>
+      </div>
+
+      <!-- Form Content -->
+      <div x-show="!loading && !error && configData" class="p-6 max-h-[70vh] overflow-y-auto">
+
+        <!-- Basic Settings -->
+        <div class="mb-6">
+          <h4 class="text-md font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+            </svg>
+            Basic Settings
+          </h4>
+          <div class="grid grid-cols-2 gap-4 bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Connector Name</label>
+              <input
+                type="text"
+                x-model="configData.connector_name"
+                readonly
+                class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+              >
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Status</label>
+              <span
+                class="inline-flex items-center px-3 py-2 rounded-lg text-sm font-medium"
+                :class="{
+                  'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400': configData.status === 'active',
+                  'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400': configData.status === 'paused',
+                  'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400': configData.status === 'error',
+                  'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400': configData.status === 'configured',
+                  'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400': configData.status === 'incomplete'
+                }"
+                x-text="configData.status_display"
+              ></span>
+            </div>
+          </div>
+        </div>
+
+        Sync Configuration
+        <div class="mb-6">
+          <h4 class="text-md font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+            Sync Configuration
+          </h4>
+          <div class="grid grid-cols-2 gap-4 bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Sync Type</label>
+              <select
+                x-model="configData.sync_type"
+                class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="full">Full Refresh</option>
+                <option value="incremental">Incremental Sync</option>
+                <option value="realtime">Real-time CDC</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Sync Frequency</label>
+              <select
+                x-model="configData.sync_frequency"
+                class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="realtime">Real-time (CDC)</option>
+                <option value="every_1min">Every 1 minute</option>
+                <option value="every_5min">Every 5 minutes</option>
+                <option value="every_15min">Every 15 minutes</option>
+                <option value="every_30min">Every 30 minutes</option>
+                <option value="hourly">Hourly</option>
+                <option value="daily">Daily</option>
+                <option value="manual">Manual Only</option>
+              </select>
+            </div>
+            <div class="col-span-2 flex items-center gap-6">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  x-model="configData.auto_create_tables"
+                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                >
+                <span class="text-sm text-gray-700 dark:text-gray-300">Auto-create tables if they don't exist</span>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  x-model="configData.drop_before_sync"
+                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                >
+                <span class="text-sm text-gray-700 dark:text-gray-300">Drop & recreate tables (Full Refresh only)</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Available Tables to Add -->
+        <div class="mb-6" x-show="availableTables && availableTables.length > 0">
+          <h4 class="text-md font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+            </svg>
+            Add Tables to Replication
+          </h4>
+          <div class="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border border-blue-200 dark:border-blue-800">
+            <p class="text-sm text-blue-800 dark:text-blue-400 mb-3">Select tables from your database to add to this replication:</p>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-2">
+              <template x-for="table in availableTables" :key="table">
+                <label class="flex items-center gap-2 p-2 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700">
+                  <input
+                    type="checkbox"
+                    :value="table"
+                    @change="toggleTableToAdd(table)"
+                    class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  >
+                  <span class="text-sm text-gray-900 dark:text-white font-mono" x-text="table"></span>
+                </label>
+              </template>
+            </div>
+            <button
+              @click="addSelectedTables()"
+              x-show="tablesToAdd.length > 0"
+              class="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition"
+            >
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+              </svg>
+              Add <span x-text="tablesToAdd.length"></span> Selected Table(s)
+            </button>
+          </div>
+        </div>
+
+        <!-- Configured Tables -->
+        <div class="mb-6">
+          <h4 class="text-md font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+            </svg>
+            Configured Tables
+            <span class="text-sm font-normal text-gray-500 dark:text-gray-400">
+              (<span x-text="configData?.tables?.length || 0"></span> tables)
+            </span>
+          </h4>
+
+          <div x-show="!configData?.tables || configData.tables.length === 0" class="text-center py-8 bg-gray-50 dark:bg-gray-900 rounded-lg border-2 border-dashed border-gray-300 dark:border-gray-700">
+            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+            </svg>
+            <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">No tables configured yet</p>
+          </div>
+
+          <!-- Table List -->
+          <div class="space-y-3">
+            <template x-for="(table, tableIndex) in configData?.tables" :key="tableIndex">
+              <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                <!-- Table Header -->
+                <div
+                  @click="table.expanded = !table.expanded"
+                  class="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-900 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+                >
+                  <div class="flex items-center gap-3">
+                    <label @click.stop class="flex items-center">
+                      <input
+                        type="checkbox"
+                        x-model="table.is_enabled"
+                        class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      >
+                    </label>
+                    <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                    </svg>
+                    <div>
+                      <span class="font-mono text-sm font-medium text-gray-900 dark:text-white" x-text="table.source_table"></span>
+                      <span class="text-xs text-gray-500 dark:text-gray-400 ml-2">
+                        → <span x-text="table.target_table"></span>
+                      </span>
+                      <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        <span x-text="table.columns?.length || 0"></span> columns
+                      </div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button
+                      @click.stop="removeTable(tableIndex)"
+                      class="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition"
+                      title="Remove table"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                      </svg>
+                    </button>
+                    <svg
+                      class="w-5 h-5 text-gray-400 transition-transform"
+                      :class="{ 'rotate-180': table.expanded }"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                    </svg>
+                  </div>
+                </div>
+
+                <!-- Table Details (Expandable) -->
+                <div x-show="table.expanded" x-collapse class="p-4 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
+                  <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Target Table Name</label>
+                    <input
+                      type="text"
+                      x-model="table.target_table"
+                      class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+                    >
+                  </div>
+
+                  <!-- Per-Table Sync Settings -->
+                  <div class="mb-4 grid grid-cols-2 gap-4">
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Sync Type
+                        <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">(leave empty to inherit)</span>
+                      </label>
+                      <select
+                        x-model="table.sync_type"
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 text-sm"
+                      >
+                        <option value="">Inherit from global config</option>
+                        <option value="full">Full Refresh</option>
+                        <option value="incremental">Incremental</option>
+                        <option value="realtime">Real-time CDC</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Sync Frequency
+                        <span class="text-xs text-gray-500 dark:text-gray-400 font-normal">(leave empty to inherit)</span>
+                      </label>
+                      <select
+                        x-model="table.sync_frequency"
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 text-sm"
+                      >
+                        <option value="">Inherit from global config</option>
+                        <option value="realtime">Real-time (CDC)</option>
+                        <option value="every_1min">Every 1 minute</option>
+                        <option value="every_5min">Every 5 minutes</option>
+                        <option value="every_15min">Every 15 minutes</option>
+                        <option value="every_30min">Every 30 minutes</option>
+                        <option value="hourly">Hourly</option>
+                        <option value="daily">Daily</option>
+                        <option value="manual">Manual Only</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <!-- Columns -->
+                  <div>
+                    <h5 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Columns</h5>
+                    <div class="space-y-2 max-h-60 overflow-y-auto">
+                      <template x-for="(column, colIndex) in table.columns" :key="colIndex">
+                        <div class="flex items-center gap-3 p-2 bg-gray-50 dark:bg-gray-900 rounded">
+                          <input
+                            type="checkbox"
+                            x-model="column.is_enabled"
+                            class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          >
+                          <div class="flex-1 grid grid-cols-2 gap-2">
+                            <div>
+                              <span class="text-xs text-gray-500 dark:text-gray-400">Source:</span>
+                              <span class="text-sm font-mono text-gray-900 dark:text-white ml-1" x-text="column.source_column"></span>
+                            </div>
+                            <div>
+                              <input
+                                type="text"
+                                x-model="column.target_column"
+                                placeholder="Target column name"
+                                class="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                              >
+                            </div>
+                          </div>
+                          <span class="text-xs font-mono text-gray-500 dark:text-gray-400 w-20" x-text="column.data_type"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Footer -->
+      <div class="bg-gray-50 dark:bg-gray-900 px-6 py-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <input
+            type="checkbox"
+            x-model="restartConnector"
+            id="restart-checkbox"
+            class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            x-show="configData?.connector_name"
+          >
+          <label
+            for="restart-checkbox"
+            class="text-sm text-gray-700 dark:text-gray-300 cursor-pointer"
+            x-show="configData?.connector_name"
+          >
+            Restart connector after saving changes
+          </label>
+        </div>
+        <div class="flex items-center gap-3">
+          <button
+            @click="$store.editModal.close()"
+            class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition"
+          >
+            Cancel
+          </button>
+          <button
+            @click="saveChanges()"
+            :disabled="saving"
+            class="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm font-medium rounded-lg transition"
+          >
+            <svg x-show="!saving" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+            <svg x-show="saving" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span x-text="saving ? 'Saving...' : 'Save Changes'"></span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// Alpine.js Store for Modal State
+document.addEventListener('alpine:init', () => {
+  Alpine.store('editModal', {
+    isOpen: false,
+    configId: null,
+
+    open(configId) {
+      this.configId = configId;
+      this.isOpen = true;
+      // Trigger data load
+      window.dispatchEvent(new CustomEvent('load-connector-config', { detail: { configId } }));
+    },
+
+    close() {
+      this.isOpen = false;
+      this.configId = null;
+    }
+  });
+});
+
+// Alpine.js Component for Modal Logic
+function connectorEditModal() {
+  return {
+    loading: false,
+    saving: false,
+    error: null,
+    configData: null,
+    availableTables: [],
+    tablesToAdd: [],
+    restartConnector: false,
+
+    init() {
+      // Listen for modal open event
+      window.addEventListener('load-connector-config', (e) => {
+        this.loadConfig(e.detail.configId);
+      });
+    },
+
+    async loadConfig(configId) {
+      this.loading = true;
+      this.error = null;
+      this.configData = null;
+      this.availableTables = [];
+      this.tablesToAdd = [];
+
+      try {
+        const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+        const response = await fetch(`/cdc/config/${configId}/details/`, {
+          headers: {
+            'X-CSRFToken': csrftoken
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        if (data.success) {
+          this.configData = data.config;
+          this.availableTables = data.available_tables || [];
+
+          // Ensure all tables have expanded property
+          if (this.configData.tables) {
+            this.configData.tables.forEach(table => {
+              table.expanded = false;
+            });
+          }
+        } else {
+          this.error = data.error || 'Failed to load configuration';
+        }
+      } catch (err) {
+        this.error = err.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    toggleTableToAdd(tableName) {
+      const index = this.tablesToAdd.indexOf(tableName);
+      if (index > -1) {
+        this.tablesToAdd.splice(index, 1);
+      } else {
+        this.tablesToAdd.push(tableName);
+      }
+    },
+
+    async addSelectedTables() {
+      if (this.tablesToAdd.length === 0) return;
+
+      this.loading = true;
+      try {
+        const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+        const response = await fetch(`/database/${this.configData.database_id}/table-schemas/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrftoken
+          },
+          body: JSON.stringify({ tables: this.tablesToAdd })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+          // Add the new tables to configData
+          data.schemas.forEach(schema => {
+            this.configData.tables.push({
+              source_table: schema.table_name,
+              target_table: schema.table_name,
+              is_enabled: true,
+              expanded: true,
+              columns: schema.columns.map(col => ({
+                source_column: col.name,
+                target_column: col.name,
+                data_type: col.type,
+                is_enabled: true
+              }))
+            });
+          });
+
+          // Clear selections and remove from available
+          this.tablesToAdd.forEach(tableName => {
+            const index = this.availableTables.indexOf(tableName);
+            if (index > -1) {
+              this.availableTables.splice(index, 1);
+            }
+          });
+          this.tablesToAdd = [];
+        } else {
+          alert('Error loading table schemas: ' + (data.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    removeTable(tableIndex) {
+      if (confirm('Are you sure you want to remove this table from replication?')) {
+        const removedTable = this.configData.tables[tableIndex];
+        this.configData.tables.splice(tableIndex, 1);
+
+        // Add back to available tables if not already there
+        if (!this.availableTables.includes(removedTable.source_table)) {
+          this.availableTables.push(removedTable.source_table);
+          this.availableTables.sort();
+        }
+      }
+    },
+
+    async saveChanges() {
+      this.saving = true;
+      this.error = null;
+
+      try {
+        const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+        const response = await fetch(`/cdc/config/${this.configData.id}/update/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrftoken
+          },
+          body: JSON.stringify({
+            sync_type: this.configData.sync_type,
+            sync_frequency: this.configData.sync_frequency,
+            auto_create_tables: this.configData.auto_create_tables,
+            drop_before_sync: this.configData.drop_before_sync,
+            tables: this.configData.tables,
+            restart_connector: this.restartConnector
+          })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          alert('Configuration updated successfully!');
+          this.$store.editModal.close();
+          location.reload(); // Refresh the page to show updated data
+        } else {
+          this.error = data.error || 'Failed to save changes';
+          alert('Error: ' + this.error);
+        }
+      } catch (err) {
+        this.error = err.message;
+        alert('Error: ' + this.error);
+      } finally {
+        this.saving = false;
+      }
+    }
+  };
+}
+</script>
+
+<style>
+[x-cloak] { display: none !important; }
+</style>

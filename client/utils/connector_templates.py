@@ -98,7 +98,9 @@ def get_mysql_connector_config(
         "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",
         
         # Snapshot mode
-        "snapshot.mode": "initial",  # Options: initial, when_needed, never, schema_only
+        # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
+        # initial: Snapshot only on first connector creation (strict, production)
+        "snapshot.mode": "when_needed",  # Options: initial, when_needed, never, schema_only
         
         # Include schema changes
         "include.schema.changes": "true",
@@ -206,10 +208,12 @@ def get_postgresql_connector_config(
         # Schema history
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",
-        
+
         # Snapshot mode
-        "snapshot.mode": "initial",
-        
+        # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
+        # initial: Snapshot only on first connector creation (strict, production)
+        "snapshot.mode": "when_needed",
+
         # Include schema changes
         "include.schema.changes": "true",
         
@@ -283,10 +287,12 @@ def get_oracle_connector_config(
         # Schema history
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",
-        
+
         # Snapshot mode
-        "snapshot.mode": "initial",
-        
+        # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
+        # initial: Snapshot only on first connector creation (strict, production)
+        "snapshot.mode": "when_needed",
+
         # Log mining settings
         "log.mining.strategy": "online_catalog",
         "log.mining.batch.size.default": "1000",

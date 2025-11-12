@@ -57,6 +57,34 @@ class DebeziumCDCConsumer:
         # initialize
         try:
             self.consumer = Consumer(self.consumer_config)
+
+            # Filter topics to only existing ones
+            self.requested_topics = self.topics
+            existing_topics = self._get_existing_topics()
+
+            # Check which topics exist
+            topics_to_subscribe = []
+            missing_topics = []
+
+            for topic in self.requested_topics:
+                if topic in existing_topics:
+                    topics_to_subscribe.append(topic)
+                else:
+                    missing_topics.append(topic)
+
+            # Log warnings for missing topics
+            if missing_topics:
+                logger.warning(f"⚠️  Topics not yet created (will be available after first CDC event): {', '.join(missing_topics)}")
+
+            # Subscribe to existing topics, or all if none exist yet
+            if topics_to_subscribe:
+                self.topics = topics_to_subscribe
+                logger.info(f"📡 Subscribing to existing topics: {', '.join(self.topics)}")
+            else:
+                # No topics exist yet - subscribe anyway (Kafka will handle once created)
+                self.topics = self.requested_topics
+                logger.warning(f"⚠️  No topics exist yet. Subscribing to: {', '.join(self.topics)} (waiting for creation)")
+
             self.consumer.subscribe(self.topics)
             logger.info(f"Subscribed to topics: {', '.join(self.topics)}")
         except Exception as e:
@@ -76,6 +104,28 @@ class DebeziumCDCConsumer:
             "errors": 0,
             "last_message_time": None,
         }
+
+    # -------------------------
+    # Helper to check existing topics
+    # -------------------------
+    def _get_existing_topics(self) -> List[str]:
+        """Get list of existing topics from Kafka cluster"""
+        try:
+            # Use admin client to get topic metadata
+            from confluent_kafka.admin import AdminClient
+            admin_client = AdminClient({"bootstrap.servers": self.bootstrap_servers})
+
+            # Get cluster metadata (timeout in seconds)
+            metadata = admin_client.list_topics(timeout=5)
+
+            # Extract topic names
+            existing_topics = list(metadata.topics.keys())
+            logger.debug(f"Found {len(existing_topics)} existing topics in Kafka")
+
+            return existing_topics
+        except Exception as e:
+            logger.warning(f"Could not fetch existing topics: {e}. Proceeding with subscription anyway.")
+            return []
 
     # -------------------------
     # Type mapping helper
@@ -622,6 +672,10 @@ class DebeziumCDCConsumer:
                     # handle error or partition EOF
                     if msg.error().code() == KafkaError._PARTITION_EOF:
                         logger.debug(f"End of partition reached: {msg.topic()}:{msg.partition()}")
+                        continue
+                    elif msg.error().code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
+                        # Topic doesn't exist yet - this is expected when no CDC events have occurred
+                        logger.debug(f"⚠️  Topic not available yet (waiting for first CDC event): {msg.error()}")
                         continue
                     else:
                         logger.error(f"Kafka error: {msg.error()}")

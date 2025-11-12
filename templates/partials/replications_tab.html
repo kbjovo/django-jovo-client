@@ -1,6 +1,8 @@
 {% load cotton %}
 
-<!-- Compact Statistics Cards -->
+{% csrf_token %}
+
+<!-- Statistics Cards -->
 <div class="grid grid-cols-4 gap-4 mb-6">
   <c-dashboard-card>
     <div class="flex items-center gap-3">
@@ -38,6 +40,19 @@
     </div>
   </c-dashboard-card>
 
+  {% if incomplete_count > 0 %}
+  <c-dashboard-card>
+    <div class="flex items-center gap-3">
+      <svg class="w-6 h-6 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+      </svg>
+      <div>
+        <p class="text-xs text-gray-500 dark:text-gray-400">Incomplete Setups</p>
+        <p class="text-xl font-bold text-gray-900 dark:text-white">{{ incomplete_count }}</p>
+      </div>
+    </div>
+  </c-dashboard-card>
+  {% else %}
   <c-dashboard-card>
     <div class="flex items-center gap-3">
       <svg class="w-6 h-6 text-yellow-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -55,116 +70,265 @@
       </div>
     </div>
   </c-dashboard-card>
+  {% endif %}
 </div>
 
-{% if replication_rows %}
-  <!-- Replications Table -->
-  <c-dashboard-card>
-    <div class="overflow-x-auto">
-      <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-        <thead class="bg-gray-50 dark:bg-gray-900">
-          <tr>
-            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              Client
-            </th>
-            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              Database
-            </th>
-            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              Status
-            </th>
-            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              Connector
-            </th>
-            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              Tables
-            </th>
-            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              Last Sync
-            </th>
-            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-              Actions
-            </th>
-          </tr>
-        </thead>
-        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-          {% for row in replication_rows %}
-          <tr class="hover:bg-gray-50 dark:hover:bg-gray-700 transition">
-            <td class="px-6 py-4 whitespace-nowrap">
-              <a href="{% url 'client_detail' row.client_id %}"
-                 class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300">
-                {{ row.client_name }}
-              </a>
-            </td>
-            <td class="px-6 py-4 whitespace-nowrap">
-              <div class="flex items-center gap-2">
-                <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7"></path>
-                </svg>
-                <div>
-                  <div class="text-sm font-medium text-gray-900 dark:text-white">{{ row.database_name }}</div>
-                  <div class="text-xs text-gray-500 dark:text-gray-400">{{ row.database_type }}</div>
-                </div>
-              </div>
-            </td>
-            <td class="px-6 py-4 whitespace-nowrap">
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-                {% if row.status == 'active' %}
-                  bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400
-                {% elif row.status == 'paused' %}
-                  bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400
-                {% elif row.status == 'error' %}
-                  bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400
-                {% elif row.status == 'configured' %}
-                  bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400
-                {% else %}
-                  bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400
-                {% endif %}">
-                {% if row.status == 'active' %}🟢{% elif row.status == 'paused' %}⏸️{% elif row.status == 'error' %}❌{% elif row.status == 'configured' %}⚙️{% else %}🔴{% endif %}
-                {{ row.status_display }}
-              </span>
-            </td>
-            <td class="px-6 py-4 whitespace-nowrap">
-              <span class="text-xs font-mono text-gray-600 dark:text-gray-400">{{ row.connector_name }}</span>
-            </td>
-            <td class="px-6 py-4 whitespace-nowrap">
-              <span class="text-sm text-gray-900 dark:text-white">{{ row.tables_count }}</span>
-            </td>
-            <td class="px-6 py-4 whitespace-nowrap">
-              <span class="text-xs text-gray-500 dark:text-gray-400">
-                {{ row.last_sync|date:"M d, g:i A"|default:"Never" }}
-              </span>
-            </td>
-            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-              <div class="flex items-center justify-end gap-2">
-                <a href="{% url 'cdc_monitor_connector' row.id %}"
-                   class="inline-flex items-center gap-1 px-2 py-1 text-xs bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded hover:bg-blue-100 dark:hover:bg-blue-900/30 transition">
-                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
-                  </svg>
-                  Monitor
-                </a>
+<!-- Filter Bar -->
+<c-dashboard-card>
+  <form method="get" action="{% url 'main-dashboard' %}" class="space-y-4" x-data="{ showFilters: true }">
+    <input type="hidden" name="tab" value="replications">
 
-                {% if row.status == 'active' %}
-                  <button onclick="alert('Pause functionality coming soon!')"
-                     class="inline-flex items-center gap-1 px-2 py-1 text-xs bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 text-yellow-700 dark:text-yellow-400 rounded hover:bg-yellow-100 dark:hover:bg-yellow-900/30 transition">
-                    ⏸️ Pause
-                  </button>
-                {% elif row.status == 'paused' %}
-                  <button onclick="alert('Resume functionality coming soon!')"
-                     class="inline-flex items-center gap-1 px-2 py-1 text-xs bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-400 rounded hover:bg-green-100 dark:hover:bg-green-900/30 transition">
-                    ▶️ Resume
-                  </button>
-                {% endif %}
-              </div>
-            </td>
-          </tr>
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-gray-900 dark:text-white">Filter Replications</h3>
+      <button type="button" @click="showFilters = !showFilters" class="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300">
+        <span x-show="showFilters">Hide Filters</span>
+        <span x-show="!showFilters">Show Filters</span>
+      </button>
+    </div>
+
+    <div x-show="showFilters" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <!-- Search Box -->
+      <div>
+        <label for="search" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Search</label>
+        <input
+          type="text"
+          id="search"
+          name="search"
+          value="{{ search_query }}"
+          placeholder="Client, database, or connector..."
+          class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        >
+      </div>
+
+      <!-- Status Filter -->
+      <div>
+        <label for="status_filter" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Status</label>
+        <select
+          id="status_filter"
+          name="status_filter"
+          class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        >
+          <option value="">All Statuses</option>
+          <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Active ({{ active_count }})</option>
+          <option value="configured" {% if status_filter == 'configured' %}selected{% endif %}>Configured ({{ configured_count }})</option>
+          <option value="paused" {% if status_filter == 'paused' %}selected{% endif %}>Paused ({{ paused_count }})</option>
+          <option value="error" {% if status_filter == 'error' %}selected{% endif %}>Error ({{ error_count }})</option>
+          <option value="incomplete" {% if status_filter == 'incomplete' %}selected{% endif %}>Incomplete ({{ incomplete_count }})</option>
+        </select>
+      </div>
+
+      <!-- Client Filter -->
+      <div>
+        <label for="client_filter" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Client</label>
+        <select
+          id="client_filter"
+          name="client_filter"
+          class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        >
+          <option value="">All Clients</option>
+          {% for client in all_clients %}
+          <option value="{{ client.id }}" {% if client_filter == client.id|stringformat:"s" %}selected{% endif %}>{{ client.name }}</option>
           {% endfor %}
-        </tbody>
-      </table>
+        </select>
+      </div>
+    </div>
+
+    <div x-show="showFilters" class="flex items-center gap-2">
+      <button
+        type="submit"
+        class="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition"
+      >
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+        </svg>
+        Apply Filters
+      </button>
+
+      {% if search_query or status_filter or client_filter %}
+      <a
+        href="{% url 'main-dashboard' %}?tab=replications"
+        class="inline-flex items-center px-4 py-2 bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 text-sm font-medium rounded-lg transition"
+      >
+        Clear Filters
+      </a>
+      {% endif %}
+    </div>
+  </form>
+</c-dashboard-card>
+
+{% if replication_rows_by_status %}
+
+<!-- Alpine.js data for collapsible sections -->
+<div x-data="{
+  activeExpanded: true,
+  errorExpanded: true,
+  pausedExpanded: false,
+  configuredExpanded: true,
+  incompleteExpanded: false
+}">
+
+  <!-- Active Connectors Section -->
+  {% if replication_rows_by_status.active %}
+  <c-dashboard-card class="mb-4">
+    <div
+      @click="activeExpanded = !activeExpanded"
+      class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition flex items-center justify-between"
+    >
+      <div class="flex items-center gap-3">
+        <svg class="w-5 h-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+        </svg>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Active Connectors</h2>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+          {{ replication_rows_by_status.active|length }}
+        </span>
+      </div>
+      <svg
+        class="w-5 h-5 text-gray-500 transition-transform"
+        :class="{ 'rotate-180': activeExpanded }"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+      </svg>
+    </div>
+    <div x-show="activeExpanded" x-collapse>
+      {% include 'partials/replication_table.html' with rows=replication_rows_by_status.active section_type='active' %}
     </div>
   </c-dashboard-card>
+  {% endif %}
+
+  <!-- Error Connectors Section -->
+  {% if replication_rows_by_status.error %}
+  <c-dashboard-card class="mb-4">
+    <div
+      @click="errorExpanded = !errorExpanded"
+      class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition flex items-center justify-between"
+    >
+      <div class="flex items-center gap-3">
+        <svg class="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path>
+        </svg>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Error Connectors</h2>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+          {{ replication_rows_by_status.error|length }}
+        </span>
+      </div>
+      <svg
+        class="w-5 h-5 text-gray-500 transition-transform"
+        :class="{ 'rotate-180': errorExpanded }"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+      </svg>
+    </div>
+    <div x-show="errorExpanded" x-collapse>
+      {% include 'partials/replication_table.html' with rows=replication_rows_by_status.error section_type='error' %}
+    </div>
+  </c-dashboard-card>
+  {% endif %}
+
+  <!-- Paused Connectors Section -->
+  {% if replication_rows_by_status.paused %}
+  <c-dashboard-card class="mb-4">
+    <div
+      @click="pausedExpanded = !pausedExpanded"
+      class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition flex items-center justify-between"
+    >
+      <div class="flex items-center gap-3">
+        <svg class="w-5 h-5 text-yellow-500" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+        </svg>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Paused Connectors</h2>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+          {{ replication_rows_by_status.paused|length }}
+        </span>
+      </div>
+      <svg
+        class="w-5 h-5 text-gray-500 transition-transform"
+        :class="{ 'rotate-180': pausedExpanded }"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+      </svg>
+    </div>
+    <div x-show="pausedExpanded" x-collapse>
+      {% include 'partials/replication_table.html' with rows=replication_rows_by_status.paused section_type='paused' %}
+    </div>
+  </c-dashboard-card>
+  {% endif %}
+
+  <!-- Configured Connectors Section -->
+  {% if replication_rows_by_status.configured %}
+  <c-dashboard-card class="mb-4">
+    <div
+      @click="configuredExpanded = !configuredExpanded"
+      class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition flex items-center justify-between"
+    >
+      <div class="flex items-center gap-3">
+        <svg class="w-5 h-5 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"></path>
+        </svg>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Configured Connectors</h2>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+          {{ replication_rows_by_status.configured|length }}
+        </span>
+      </div>
+      <svg
+        class="w-5 h-5 text-gray-500 transition-transform"
+        :class="{ 'rotate-180': configuredExpanded }"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+      </svg>
+    </div>
+    <div x-show="configuredExpanded" x-collapse>
+      {% include 'partials/replication_table.html' with rows=replication_rows_by_status.configured section_type='configured' %}
+    </div>
+  </c-dashboard-card>
+  {% endif %}
+
+  <!-- Incomplete Setups Section -->
+  {% if replication_rows_by_status.incomplete %}
+  <c-dashboard-card class="mb-4 opacity-90">
+    <div
+      @click="incompleteExpanded = !incompleteExpanded"
+      class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition flex items-center justify-between"
+    >
+      <div class="flex items-center gap-3">
+        <svg class="w-5 h-5 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+        </svg>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Incomplete Setups</h2>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">
+          {{ replication_rows_by_status.incomplete|length }}
+        </span>
+      </div>
+      <svg
+        class="w-5 h-5 text-gray-500 transition-transform"
+        :class="{ 'rotate-180': incompleteExpanded }"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+      </svg>
+    </div>
+    <div x-show="incompleteExpanded" x-collapse>
+      {% include 'partials/replication_table.html' with rows=replication_rows_by_status.incomplete section_type='incomplete' %}
+    </div>
+  </c-dashboard-card>
+  {% endif %}
+
+</div>
+
 {% else %}
   <!-- Empty State -->
   <c-dashboard-card>
@@ -172,17 +336,112 @@
       <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path>
       </svg>
-      <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No replications configured yet</h3>
+      <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No replications found</h3>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-        Set up CDC replication from the Clients tab.
+        {% if search_query or status_filter or client_filter %}
+          No replications match your filters. Try adjusting your search criteria.
+        {% else %}
+          Set up CDC replication from the Clients tab.
+        {% endif %}
       </p>
       <div class="mt-6">
+        {% if search_query or status_filter or client_filter %}
+        <a
+          href="{% url 'main-dashboard' %}?tab=replications"
+          class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700">
+          Clear Filters
+        </a>
+        {% else %}
         <button
           @click="activeTab = 'clients'"
           class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700">
           Go to Clients
         </button>
+        {% endif %}
       </div>
     </div>
   </c-dashboard-card>
 {% endif %}
+
+<!-- Include Edit Modal -->
+{% include 'partials/connector_edit_modal.html' %}
+
+<script>
+// Function to open edit modal
+function openEditModal(configId) {
+  Alpine.store('editModal').open(configId);
+}
+
+// Function to delete configuration
+function deleteConfig(configId) {
+  if (!confirm('Are you sure you want to delete this replication configuration? This action cannot be undone.')) {
+    return;
+  }
+
+  const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+  fetch(`/cdc/config/${configId}/delete/`, {
+    method: 'POST',
+    headers: {
+      'X-CSRFToken': csrftoken
+    }
+  })
+  .then(response => response.json())
+  .then(data => {
+    if (data.success) {
+      alert('Configuration deleted successfully!');
+      location.reload();
+    } else {
+      alert('Error: ' + (data.error || 'Failed to delete configuration'));
+    }
+  })
+  .catch(error => {
+    alert('Error: ' + error.message);
+  });
+}
+
+// Function to perform quick actions (pause, resume, restart, delete connector)
+function performQuickAction(configId, action) {
+  const actionMap = {
+    'pause': { url: `/cdc/config/${configId}/action/pause/`, message: 'pause' },
+    'resume': { url: `/cdc/config/${configId}/action/resume/`, message: 'resume' },
+    'restart': { url: `/cdc/config/${configId}/restart/`, message: 'restart' },
+    'delete_connector': { url: `/cdc/config/${configId}/action/delete/`, message: 'delete connector' }
+  };
+
+  const actionInfo = actionMap[action];
+  if (!actionInfo) {
+    alert('Unknown action: ' + action);
+    return;
+  }
+
+  // Confirm for destructive actions
+  if (action === 'delete_connector') {
+    if (!confirm('Are you sure you want to delete this connector? This will stop replication.')) {
+      return;
+    }
+  }
+
+  const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+  fetch(actionInfo.url, {
+    method: 'POST',
+    headers: {
+      'X-CSRFToken': csrftoken,
+      'Content-Type': 'application/json'
+    }
+  })
+  .then(response => response.json())
+  .then(data => {
+    if (data.success) {
+      alert(`Successfully ${actionInfo.message}d the connector!`);
+      location.reload();
+    } else {
+      alert('Error: ' + (data.error || `Failed to ${actionInfo.message} connector`));
+    }
+  })
+  .catch(error => {
+    alert('Error: ' + error.message);
+  });
+}
+</script>

@@ -91,7 +91,14 @@ urlpatterns = [
     path('cdc/config/<int:config_id>/restart/', views.restart_replication_view, name='restart_replication'),
     path('cdc/config/<int:config_id>/status/', views.replication_status, name='replication_status'),
 
+    # Edit & Delete Configuration
+    path('cdc/config/<int:config_pk>/edit/', views.cdc_edit_config, name='cdc_edit_config'),
+    path('cdc/config/<int:config_pk>/delete/', views.cdc_delete_config, name='cdc_delete_config'),
 
+    # AJAX Endpoints for Modal Editing
+    path('cdc/config/<int:config_pk>/details/', views.cdc_config_details, name='cdc_config_details'),
+    path('cdc/config/<int:config_pk>/update/', views.cdc_config_update, name='cdc_config_update'),
+    path('database/<int:database_pk>/table-schemas/', views.ajax_get_table_schemas_batch, name='ajax_get_table_schemas_batch'),
 
 ]
 

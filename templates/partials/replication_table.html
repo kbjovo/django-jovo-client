@@ -1,0 +1,271 @@
+<div class="overflow-x-auto">
+  <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+    <thead class="bg-gray-50 dark:bg-gray-900">
+      <tr>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Client
+        </th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Database
+        </th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Connector Name
+        </th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Status
+        </th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Tables
+        </th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Created
+        </th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Last Sync
+        </th>
+        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Actions
+        </th>
+      </tr>
+    </thead>
+    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+      {% for row in rows %}
+      <tr class="hover:bg-gray-50 dark:hover:bg-gray-700 transition {% if section_type == 'incomplete' %}opacity-75{% endif %}">
+        <!-- Client -->
+        <td class="px-6 py-4 whitespace-nowrap">
+          <a href="{% url 'client_detail' row.client_id %}"
+             class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300">
+            {{ row.client_name }}
+          </a>
+        </td>
+
+        <!-- Database -->
+        <td class="px-6 py-4 whitespace-nowrap">
+          <div class="flex items-center gap-2">
+            <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7"></path>
+            </svg>
+            <div>
+              <div class="text-sm font-medium text-gray-900 dark:text-white">{{ row.database_name }}</div>
+              <div class="text-xs text-gray-500 dark:text-gray-400">{{ row.database_type }}</div>
+            </div>
+          </div>
+        </td>
+
+        <!-- Connector Name -->
+        <td class="px-6 py-4 whitespace-nowrap">
+          {% if row.connector_name %}
+          <span class="text-xs font-mono text-gray-600 dark:text-gray-400">{{ row.connector_name }}</span>
+          {% else %}
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400">
+            Not Created
+          </span>
+          {% endif %}
+        </td>
+
+        <!-- Status -->
+        <td class="px-6 py-4 whitespace-nowrap">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+            {% if row.status == 'active' %}
+              bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400
+            {% elif row.status == 'paused' %}
+              bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400
+            {% elif row.status == 'error' %}
+              bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400
+            {% elif row.status == 'configured' %}
+              bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400
+            {% elif row.status == 'incomplete' %}
+              bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400
+            {% else %}
+              bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400
+            {% endif %}">
+            {{ row.status_display }}
+          </span>
+        </td>
+
+        <!-- Tables Count -->
+        <td class="px-6 py-4 whitespace-nowrap">
+          <span class="text-sm text-gray-900 dark:text-white">{{ row.tables_count }}</span>
+        </td>
+
+        <!-- Created Date -->
+        <td class="px-6 py-4 whitespace-nowrap">
+          <span class="text-xs text-gray-500 dark:text-gray-400">
+            {{ row.created_at|date:"M d, Y"|default:"Unknown" }}
+          </span>
+        </td>
+
+        <!-- Last Sync -->
+        <td class="px-6 py-4 whitespace-nowrap">
+          <span class="text-xs text-gray-500 dark:text-gray-400">
+            {{ row.last_sync|date:"M d, g:i A"|default:"Never" }}
+          </span>
+        </td>
+
+        <!-- Actions -->
+        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+          <div class="flex items-center justify-end gap-2">
+
+            {% if row.is_incomplete %}
+              <!-- Incomplete: Continue Setup or Edit Config -->
+              {% if row.has_tables %}
+                <a href="{% url 'cdc_create_connector' config_pk=row.id %}"
+                   class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded hover:bg-blue-100 dark:hover:bg-blue-900/30 transition">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                  </svg>
+                  Continue Setup
+                </a>
+              {% else %}
+                <a href="{% url 'cdc_configure_tables' database_pk=row.database_id %}"
+                   class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded hover:bg-blue-100 dark:hover:bg-blue-900/30 transition">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                  </svg>
+                  Configure Tables
+                </a>
+              {% endif %}
+
+              <button
+                 onclick="openEditModal({{ row.id }})"
+                 class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-600 transition">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                </svg>
+                Edit Config
+              </button>
+
+              <button
+                onclick="deleteConfig({{ row.id }})"
+                class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded hover:bg-red-100 dark:hover:bg-red-900/30 transition">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                </svg>
+                Delete
+              </button>
+
+            {% else %}
+              <!-- Has Connector: Monitor, Edit, Action buttons -->
+              <a href="{% url 'cdc_monitor_connector' config_pk=row.id %}"
+                 class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded hover:bg-blue-100 dark:hover:bg-blue-900/30 transition">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                </svg>
+                Monitor
+              </a>
+
+              <button
+                 onclick="openEditModal({{ row.id }})"
+                 class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-600 transition">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                </svg>
+                Edit
+              </button>
+
+              {% if row.status == 'active' %}
+                <!-- Pause button for active connectors -->
+                <button
+                  onclick="performQuickAction({{ row.id }}, 'pause')"
+                  class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 text-yellow-700 dark:text-yellow-400 rounded hover:bg-yellow-100 dark:hover:bg-yellow-900/30 transition">
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                  </svg>
+                  Pause
+                </button>
+              {% elif row.status == 'paused' %}
+                <!-- Resume button for paused connectors -->
+                <button
+                  onclick="performQuickAction({{ row.id }}, 'resume')"
+                  class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-400 rounded hover:bg-green-100 dark:hover:bg-green-900/30 transition">
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path>
+                  </svg>
+                  Resume
+                </button>
+              {% elif row.status == 'configured' %}
+                <!-- Start button for configured connectors -->
+                <button
+                  onclick="performQuickAction({{ row.id }}, 'start')"
+                  class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-400 rounded hover:bg-green-100 dark:hover:bg-green-900/30 transition">
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path>
+                  </svg>
+                  Start
+                </button>
+              {% elif row.status == 'error' %}
+                <!-- Restart button for error connectors -->
+                <button
+                  onclick="performQuickAction({{ row.id }}, 'restart')"
+                  class="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 text-orange-700 dark:text-orange-400 rounded hover:bg-orange-100 dark:hover:bg-orange-900/30 transition">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                  </svg>
+                  Restart
+                </button>
+              {% endif %}
+
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+function performQuickAction(configId, action) {
+  const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+  if (confirm(`Are you sure you want to ${action} this connector?`)) {
+    fetch(`/cdc/config/${configId}/action/${action}/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrftoken
+      }
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.success) {
+        alert(data.message || `${action} completed successfully`);
+        location.reload();
+      } else {
+        alert('Error: ' + (data.error || 'Unknown error'));
+      }
+    })
+    .catch(error => {
+      alert('Error: ' + error);
+    });
+  }
+}
+
+function deleteConfig(configId) {
+  if (confirm('Are you sure you want to delete this configuration? This action cannot be undone.')) {
+    const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+    fetch(`/cdc/config/${configId}/delete/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrftoken
+      }
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.success) {
+        alert('Configuration deleted successfully');
+        location.reload();
+      } else {
+        alert('Error: ' + (data.error || 'Unknown error'));
+      }
+    })
+    .catch(error => {
+      alert('Error: ' + error);
+    });
+  }
+}
+</script>

@@ -30,33 +30,36 @@ class DatabaseOperationError(Exception):
 def build_connection_string(db_config: ClientDatabase) -> str:
     """
     Build SQLAlchemy connection string from ClientDatabase instance
-    
+
     Args:
         db_config: ClientDatabase model instance
-        
+
     Returns:
         str: SQLAlchemy connection string
-        
+
     Raises:
         ValueError: If database type is not supported
     """
+    from urllib.parse import quote_plus
+
     db_type = db_config.db_type.lower()
     host = db_config.host
     port = db_config.port
-    username = db_config.username
-    password = db_config.get_decrypted_password()
+    # URL-encode username and password to handle special characters (@, :, /, etc.)
+    username = quote_plus(db_config.username)
+    password = quote_plus(db_config.get_decrypted_password())
     database = db_config.database_name
-    
+
     connection_strings = {
         'mysql': f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}",
         'postgresql': f"postgresql+psycopg2://{username}:{password}@{host}:{port}/{database}",
         'oracle': f"oracle+cx_oracle://{username}:{password}@{host}:{port}/{database}",
         'sqlite': f"sqlite:///{database}",
     }
-    
+
     if db_type not in connection_strings:
         raise ValueError(f"Unsupported database type: {db_type}")
-    
+
     return connection_strings[db_type]
 
 
