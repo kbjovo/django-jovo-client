@@ -144,8 +144,8 @@
     <!-- Tables Configuration Section -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6">
       <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Table Mappings</h2>
-        <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Configure individual table settings and column mappings</p>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Table Selection & Configuration</h2>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Select tables to replicate and configure individual table settings</p>
       </div>
       <div class="divide-y divide-gray-200 dark:divide-gray-700">
         {% for table in tables_with_columns %}
@@ -155,30 +155,43 @@
             <div class="flex items-center gap-3">
               <input
                 type="checkbox"
-                id="enabled_table_{{ table.mapping.id }}"
-                name="enabled_table_{{ table.mapping.id }}"
-                {% if table.mapping.is_enabled %}checked{% endif %}
+                id="table_checkbox_{{ table.table_name }}"
+                name="selected_tables"
+                value="{{ table.table_name }}"
+                {% if table.is_mapped %}checked{% endif %}
                 class="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
               >
-              <label for="enabled_table_{{ table.mapping.id }}" class="text-lg font-semibold text-gray-900 dark:text-white cursor-pointer">
-                {{ table.mapping.source_table }}
+              <label for="table_checkbox_{{ table.table_name }}" class="text-lg font-semibold text-gray-900 dark:text-white cursor-pointer">
+                {{ table.table_name }}
               </label>
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">
-                {{ table.columns.count }} columns
+              {% if table.is_mapped %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                Currently Mapped
+              </span>
+              {% else %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400">
+                Available
+              </span>
+              {% endif %}
+              <span class="text-xs text-gray-500 dark:text-gray-400">
+                {{ table.row_count }} rows, {{ table.column_count }} columns
               </span>
             </div>
+            {% if table.is_mapped %}
             <button
               type="button"
-              @click="expandedTables['table_{{ table.mapping.id }}'] = !expandedTables['table_{{ table.mapping.id }}'|| false"
+              @click="expandedTables['table_{{ table.table_name }}'] = !expandedTables['table_{{ table.table_name }}'] || false"
               class="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
             >
-              <span x-show="!expandedTables['table_{{ table.mapping.id }}']">Show Details</span>
-              <span x-show="expandedTables['table_{{ table.mapping.id }}']">Hide Details</span>
+              <span x-show="!expandedTables['table_{{ table.table_name }}']">Configure</span>
+              <span x-show="expandedTables['table_{{ table.table_name }}']">Hide</span>
             </button>
+            {% endif %}
           </div>
 
-          <!-- Table Details (Collapsible) -->
-          <div x-show="expandedTables['table_{{ table.mapping.id }}']" x-collapse class="space-y-4 mt-4">
+          <!-- Table Details (Collapsible) - Only for mapped tables -->
+          {% if table.is_mapped %}
+          <div x-show="expandedTables['table_{{ table.table_name }}']" x-collapse class="space-y-4 mt-4">
             <!-- Table Settings -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
               <!-- Target Table Name -->
@@ -273,6 +286,7 @@
               </div>
             </div>
           </div>
+          {% endif %}
         </div>
         {% endfor %}
       </div>

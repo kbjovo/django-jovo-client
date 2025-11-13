@@ -977,12 +977,56 @@ def cdc_edit_config(request, config_pk):
                 replication_config.drop_before_sync = request.POST.get('drop_before_sync') == 'on'
                 replication_config.save()
 
-                # Update table mappings
+                # Get selected tables from form
+                selected_table_names = request.POST.getlist('selected_tables')
+                logger.info(f"Selected tables: {selected_table_names}")
+
+                # Get existing mappings
+                existing_mappings = {tm.source_table: tm for tm in replication_config.table_mappings.all()}
+
+                # Process newly added tables
+                for table_name in selected_table_names:
+                    if table_name not in existing_mappings:
+                        # Create new table mapping for newly added table
+                        source_db_name = db_config.database_name
+                        target_table_name = f"{source_db_name}_{table_name}"
+
+                        table_mapping = TableMapping.objects.create(
+                            replication_config=replication_config,
+                            source_table=table_name,
+                            target_table=target_table_name,
+                            is_enabled=True,
+                            sync_type='realtime',
+                            conflict_resolution='source_wins'
+                        )
+
+                        # Create column mappings for new table
+                        try:
+                            schema = get_table_schema(db_config, table_name)
+                            for column in schema.get('columns', []):
+                                ColumnMapping.objects.create(
+                                    table_mapping=table_mapping,
+                                    source_column=column['name'],
+                                    target_column=column['name'],
+                                    source_type=column.get('type', 'unknown'),
+                                    target_type=column.get('type', 'unknown'),
+                                    is_enabled=True
+                                )
+                        except Exception as e:
+                            logger.error(f"Failed to create column mappings for {table_name}: {e}")
+
+                        logger.info(f"Created new table mapping for {table_name}")
+
+                # Process removed tables (tables that were mapped but not selected)
+                for table_name, table_mapping in existing_mappings.items():
+                    if table_name not in selected_table_names:
+                        # Delete table mapping (cascade will delete column mappings)
+                        logger.info(f"Deleting table mapping for {table_name}")
+                        table_mapping.delete()
+
+                # Update existing table mappings
                 for table_mapping in replication_config.table_mappings.all():
                     table_key = f'table_{table_mapping.id}'
-
-                    # Enable/disable table
-                    table_mapping.is_enabled = request.POST.get(f'enabled_{table_key}') == 'on'
 
                     # Update target table name
                     new_target_name = request.POST.get(f'target_{table_key}')
@@ -1049,12 +1093,26 @@ def cdc_edit_config(request, config_pk):
             messages.error(request, f'Failed to update configuration: {str(e)}')
 
     # GET: Show edit form
-    # Get all table mappings with their columns
+    # Discover ALL tables from the database (not just mapped ones)
+    try:
+        all_table_names = get_table_list(db_config)
+        logger.info(f"Discovered {len(all_table_names)} tables from database")
+    except Exception as e:
+        logger.error(f"Failed to discover tables: {e}")
+        messages.error(request, f"Failed to discover tables from database: {str(e)}")
+        all_table_names = []
+
+    # Build a map of existing table mappings
+    existing_mappings = {tm.source_table: tm for tm in replication_config.table_mappings.all()}
+
+    # Combine discovered tables with existing mappings
     tables_with_columns = []
-    for table_mapping in replication_config.table_mappings.all():
+    for table_name in all_table_names:
+        existing_mapping = existing_mappings.get(table_name)
+
         try:
-            # Get schema from source database to find incremental candidates
-            schema = get_table_schema(db_config, table_mapping.source_table)
+            # Get schema from source database
+            schema = get_table_schema(db_config, table_name)
             columns_from_schema = schema.get('columns', [])
 
             # Find potential incremental columns
@@ -1068,21 +1126,56 @@ def cdc_edit_config(request, config_pk):
                     'int' in str(col.get('type', '')).lower())
             ]
 
-            tables_with_columns.append({
-                'mapping': table_mapping,
-                'columns': table_mapping.column_mappings.all(),
+            # Get row count
+            try:
+                engine = get_database_engine(db_config)
+                with engine.connect() as conn:
+                    if db_config.db_type.lower() == 'mysql':
+                        count_query = text(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+                    elif db_config.db_type.lower() == 'postgresql':
+                        count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
+                    else:
+                        count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
+
+                    result = conn.execute(count_query)
+                    row = result.fetchone()
+                    row_count = row[0] if row else 0
+                engine.dispose()
+            except Exception as e:
+                logger.debug(f"Could not get row count for {table_name}: {e}")
+                row_count = 0
+
+            table_data = {
+                'table_name': table_name,
+                'row_count': row_count,
+                'column_count': len(columns_from_schema),
+                'is_mapped': existing_mapping is not None,
+                'mapping': existing_mapping,
+                'columns': existing_mapping.column_mappings.all() if existing_mapping else [],
+                'columns_schema': columns_from_schema,
                 'incremental_candidates': incremental_candidates,
                 'primary_keys': schema.get('primary_keys', []),
-            })
+            }
+
+            tables_with_columns.append(table_data)
 
         except Exception as e:
-            logger.error(f"Error getting schema for {table_mapping.source_table}: {e}")
-            tables_with_columns.append({
-                'mapping': table_mapping,
-                'columns': table_mapping.column_mappings.all(),
+            logger.error(f"Error getting schema for {table_name}: {e}")
+            table_data = {
+                'table_name': table_name,
+                'row_count': 0,
+                'column_count': 0,
+                'is_mapped': existing_mapping is not None,
+                'mapping': existing_mapping,
+                'columns': existing_mapping.column_mappings.all() if existing_mapping else [],
+                'columns_schema': [],
                 'incremental_candidates': [],
                 'primary_keys': [],
-            })
+            }
+            tables_with_columns.append(table_data)
+
+    # Sort: mapped tables first, then unmapped
+    tables_with_columns.sort(key=lambda t: (not t['is_mapped'], t['table_name']))
 
     context = {
         'replication_config': replication_config,
