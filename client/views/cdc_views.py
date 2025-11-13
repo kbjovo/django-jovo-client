@@ -14,6 +14,7 @@ It also provides:
 - Connector action handlers (pause, resume, delete)
 """
 
+from client.utils.database_utils import get_table_list, get_table_schema
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -28,6 +29,8 @@ from client.models.client import Client
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping
 from client.utils.debezium_manager import DebeziumConnectorManager
+from client.utils.kafka_topic_manager import KafkaTopicManager
+
 from client.utils.connector_templates import (
     get_connector_config_for_database,
     generate_connector_name
@@ -375,86 +378,6 @@ def cdc_configure_tables(request, database_pk):
     return render(request, 'client/cdc/configure_tables.html', context)
 
 
-# ============================================
-# 4. Create Debezium Connector - Step 3
-# ============================================
-# @require_http_methods(["GET", "POST"])
-# def cdc_create_connector(request, config_pk):
-#     """
-#     Create Debezium connector for the replication configuration
-#     """
-#     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-#     db_config = replication_config.client_database
-#     client = db_config.client
-    
-#     if request.method == "POST":
-#         try:
-#             # Generate connector name
-#             connector_name = generate_connector_name(client, db_config)
-#             # Get list of tables to replicate
-#             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-#             tables_list = [tm.source_table for tm in table_mappings]
-#             # Generate connector configuration
-#             connector_config = get_connector_config_for_database(
-#                 db_config=db_config,
-#                 replication_config=replication_config,
-#                 tables_whitelist=tables_list,
-#             )
-#             if not connector_config:
-#                 raise Exception("Failed to generate connector configuration")
-            
-#             # Create connector via Debezium Manager
-#             manager = DebeziumConnectorManager()
-            
-#             # Check Kafka Connect health
-#             is_healthy, health_error = manager.check_kafka_connect_health()
-#             if not is_healthy:
-#                 raise Exception(f"Kafka Connect is not healthy: {health_error}")
-            
-#             # Create connector
-#             success, error = manager.create_connector(
-#                 connector_name=connector_name,
-#                 config=connector_config,
-#                 notify_on_error=True
-#             )
-            
-#             if not success:
-#                 raise Exception(f"Failed to create connector: {error}")
-            
-#             # Update replication config
-#             replication_config.connector_name = connector_name
-#             replication_config.kafka_topic_prefix = f"client_{client.id}"
-#             replication_config.status = 'active'
-#             replication_config.is_active = True
-#             replication_config.save()
-            
-#             # Update client replication status
-#             client.replication_enabled = True
-#             client.replication_status = 'active'
-#             client.save()
-            
-#             messages.success(
-#                 request, 
-#                 f'Debezium connector "{connector_name}" created successfully! CDC is now active.'
-#             )
-            
-#             return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
-            
-#         except Exception as e:
-#             messages.error(request, f'Failed to create connector: {str(e)}')
-    
-#     # GET: Show connector creation confirmation
-#     table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-    
-#     context = {
-#         'replication_config': replication_config,
-#         'db_config': db_config,
-#         'client': client,
-#         'table_mappings': table_mappings,
-#     }
-    
-#     return render(request, 'client/cdc/create_connector.html', context)
-
 
 @require_http_methods(["GET", "POST"])
 def cdc_create_connector(request, config_pk):
@@ -518,11 +441,10 @@ def cdc_create_connector(request, config_pk):
 
             # Pre-create Kafka topics with proper configuration
             # CRITICAL: Connector is useless without topics
-            from client.utils.kafka_topic_manager import KafkaTopicManager
             topic_manager = KafkaTopicManager()
 
-            # Topic prefix is client_{id} (e.g., client_2)
-            topic_prefix = f"client_{client.id}"
+            # Topic prefix is client_{client_id}_db_{database_id} (e.g., client_2_db_5)
+            topic_prefix = f"client_{client.id}_db_{db_config.id}"
 
             # Create topics for all enabled tables
             topic_results = topic_manager.create_cdc_topics_for_tables(
@@ -570,8 +492,8 @@ def cdc_create_connector(request, config_pk):
 
             # Update replication config (but don't start replication yet)
             replication_config.connector_name = connector_name
-            replication_config.kafka_topic_prefix = f"client_{client.id}"
-            replication_config.status = 'configured'  # Changed from 'active'
+            replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
+            replication_config.status = 'configured'
             replication_config.is_active = False  # Changed from True
             replication_config.save()
             
@@ -666,70 +588,6 @@ def ajax_get_table_schema(request, database_pk, table_name):
         }, status=400)
 
 
-# ============================================
-# 7. Connector Actions (Pause/Resume/Delete)
-# ============================================
-# @require_http_methods(["POST"])
-# def cdc_connector_action(request, config_pk, action):
-#     """
-#     Handle connector actions: pause, resume, restart, delete
-#     """
-#     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-#     connector_name = replication_config.connector_name
-    
-#     if not connector_name:
-#         return JsonResponse({
-#             'success': False,
-#             'error': 'No connector configured'
-#         }, status=400)
-    
-#     try:
-#         manager = DebeziumConnectorManager()
-        
-#         if action == 'pause':
-#             success, error = manager.pause_connector(connector_name)
-#             replication_config.status = 'paused' if success else replication_config.status
-#             message = 'Connector paused successfully'
-            
-#         elif action == 'resume':
-#             success, error = manager.resume_connector(connector_name)
-#             replication_config.status = 'active' if success else replication_config.status
-#             message = 'Connector resumed successfully'
-            
-#         elif action == 'restart':
-#             success, error = manager.restart_connector(connector_name)
-#             message = 'Connector restarted successfully'
-            
-#         elif action == 'delete':
-#             success, error = manager.delete_connector(connector_name, notify=True)
-#             if success:
-#                 replication_config.status = 'disabled'
-#                 replication_config.connector_name = None
-#             message = 'Connector deleted successfully'
-            
-#         else:
-#             return JsonResponse({
-#                 'success': False,
-#                 'error': f'Unknown action: {action}'
-#             }, status=400)
-        
-#         if success:
-#             replication_config.save()
-#             messages.success(request, message)
-#             return JsonResponse({'success': True, 'message': message})
-#         else:
-#             return JsonResponse({
-#                 'success': False,
-#                 'error': error
-#             }, status=400)
-            
-#     except Exception as e:
-#         return JsonResponse({
-#             'success': False,
-#             'error': str(e)
-#         }, status=500)
-    
-
 
 @require_http_methods(["POST"])
 def cdc_connector_action(request, config_pk, action):
@@ -738,6 +596,7 @@ def cdc_connector_action(request, config_pk, action):
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     connector_name = replication_config.connector_name
+    logger.info(f" ✅✅✅✅ CDC Action Print: {action}")
     
     if not connector_name:
         return JsonResponse({
@@ -750,6 +609,7 @@ def cdc_connector_action(request, config_pk, action):
         
         if action == 'start':
             # Start the Kafka consumer to begin replication
+            logger.info(f"✅ Testing replication for config {config_pk}")
             logger.info(f"🚀 Starting replication for config {config_pk}")
             
             # Check connector is running first
@@ -1195,18 +1055,29 @@ def cdc_delete_config(request, config_pk):
     try:
         replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
 
-        # If connector exists, delete it first
+        logger.info(f"Deleting replication config {config_pk} (connector: {replication_config.connector_name})")
+
+        # If connector exists, delete it first (along with its topics)
         if replication_config.connector_name:
             try:
                 manager = DebeziumConnectorManager()
-                success, error = manager.delete_connector(replication_config.connector_name, notify=True)
+                success, error = manager.delete_connector(
+                    replication_config.connector_name,
+                    notify=True,
+                    delete_topics=True  # Explicitly delete associated Kafka topics
+                )
                 if not success:
                     logger.warning(f"Failed to delete connector: {error}")
+                    # Continue anyway to delete the config from database
+                else:
+                    logger.info(f"Successfully deleted connector and topics for {replication_config.connector_name}")
             except Exception as e:
                 logger.error(f"Error deleting connector: {e}")
+                # Continue anyway to delete the config from database
 
         # Delete the replication config (cascade will delete table/column mappings)
         replication_config.delete()
+        logger.info(f"Successfully deleted replication config {config_pk}")
 
         return JsonResponse({
             'success': True,
@@ -1260,7 +1131,6 @@ def cdc_config_details(request, config_pk):
 
         # Get all available tables from source database
         try:
-            from .utils.database_utils import get_table_list
             all_tables = get_table_list(db_config)
             # Filter out tables already configured
             configured_table_names = {tm.source_table for tm in replication_config.table_mappings.all()}
@@ -1401,12 +1271,13 @@ def cdc_config_update(request, config_pk):
             from client.utils.kafka_topic_manager import KafkaTopicManager
             topic_manager = KafkaTopicManager()
 
-            # Use saved topic prefix or derive from client ID
-            topic_prefix = replication_config.kafka_topic_prefix or f"client_{replication_config.client_database.client.id}"
+            # Use saved topic prefix or derive from client and database IDs
+            db_config = replication_config.client_database
+            topic_prefix = replication_config.kafka_topic_prefix or f"client_{db_config.client.id}_db_{db_config.id}"
 
             topic_results = topic_manager.create_cdc_topics_for_tables(
                 server_name=topic_prefix,
-                database=replication_config.client_database.database_name,
+                database=db_config.database_name,
                 table_names=newly_added_tables
             )
 
@@ -1603,8 +1474,6 @@ def ajax_get_table_schemas_batch(request, database_pk):
                 'success': False,
                 'error': 'No tables specified'
             }, status=400)
-
-        from .utils.database_utils import get_table_schema
 
         schemas = []
         for table_name in table_names:

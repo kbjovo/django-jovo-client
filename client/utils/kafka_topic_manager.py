@@ -119,7 +119,7 @@ class KafkaTopicManager:
                 replication_factor=replica_factor,
                 config=topic_config
             )
-
+            
             # Create topic
             futures = self.admin_client.create_topics([new_topic])
 
@@ -199,6 +199,57 @@ class KafkaTopicManager:
         except Exception as e:
             logger.error(f"Error deleting topic '{topic_name}': {e}")
             return False
+
+    def delete_topics_by_prefix(self, prefix: str, exclude_internal: bool = True) -> Dict[str, bool]:
+        """
+        Delete all topics matching a prefix (used when deleting a connector)
+
+        Args:
+            prefix: Topic prefix to match (e.g., 'client_2_db_5')
+            exclude_internal: Skip internal topics (starting with '_' or 'schema-changes')
+
+        Returns:
+            Dict mapping topic name to deletion success status
+        """
+        try:
+            # List all topics with the prefix
+            topics_to_delete = self.list_topics(prefix=prefix)
+
+            if exclude_internal:
+                # Exclude internal Kafka topics and schema history topics
+                topics_to_delete = [
+                    t for t in topics_to_delete
+                    if not t.startswith('_') and not t.startswith('schema-changes')
+                ]
+
+            if not topics_to_delete:
+                logger.info(f"No topics found with prefix '{prefix}'")
+                return {}
+
+            logger.info(f"Deleting {len(topics_to_delete)} topics with prefix '{prefix}': {topics_to_delete}")
+
+            # Delete topics
+            results = {}
+            futures = self.admin_client.delete_topics(topics_to_delete, operation_timeout=30)
+
+            # Wait for all deletions to complete
+            for topic, future in futures.items():
+                try:
+                    future.result()
+                    logger.info(f"✅ Deleted topic '{topic}'")
+                    results[topic] = True
+                except Exception as e:
+                    logger.error(f"❌ Failed to delete topic '{topic}': {e}")
+                    results[topic] = False
+
+            successful = sum(1 for v in results.values() if v)
+            logger.info(f"Deleted {successful}/{len(topics_to_delete)} topics successfully")
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error deleting topics with prefix '{prefix}': {e}")
+            return {}
 
     def get_topic_config(self, topic_name: str) -> Optional[Dict[str, str]]:
         """

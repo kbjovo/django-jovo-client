@@ -290,80 +290,6 @@ class DebeziumCDCConsumer:
         # fallback
         return None, parts[-1] if parts else None
 
-    # -------------------------
-    # Timestamp conversion - FIXED
-    # -------------------------
-    # def convert_debezium_timestamps(self, row: Dict[str, Any]) -> Dict[str, Any]:
-    #     """
-    #     Convert Debezium timestamp fields to Python datetime objects.
-        
-    #     Debezium sends timestamps in different formats:
-    #     - Unix milliseconds (int) for TIMESTAMP/DATETIME columns
-    #     - Can also be strings in some cases
-        
-    #     This method converts them to Python datetime objects.
-    #     """
-    #     if not row:
-    #         return row
-            
-    #     converted = {}
-    #     for key, value in row.items():
-    #         # Skip None values
-    #         if value is None:
-    #             converted[key] = value
-    #             continue
-            
-    #         # Check if this looks like a timestamp field
-    #         is_timestamp_field = any([
-    #             key.endswith('_at'),
-    #             key.endswith('_time'),
-    #             key.endswith('_date'),
-    #             'date' in key.lower(),
-    #             'time' in key.lower(),
-    #             'timestamp' in key.lower(),
-    #             key in ['created', 'updated', 'modified', 'deleted']
-    #         ])
-            
-    #         if is_timestamp_field and isinstance(value, int):
-    #             # Debezium timestamps are typically in milliseconds
-    #             # Check if value is in milliseconds (> 1000000000000) or seconds
-    #             try:
-    #                 if value > 1000000000000:  # Milliseconds
-    #                     converted[key] = datetime.fromtimestamp(value / 1000.0)
-    #                     logger.debug(f"Converted {key}: {value} ms -> {converted[key]}")
-    #                 elif value > 1000000000:  # Seconds
-    #                     converted[key] = datetime.fromtimestamp(value)
-    #                     logger.debug(f"Converted {key}: {value} s -> {converted[key]}")
-    #                 else:
-    #                     # Value too small to be a timestamp, keep as-is
-    #                     converted[key] = value
-    #             except (ValueError, OSError) as e:
-    #                 logger.warning(f"Failed to convert timestamp {key}={value}: {e}")
-    #                 converted[key] = value
-    #         elif is_timestamp_field and isinstance(value, str):
-    #             # Try to parse string timestamps
-    #             try:
-    #                 # Try common formats
-    #                 for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d']:
-    #                     try:
-    #                         converted[key] = datetime.strptime(value, fmt)
-    #                         logger.debug(f"Converted {key}: '{value}' -> {converted[key]}")
-    #                         break
-    #                     except ValueError:
-    #                         continue
-    #                 else:
-    #                     # Couldn't parse, keep as string
-    #                     converted[key] = value
-    #             except Exception as e:
-    #                 logger.warning(f"Failed to parse timestamp string {key}='{value}': {e}")
-    #                 converted[key] = value
-    #         else:
-    #             # Not a timestamp field or not an int/string, keep as-is
-    #             converted[key] = value
-        
-    #     return converted
-
-
     def convert_debezium_timestamps(self, row: dict) -> dict:
         """
         Convert Debezium timestamp/date fields to MySQL-safe strings.
@@ -482,7 +408,6 @@ class DebeziumCDCConsumer:
                 converted[key] = None
 
         return converted
-
 
 
 

@@ -90,8 +90,9 @@ def get_mysql_connector_config(
         "database.server.name": connector_name.replace('_connector', ''),
         
         # Topic prefix (this will be used in Kafka topic names)
-        # Format: client_{id}.{source_db}.{table}
-        "topic.prefix": f"client_{client.id}",
+        # Format: client_{client_id}_db_{db_id}.{source_db}.{table}
+        # Using both client ID and database ID ensures uniqueness when same client has multiple databases
+        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
         
         # Kafka internal addresses (for Debezium inside Docker)
         "schema.history.internal.kafka.bootstrap.servers": "kafka:29092",  # Docker internal
@@ -164,7 +165,7 @@ def get_mysql_connector_config(
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
     
-    logger.info(f"Generated MySQL connector config for: {connector_name}")
+    logger.info(f"Generated MySQL connector config for: {connector_name} along with replication_config: {replication_config}")
     return config
 
 
@@ -204,11 +205,11 @@ def get_postgresql_connector_config(
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
         "database.dbname": db_config.database_name,
-        
+
         # Server identification
         "database.server.name": connector_name.replace('_connector', ''),
-        "topic.prefix": f"client_{client.id}",
-        
+        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
+
         # Plugin (required for PostgreSQL)
         "plugin.name": "pgoutput",  # Options: pgoutput, decoderbufs, wal2json
         
@@ -304,11 +305,11 @@ def get_oracle_connector_config(
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
         "database.dbname": db_config.database_name,
-        
+
         # Server identification
         "database.server.name": connector_name.replace('_connector', ''),
-        "topic.prefix": f"client_{client.id}",
-        
+        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
+
         # Schema history
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",

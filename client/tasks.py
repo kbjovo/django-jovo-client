@@ -353,24 +353,29 @@ def stop_kafka_consumer(replication_config_id):
 
 
 @shared_task
-def delete_debezium_connector(connector_name, replication_config_id=None):
+def delete_debezium_connector(connector_name, replication_config_id=None, delete_topics=True):
     """
-    Task: Delete a Debezium connector
+    Task: Delete a Debezium connector and optionally its topics
+
+    Args:
+        connector_name: Name of the connector to delete
+        replication_config_id: Optional replication config ID to update
+        delete_topics: Whether to delete associated Kafka topics (default: True)
     """
     try:
-        logger.info(f"🗑️ Deleting connector: {connector_name}")
-        
+        logger.info(f"🗑️ Deleting connector: {connector_name} (delete_topics={delete_topics})")
+
         # Stop consumer first
         if replication_config_id:
             stop_kafka_consumer(replication_config_id)
-        
-        # Delete connector
+
+        # Delete connector (and optionally topics)
         manager = DebeziumConnectorManager()
-        success, error = manager.delete_connector(connector_name, notify=True)
-        
+        success, error = manager.delete_connector(connector_name, notify=True, delete_topics=delete_topics)
+
         if success:
             logger.info(f"✅ Successfully deleted connector: {connector_name}")
-            
+
             # Update config
             if replication_config_id:
                 try:
@@ -381,11 +386,11 @@ def delete_debezium_connector(connector_name, replication_config_id=None):
                     config.save()
                 except:
                     pass
-            
+
             return {'success': True}
         else:
             raise Exception(f"Failed to delete connector: {error}")
-            
+
     except Exception as e:
         logger.error(f"❌ Error deleting connector: {e}")
         return {'success': False, 'error': str(e)}

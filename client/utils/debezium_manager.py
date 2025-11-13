@@ -11,6 +11,7 @@ from django.conf import settings
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig
 from .notification_utils import send_connector_status_email, log_and_notify_error
+from .kafka_topic_manager import KafkaTopicManager
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ class DebeziumConnectorManager:
                 response = requests.delete(url, headers=headers, timeout=timeout)
             else:
                 return False, None, f"Unsupported HTTP method: {method}"
-            
+            logger.info(f"method: {method}, url: {url}, data: {data}")
             # Check if request was successful
             # 200: OK, 201: Created, 202: Accepted (async operations), 204: No Content
             if response.status_code in [200, 201, 202, 204]:
@@ -315,17 +316,19 @@ class DebeziumConnectorManager:
             return False, error_msg
     
     def delete_connector(
-        self, 
+        self,
         connector_name: str,
-        notify: bool = False
+        notify: bool = False,
+        delete_topics: bool = True
     ) -> Tuple[bool, Optional[str]]:
         """
-        Delete a connector
-        
+        Delete a connector and optionally its associated topics
+
         Args:
             connector_name: Name of the connector
             notify: Send notification after deletion
-            
+            delete_topics: Delete associated Kafka topics (default: True)
+
         Returns:
             Tuple[bool, Optional[str]]: (success, error_message)
         """
@@ -336,14 +339,47 @@ class DebeziumConnectorManager:
                 error_msg = f"Connector {connector_name} does not exist"
                 logger.warning(error_msg)
                 return False, error_msg
-            
+
+            # Get connector config to find topic prefix (needed for topic deletion)
+            topic_prefix = None
+            if delete_topics:
+                try:
+                    config = self.get_connector_config(connector_name)
+                    logger.info(f"DELETE CONNECTOR confg: {config}")
+                    if config and 'topic.prefix' in config:
+                        topic_prefix = config['topic.prefix']
+                        logger.info(f"Found topic prefix: {topic_prefix}")
+                except Exception as e:
+                    logger.warning(f"Could not get topic prefix: {e}")
+
             # Delete connector
             url = f"{self.connectors_url}/{connector_name}"
             success, _, error = self._make_request('DELETE', url)
-            
+
             if success:
-                logger.info(f"Successfully deleted connector: {connector_name}")
-                
+                logger.info(f"✅ Successfully deleted connector: {connector_name}")
+
+                # Delete associated topics
+                if delete_topics and topic_prefix:
+                    try:
+                        logger.info(f"🗑️  Deleting topics with prefix: {topic_prefix}")
+                        topic_manager = KafkaTopicManager()
+
+                        # Delete data topics (e.g., client_2_db_5.database.table)
+                        results = topic_manager.delete_topics_by_prefix(topic_prefix, exclude_internal=True)
+                        deleted_count = sum(1 for v in results.values() if v)
+                        logger.info(f"Deleted {deleted_count} data topics")
+
+                        # Delete schema history topic
+                        schema_topic = f"schema-changes.{connector_name}"
+                        if topic_manager.topic_exists(schema_topic):
+                            topic_manager.delete_topic(schema_topic)
+                            logger.info(f"Deleted schema history topic: {schema_topic}")
+
+                    except Exception as e:
+                        logger.warning(f"Failed to delete topics: {e}")
+                        # Don't fail the whole operation if topic deletion fails
+
                 if notify:
                     send_connector_status_email(
                         connector_name=connector_name,
@@ -352,12 +388,12 @@ class DebeziumConnectorManager:
                         database_name='N/A',
                         error_message=None
                     )
-                
+
                 return True, None
             else:
                 logger.error(f"Failed to delete connector {connector_name}: {error}")
                 return False, error
-                
+
         except Exception as e:
             error_msg = f"Error deleting connector: {str(e)}"
             logger.error(error_msg)

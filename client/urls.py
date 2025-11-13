@@ -36,6 +36,7 @@ from .views import (
     replication_status,
 )
 
+
 urlpatterns = [
     # ==========================================
     # Dashboard & Main Pages
@@ -106,9 +107,9 @@ urlpatterns = [
     path('cdc/config/<int:config_id>/status/', replication_status, name='replication_status'),
 
     # Connector Actions
-    path('cdc/config/<int:config_pk>/action/<str:action>/',
-         cdc_connector_action,
-         name='cdc_connector_action'),
+     path('cdc/config/<int:config_pk>/action/<str:action>/',
+          cdc_connector_action,
+          name='cdc_connector_action'),
 
     # ==========================================
     # CDC Configuration Management

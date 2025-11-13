@@ -3,6 +3,9 @@
 
 {% block content %}
 
+<!-- CSRF Token for AJAX requests -->
+{% csrf_token %}
+
 <!-- Show Django messages as toasts -->
 {% if messages %}
 <script>
