@@ -222,91 +222,135 @@ def create_debezium_connector(self, replication_config_id):
 
 
 @shared_task(bind=True)
-def start_kafka_consumer(self, replication_config_id):
+def start_kafka_consumer(self, replication_config_id, consumer_group_override=None):
     """
-    Task: Start Kafka consumer for a replication config
-    Runs continuously to consume CDC events
+    Task: Start Kafka consumer for a replication config (NEW VERSION)
+    Uses ResilientKafkaConsumer with auto-restart and health monitoring
+
+    Args:
+        replication_config_id: ID of ReplicationConfig
+        consumer_group_override: Optional consumer group ID (for fresh start)
     """
     try:
-        logger.info(f"🎧 Starting Kafka consumer for ReplicationConfig {replication_config_id}")
-        
+        logger.info("=" * 80)
+        logger.info(f"🎧 STARTING KAFKA CONSUMER")
+        logger.info(f"   Config ID: {replication_config_id}")
+        logger.info(f"   Task ID: {self.request.id}")
+        logger.info("=" * 80)
+
         config = ReplicationConfig.objects.get(id=replication_config_id)
-        
+
+        logger.info(f"✓ Loaded config: {config.connector_name}")
+
         if not config.is_active or not config.connector_name:
             logger.warning(f"⚠️ Config {replication_config_id} is not active or has no connector")
             return {'success': False, 'error': 'Config not ready'}
-        
+
         # Get target database
         client = config.client_database.client
         target_db = client.get_target_database()
-        
+
         if not target_db:
             raise Exception("No target database found")
-        
-        logger.info(f"🎯 Target database: {target_db.database_name}")
-        
+
+        logger.info(f"✓ Target database: {target_db.host}:{target_db.port}/{target_db.database_name}")
+
         # Create target engine
         target_engine = get_database_engine(target_db)
-        
+        logger.info(f"✓ Target database engine created")
+
         # Determine topics to subscribe to
         kafka_topic_prefix = config.kafka_topic_prefix or f"client_{client.id}"
         source_db_name = config.client_database.database_name
-        
+
         # Get all table topics
         enabled_tables = config.table_mappings.filter(is_enabled=True)
         topics = [
             f"{kafka_topic_prefix}.{source_db_name}.{tm.source_table}"
             for tm in enabled_tables
         ]
-        
-        logger.info(f"📡 Subscribing to topics: {topics}")
 
-        # Create and start consumer
-        consumer = DebeziumCDCConsumer(
-            consumer_group_id=f"cdc_consumer_{client.id}_{config.id}",
+        logger.info(f"✓ Subscribing to {len(topics)} topics:")
+        for topic in topics:
+            logger.info(f"   - {topic}")
+
+        # Determine consumer group ID
+        if consumer_group_override:
+            consumer_group = consumer_group_override
+            logger.info(f"✓ Using custom consumer group: {consumer_group}")
+        else:
+            consumer_group = f"cdc_consumer_{client.id}_{config.id}"
+            logger.info(f"✓ Using default consumer group: {consumer_group}")
+
+        # Update config with task ID
+        config.consumer_task_id = self.request.id
+        config.consumer_state = 'STARTING'
+        config.save()
+
+        logger.info(f"✓ Updated config state to STARTING")
+
+        # Create and start ResilientKafkaConsumer (NEW)
+        from client.replication import ResilientKafkaConsumer
+
+        logger.info(f"🔄 Creating ResilientKafkaConsumer...")
+        consumer = ResilientKafkaConsumer(
+            replication_config=config,
+            consumer_group_id=consumer_group,
             topics=topics,
             target_engine=target_engine,
-            bootstrap_servers='localhost:9092',  # External Kafka address
-            auto_offset_reset='earliest'
+            bootstrap_servers='localhost:9092',
         )
-        
-        # Consume messages (blocks until stopped)
-        # This will run indefinitely until task is revoked
-        logger.info(f"🔄 Starting message consumption...")
-        consumer.consume(max_messages=None, timeout=1.0)
-        
-        logger.info(f"⏹️ Consumer stopped for config {replication_config_id}")
-        
-        stats = consumer.get_stats()
-        logger.info(f"📊 Consumer stats: {stats}")
-        
-        # Update config with last sync
-        config.last_sync_at = timezone.now()
+
+        # Update state to RUNNING
+        config.consumer_state = 'RUNNING'
         config.save()
-        
+
+        logger.info("=" * 80)
+        logger.info(f"✓ CONSUMER READY - Starting message consumption loop")
+        logger.info("=" * 80)
+
+        # Start consumption with auto-restart (blocks until stopped)
+        logger.info(f"🔄 Starting resilient message consumption...")
+        consumer.start()
+
+        logger.info(f"⏹️ Consumer stopped for config {replication_config_id}")
+
+        # Get final stats
+        stats = consumer.get_status()
+        logger.info(f"📊 Consumer stats: {stats}")
+
+        # Update config
+        config.last_sync_at = timezone.now()
+        config.consumer_state = 'STOPPED'
+        config.consumer_task_id = None
+        config.save()
+
         return {'success': True, 'stats': stats}
-        
+
     except ReplicationConfig.DoesNotExist:
         logger.error(f"❌ ReplicationConfig {replication_config_id} not found")
         return {'success': False, 'error': 'Config not found'}
-        
+
     except Exception as e:
-        logger.error(f"❌ Error in Kafka consumer: {e}", exc_info=True)
-        
+        logger.error(f"❌ Error in resilient Kafka consumer: {e}", exc_info=True)
+
         # Update config status
         try:
             config = ReplicationConfig.objects.get(id=replication_config_id)
             config.status = 'error'
+            config.consumer_state = 'ERROR'
+            config.consumer_task_id = None
+            config.last_error_message = str(e)
             config.save()
         except:
             pass
-        
+
         send_error_notification(
             error_title="Kafka Consumer Failed",
             error_message=str(e),
             context={'replication_config_id': replication_config_id}
         )
-        
+
         return {'success': False, 'error': str(e)}
 
 
@@ -565,3 +609,11 @@ def check_replication_health():
     except Exception as e:
         logger.error(f"❌ Error checking health: {e}")
         return {'success': False, 'error': str(e)}
+
+
+# Import new health monitoring tasks to register them with Celery
+# This ensures Celery can find them when scheduled by Celery Beat
+from client.replication.health_monitor import (
+    monitor_replication_health,
+    check_consumer_heartbeat,
+)

@@ -99,6 +99,35 @@ class ReplicationConfig(models.Model):
         help_text="Drop and recreate tables (only for full refresh)"
     )
 
+    # NEW: Health monitoring and state tracking
+    connector_state = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Debezium connector state (RUNNING/PAUSED/FAILED/etc)"
+    )
+    consumer_state = models.CharField(
+        max_length=50,
+        default='UNKNOWN',
+        help_text="Kafka consumer state (RUNNING/STOPPED/ERROR)"
+    )
+    consumer_task_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="Celery task ID for running consumer"
+    )
+    consumer_last_heartbeat = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Last heartbeat from consumer (updated every 30s)"
+    )
+    last_error_message = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Last error message for debugging"
+    )
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

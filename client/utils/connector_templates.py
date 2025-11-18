@@ -45,6 +45,7 @@ def get_mysql_connector_config(
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
     use_docker_internal_host: bool = True,
+    snapshot_mode: str = 'when_needed',
 ) -> Dict[str, Any]:
     """
     Generate MySQL Debezium connector configuration
@@ -94,14 +95,16 @@ def get_mysql_connector_config(
         # Using both client ID and database ID ensures uniqueness when same client has multiple databases
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
         
-        # Kafka internal addresses (for Debezium inside Docker)
-        "schema.history.internal.kafka.bootstrap.servers": "kafka:29092",  # Docker internal
-        "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",
-        
-        # Snapshot mode
-        # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
-        # initial: Snapshot only on first connector creation (strict, production)
-        "snapshot.mode": "initial",  # Options: initial, when_needed, never, schema_only
+        # Use file-based schema history instead of Kafka-based to avoid topic issues
+        # This stores schema history in the Kafka Connect worker's local filesystem
+        "schema.history.internal": "io.debezium.storage.file.history.FileSchemaHistory",
+        "schema.history.internal.file.filename": f"/tmp/schema-history-{connector_name}.dat",
+
+        # Snapshot mode - configurable
+        # never: No snapshot, CDC only
+        # when_needed: Re-snapshot if offsets are missing or incomplete
+        # initial: Snapshot only on first connector creation
+        "snapshot.mode": snapshot_mode,
 
         # Include schema changes
         "include.schema.changes": "true",
@@ -144,16 +147,8 @@ def get_mysql_connector_config(
         # Format: database.table1,database.table2
         tables_full = [f"{db_config.database_name}.{table}" for table in tables_whitelist]
 
-        # CRITICAL: Add signal table for incremental snapshots
-        # This allows Debezium to receive signals for snapshotting new tables
-        signal_table = "debezium_signal"
-        tables_full.append(f"{db_config.database_name}.{signal_table}")
-
         config["table.include.list"] = ",".join(tables_full)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables + signal table")
-
-        # Configure signal table
-        config["signal.data.collection"] = f"{db_config.database_name}.{signal_table}"
+        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
     
     # Add configuration from ReplicationConfig if provided
     if replication_config:
@@ -177,6 +172,7 @@ def get_postgresql_connector_config(
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
     schema_name: str = 'public',
+    snapshot_mode: str = 'when_needed',
 ) -> Dict[str, Any]:
     """
     Generate PostgreSQL Debezium connector configuration
@@ -218,15 +214,17 @@ def get_postgresql_connector_config(
         
         # Publication name (logical replication)
         "publication.name": f"debezium_pub_{client.id}",
-        
-        # Schema history
-        "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",
 
-        # Snapshot mode
-        # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
-        # initial: Snapshot only on first connector creation (strict, production)
-        "snapshot.mode": "initial",
+        # Use file-based schema history instead of Kafka-based to avoid topic issues
+        # This stores schema history in the Kafka Connect worker's local filesystem
+        "schema.history.internal": "io.debezium.storage.file.history.FileSchemaHistory",
+        "schema.history.internal.file.filename": f"/tmp/schema-history-{connector_name}.dat",
+
+        # Snapshot mode - configurable
+        # never: No snapshot, CDC only
+        # when_needed: Re-snapshot if offsets are missing or incomplete
+        # initial: Snapshot only on first connector creation
+        "snapshot.mode": snapshot_mode,
 
         # Include schema changes
         "include.schema.changes": "true",
@@ -249,15 +247,8 @@ def get_postgresql_connector_config(
     if tables_whitelist:
         tables_full = [f"{schema_name}.{table}" for table in tables_whitelist]
 
-        # CRITICAL: Add signal table for incremental snapshots
-        signal_table = "debezium_signal"
-        tables_full.append(f"{schema_name}.{signal_table}")
-
         config["table.include.list"] = ",".join(tables_full)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables + signal table")
-
-        # Configure signal table
-        config["signal.data.collection"] = f"{schema_name}.{signal_table}"
+        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
 
     # Add custom configuration
     if replication_config:
@@ -278,6 +269,7 @@ def get_oracle_connector_config(
     tables_whitelist: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
+    snapshot_mode: str = 'when_needed',
 ) -> Dict[str, Any]:
     """
     Generate Oracle Debezium connector configuration
@@ -310,14 +302,16 @@ def get_oracle_connector_config(
         "database.server.name": connector_name.replace('_connector', ''),
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
 
-        # Schema history
-        "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        "schema.history.internal.kafka.topic": f"schema-changes.{connector_name}",
+        # Use file-based schema history instead of Kafka-based to avoid topic issues
+        # This stores schema history in the Kafka Connect worker's local filesystem
+        "schema.history.internal": "io.debezium.storage.file.history.FileSchemaHistory",
+        "schema.history.internal.file.filename": f"/tmp/schema-history-{connector_name}.dat",
 
-        # Snapshot mode
-        # when_needed: Re-snapshot if offsets are missing or incomplete (safer for dev)
-        # initial: Snapshot only on first connector creation (strict, production)
-        "snapshot.mode": "initial",
+        # Snapshot mode - configurable
+        # never: No snapshot, CDC only
+        # when_needed: Re-snapshot if offsets are missing or incomplete
+        # initial: Snapshot only on first connector creation
+        "snapshot.mode": snapshot_mode,
 
         # Incremental snapshot configuration (for adding new tables after creation)
         "incremental.snapshot.allow.schema.changes": "true",
@@ -334,15 +328,8 @@ def get_oracle_connector_config(
     
     # Add table whitelist if specified
     if tables_whitelist:
-        # CRITICAL: Add signal table for incremental snapshots
-        signal_table = "debezium_signal"
-        tables_with_signal = list(tables_whitelist) + [signal_table]
-
-        config["table.include.list"] = ",".join(tables_with_signal)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables + signal table")
-
-        # Configure signal table
-        config["signal.data.collection"] = signal_table
+        config["table.include.list"] = ",".join(tables_whitelist)
+        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
 
     # Add custom configuration
     if replication_config:
@@ -362,35 +349,39 @@ def get_connector_config_for_database(
     tables_whitelist: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
+    snapshot_mode: str = 'when_needed',
 ) -> Optional[Dict[str, Any]]:
     """
     Get connector configuration based on database type
-    
+
     Args:
         db_config: ClientDatabase instance
         replication_config: ReplicationConfig instance (optional)
         tables_whitelist: List of tables to replicate
         kafka_bootstrap_servers: Kafka bootstrap servers
         schema_registry_url: Schema registry URL
-        
+        snapshot_mode: Debezium snapshot mode ('never', 'initial', 'when_needed', etc.)
+
     Returns:
         Optional[Dict[str, Any]]: Connector configuration or None if unsupported
     """
     client = db_config.client
     db_type = db_config.db_type.lower()
-    
+
     config_generators = {
         'mysql': get_mysql_connector_config,
         'postgresql': get_postgresql_connector_config,
         'oracle': get_oracle_connector_config,
     }
-    
+
     generator = config_generators.get(db_type)
-    
+
     if not generator:
         logger.error(f"Unsupported database type for CDC: {db_type}")
         return None
-    
+
+    logger.info(f"Generating {db_type} connector config with snapshot_mode={snapshot_mode}")
+
     return generator(
         client=client,
         db_config=db_config,
@@ -398,6 +389,7 @@ def get_connector_config_for_database(
         tables_whitelist=tables_whitelist,
         kafka_bootstrap_servers=kafka_bootstrap_servers,
         schema_registry_url=schema_registry_url,
+        snapshot_mode=snapshot_mode,
     )
 
 

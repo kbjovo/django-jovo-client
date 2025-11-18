@@ -19,6 +19,7 @@ from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
+from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import Q
 from sqlalchemy import text
@@ -382,132 +383,54 @@ def cdc_configure_tables(request, database_pk):
 @require_http_methods(["GET", "POST"])
 def cdc_create_connector(request, config_pk):
     """
-    Create Debezium connector for the replication configuration
+    Finalize replication configuration (NEW: Just saves config, orchestrator creates connector)
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     db_config = replication_config.client_database
     client = db_config.client
-    
+
     if request.method == "POST":
         try:
             # Generate connector name
             connector_name = generate_connector_name(client, db_config)
-            
+
             # Get list of tables to replicate
             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
             tables_list = [tm.source_table for tm in table_mappings]
-            
-            # Generate connector configuration
-            connector_config = get_connector_config_for_database(
-                db_config=db_config,
-                replication_config=replication_config,
-                tables_whitelist=tables_list,
-            )
-            
-            if not connector_config:
-                raise Exception("Failed to generate connector configuration")
-            
-            # Create connector via Debezium Manager
+
+            if not tables_list:
+                raise Exception("No tables selected for replication")
+
+            # Verify Kafka Connect is healthy
             manager = DebeziumConnectorManager()
-            
-            # Check Kafka Connect health
             is_healthy, health_error = manager.check_kafka_connect_health()
             if not is_healthy:
                 raise Exception(f"Kafka Connect is not healthy: {health_error}")
 
-            # CRITICAL: Setup signal table for incremental snapshots
-            # This must be done BEFORE creating the connector
-            try:
-                from client.utils.debezium_snapshot import setup_signal_table
-                logger.info("Setting up Debezium signal table for incremental snapshots...")
-                setup_success = setup_signal_table(replication_config)
-                if setup_success:
-                    logger.info("✅ Signal table is ready for incremental snapshots")
-                else:
-                    logger.warning("⚠️ Signal table setup had issues, but continuing...")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to setup signal table: {e}")
-                # Don't fail connector creation, signal table can be created later
-
-            # Create connector
-            success, error = manager.create_connector(
-                connector_name=connector_name,
-                config=connector_config,
-                notify_on_error=True
-            )
-
-            if not success:
-                raise Exception(f"Failed to create connector: {error}")
-
-            # Pre-create Kafka topics with proper configuration
-            # CRITICAL: Connector is useless without topics
-            topic_manager = KafkaTopicManager()
-
-            # Topic prefix is client_{client_id}_db_{database_id} (e.g., client_2_db_5)
-            topic_prefix = f"client_{client.id}_db_{db_config.id}"
-
-            # Create topics for all enabled tables
-            topic_results = topic_manager.create_cdc_topics_for_tables(
-                server_name=topic_prefix,
-                database=db_config.database_name,
-                table_names=tables_list
-            )
-
-            # Verify all topics exist (either newly created or already existed)
-            topics_verified = []
-            topics_missing = []
-
-            for table in tables_list:
-                topic_name = f"{topic_prefix}.{db_config.database_name}.{table}"
-                if topic_manager.topic_exists(topic_name):
-                    topics_verified.append(topic_name)
-                else:
-                    topics_missing.append(topic_name)
-
-            # If any required topics are missing, abort connector creation
-            if topics_missing:
-                # Rollback: Delete the connector we just created
-                try:
-                    logger.warning(f"Rolling back connector {connector_name} due to missing topics")
-                    manager.delete_connector(connector_name)
-                except Exception as rollback_error:
-                    logger.error(f"Failed to rollback connector: {rollback_error}")
-
-                error_msg = (
-                    f"❌ Failed to create required Kafka topics: {', '.join(topics_missing)}. "
-                    f"Connector creation aborted. "
-                    f"Please check Kafka broker status and retry."
-                )
-                raise Exception(error_msg)
-
-            # Log success
-            successful_topics = [t for t, success in topic_results.items() if success]
-            failed_topics = [t for t, success in topic_results.items() if not success]
-
-            if successful_topics:
-                logger.info(f"✅ Created {len(successful_topics)} new Kafka topics for connector {connector_name}")
-            if failed_topics:
-                # Topics "failed" to create but exist - that's OK (idempotent)
-                logger.info(f"ℹ️  {len(failed_topics)} topics already existed (reusing existing topics)")
-
-            # Update replication config (but don't start replication yet)
+            # Update replication config
+            # NOTE: We're NOT creating the actual Debezium connector here anymore
+            # The orchestrator will create it when user clicks "Start Replication"
             replication_config.connector_name = connector_name
             replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
             replication_config.status = 'configured'
-            replication_config.is_active = False  # Changed from True
+            replication_config.is_active = False
             replication_config.save()
-            
+
+            logger.info(f"Configuration saved for connector: {connector_name}")
+            logger.info(f"Tables configured: {len(tables_list)}")
+
             messages.success(
-                request, 
-                f'✅ Debezium connector "{connector_name}" created successfully! '
-                f'You can now start replication from the monitoring page.'
+                request,
+                f'✅ Replication configured successfully! '
+                f'Configuration: {connector_name} with {len(tables_list)} tables. '
+                f'Click "Start Replication" to begin.'
             )
-            
+
             return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
-            
+
         except Exception as e:
-            logger.error(f"Failed to create connector: {e}", exc_info=True)
-            messages.error(request, f'Failed to create connector: {str(e)}')
+            logger.error(f"Failed to configure replication: {e}", exc_info=True)
+            messages.error(request, f'Failed to configure replication: {str(e)}')
     
     # GET: Show connector creation confirmation
     table_mappings = replication_config.table_mappings.filter(is_enabled=True)
@@ -529,38 +452,62 @@ def cdc_create_connector(request, config_pk):
 @require_http_methods(["GET"])
 def cdc_monitor_connector(request, config_pk):
     """
-    Real-time monitoring of connector status
+    Real-time monitoring of connector status (NEW: Uses orchestrator)
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-    
+
     if not replication_config.connector_name:
         messages.error(request, 'No connector configured for this replication')
         return redirect('client_detail', pk=replication_config.client_database.client.pk)
-    
+
     try:
-        manager = DebeziumConnectorManager()
-        
-        # Get connector status
-        exists, status_data = manager.get_connector_status(replication_config.connector_name)
-        
-        if not exists:
-            messages.warning(request, 'Connector not found in Kafka Connect')
-            status_data = None
-        
-        # Get connector tasks
-        tasks = manager.get_connector_tasks(replication_config.connector_name) if exists else []
-        
+        # Use orchestrator for unified status
+        from client.replication import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(replication_config)
+        unified_status = orchestrator.get_unified_status()
+
+        # Check if connector actually exists in Kafka Connect
+        connector_exists = unified_status['connector']['state'] not in ['NOT_FOUND', 'ERROR']
+
+        # Determine what actions are available based on state
+        can_start = (
+            replication_config.status == 'configured' and
+            not replication_config.is_active
+        )
+
+        can_stop = (
+            replication_config.is_active and
+            connector_exists
+        )
+
+        can_restart = (
+            replication_config.is_active and
+            connector_exists
+        )
+
         context = {
             'replication_config': replication_config,
             'client': replication_config.client_database.client,
-            'connector_status': status_data,
-            'tasks': tasks,
-            'exists': exists,
+            'unified_status': unified_status,
+            'connector_exists': connector_exists,
+            'can_start': can_start,
+            'can_stop': can_stop,
+            'can_restart': can_restart,
+            'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True),
+            # Legacy fields for backward compatibility with template
+            'connector_status': {
+                'connector': {'state': unified_status['connector']['state']},
+                'tasks': unified_status['connector'].get('tasks', [])
+            } if connector_exists else None,
+            'tasks': unified_status['connector'].get('tasks', []),
+            'exists': connector_exists,
         }
-        
+
         return render(request, 'client/cdc/monitor_connector.html', context)
-        
+
     except Exception as e:
+        logger.error(f'Failed to get connector status: {e}', exc_info=True)
         messages.error(request, f'Failed to get connector status: {str(e)}')
         return redirect('client_detail', pk=replication_config.client_database.client.pk)
 
@@ -608,83 +555,87 @@ def cdc_connector_action(request, config_pk, action):
         manager = DebeziumConnectorManager()
         
         if action == 'start':
-            # Start the Kafka consumer to begin replication
-            logger.info(f"✅ Testing replication for config {config_pk}")
-            logger.info(f"🚀 Starting replication for config {config_pk}")
-            
-            # Check connector is running first
-            exists, status_data = manager.get_connector_status(connector_name)
-            if not exists:
-                return JsonResponse({
-                    'success': False,
-                    'error': 'Connector not found'
-                }, status=400)
-            
-            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-            if connector_state != 'RUNNING':
-                return JsonResponse({
-                    'success': False,
-                    'error': f'Connector is not running. Current state: {connector_state}'
-                }, status=400)
-            
-            # Start Kafka consumer task
-            task = start_kafka_consumer.apply_async(
-                args=[config_pk],
-                countdown=2  # Start after 2 seconds
-            )
-            
-            # Update status
-            replication_config.status = 'active'
-            replication_config.is_active = True
-            replication_config.save()
-            
-            # Update client replication status
-            client = replication_config.client_database.client
-            client.replication_enabled = True
-            client.replication_status = 'active'
-            client.save()
-            
-            message = f'Replication started successfully! Task ID: {task.id}'
-            success = True
-            error = None
+            # Use orchestrator to start replication (NEW)
+            logger.info(f"🚀 Starting replication for config {config_pk} via orchestrator")
+
+            from client.replication import ReplicationOrchestrator
+
+            orchestrator = ReplicationOrchestrator(replication_config)
+
+            # Start replication with new simplified flow
+            success, message = orchestrator.start_replication(force_resync=False)
+
+            if success:
+                # Update client replication status
+                client = replication_config.client_database.client
+                client.replication_enabled = True
+                client.replication_status = 'active'
+                client.save()
+
+                error = None
+            else:
+                error = message
+                message = None
             
         elif action == 'pause':
-            success, error = manager.pause_connector(connector_name)
-            if success:
-                # Also stop the consumer
-                stop_kafka_consumer(replication_config.pk)
-                replication_config.status = 'paused'
-                replication_config.is_active = False
-            message = 'Connector paused and consumer stopped successfully'
+            # Use orchestrator to stop replication (NEW)
+            logger.info(f"⏸️ Pausing replication for config {config_pk} via orchestrator")
+
+            from client.replication import ReplicationOrchestrator
+
+            orchestrator = ReplicationOrchestrator(replication_config)
+            success, message = orchestrator.stop_replication()
+
+            if not success:
+                error = message
+                message = None
+            else:
+                error = None
             
         elif action == 'resume':
-            success, error = manager.resume_connector(connector_name)
-            if success:
-                # Restart consumer
-                start_kafka_consumer.apply_async(
-                    args=[replication_config.pk],
-                    countdown=2
-                )
-                replication_config.status = 'active'
-                replication_config.is_active = True
-            message = 'Connector resumed and consumer restarted successfully'
+            # Use orchestrator to resume replication (NEW)
+            logger.info(f"▶️ Resuming replication for config {config_pk} via orchestrator")
+
+            from client.replication import ReplicationOrchestrator
+
+            orchestrator = ReplicationOrchestrator(replication_config)
+            success, message = orchestrator.start_replication(force_resync=False)
+
+            if not success:
+                error = message
+                message = None
+            else:
+                error = None
             
         elif action == 'restart':
-            success, error = manager.restart_connector(connector_name)
-            if success:
-                # Restart consumer
-                restart_replication.apply_async(args=[replication_config.pk])
-            message = 'Connector and consumer restarted successfully'
+            # Use orchestrator to restart replication (NEW)
+            logger.info(f"🔄 Restarting replication for config {config_pk} via orchestrator")
+
+            from client.replication import ReplicationOrchestrator
+
+            orchestrator = ReplicationOrchestrator(replication_config)
+            success, message = orchestrator.restart_replication()
+
+            if not success:
+                error = message
+                message = None
+            else:
+                error = None
             
         elif action == 'delete':
-            success, error = manager.delete_connector(connector_name, notify=True)
-            if success:
-                # Stop consumer first
-                stop_kafka_consumer(replication_config.pk)
-                replication_config.status = 'disabled'
-                replication_config.connector_name = None
-                replication_config.is_active = False
-            message = 'Connector deleted and consumer stopped successfully'
+            # Use orchestrator to delete replication (NEW)
+            logger.info(f"🗑️ Deleting replication for config {config_pk} via orchestrator")
+
+            from client.replication import ReplicationOrchestrator
+
+            orchestrator = ReplicationOrchestrator(replication_config)
+            success, message = orchestrator.delete_replication(delete_topics=True)
+
+            if not success:
+                error = message
+                message = None
+            else:
+                error = None
             
         else:
             return JsonResponse({
@@ -713,105 +664,148 @@ def cdc_connector_action(request, config_pk, action):
 
 @require_http_methods(["POST"])
 def start_replication(request, config_id):
-    """Start CDC replication for a config"""
+    """Start CDC replication for a config (NEW: Uses orchestrator)"""
     try:
         config = get_object_or_404(ReplicationConfig, id=config_id)
-        
+
         # Check if already running
         if config.is_active and config.status == 'active':
             messages.warning(request, "Replication is already running!")
             return redirect('cdc_config_detail', config_id=config_id)
-        
-        # Create connector and start consumer
-        task = create_debezium_connector.apply_async(args=[config_id])
-        
-        messages.success(
-            request,
-            f"🚀 Replication started! Task ID: {task.id}"
-        )
-        
+
+        # Use orchestrator for simplified flow (Option A)
+        from client.replication import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(config)
+
+        # Get force_resync parameter from request (default: False)
+        force_resync = request.POST.get('force_resync', 'false').lower() == 'true'
+
+        logger.info(f"Starting replication for config {config_id} (force_resync={force_resync})")
+
+        # Start replication with new simplified flow
+        # This will:
+        # 1. Validate prerequisites
+        # 2. Perform initial SQL copy
+        # 3. Start Debezium connector (CDC-only mode)
+        # 4. Start consumer with fresh group ID
+        success, message = orchestrator.start_replication(force_resync=force_resync)
+
+        if success:
+            messages.success(
+                request,
+                f"🚀 Replication started successfully! {message}"
+            )
+        else:
+            messages.error(
+                request,
+                f"❌ Failed to start replication: {message}"
+            )
+
         return redirect('cdc_config_detail', config_id=config_id)
-        
+
     except Exception as e:
+        logger.error(f"Failed to start replication: {e}", exc_info=True)
         messages.error(request, f"Failed to start replication: {str(e)}")
         return redirect('cdc_config_detail', config_id=config_id)
 
 
 @require_http_methods(["POST"])
 def stop_replication(request, config_id):
-    """Stop CDC replication for a config"""
+    """Stop CDC replication for a config (NEW: Uses orchestrator)"""
     try:
         config = get_object_or_404(ReplicationConfig, id=config_id)
-        
+
         if not config.is_active:
             messages.warning(request, "Replication is not running!")
             return redirect('cdc_config_detail', config_id=config_id)
-        
-        # Stop consumer
-        task = stop_kafka_consumer.apply_async(args=[config_id])
-        
-        messages.success(
-            request,
-            f"⏸️ Replication stopped! Task ID: {task.id}"
-        )
-        
+
+        # Use orchestrator to stop replication
+        from client.replication import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(config)
+
+        logger.info(f"Stopping replication for config {config_id}")
+
+        success, message = orchestrator.stop_replication()
+
+        if success:
+            messages.success(
+                request,
+                f"⏸️ Replication stopped! {message}"
+            )
+        else:
+            messages.error(
+                request,
+                f"❌ Failed to stop replication: {message}"
+            )
+
         return redirect('cdc_config_detail', config_id=config_id)
-        
+
     except Exception as e:
+        logger.error(f"Failed to stop replication: {e}", exc_info=True)
         messages.error(request, f"Failed to stop replication: {str(e)}")
         return redirect('cdc_config_detail', config_id=config_id)
 
 
 @require_http_methods(["POST"])
 def restart_replication_view(request, config_id):
-    """Restart CDC replication for a config"""
+    """Restart CDC replication for a config (NEW: Uses orchestrator)"""
     try:
         config = get_object_or_404(ReplicationConfig, id=config_id)
-        
-        # Restart replication
-        task = restart_replication.apply_async(args=[config_id])
-        
-        messages.success(
-            request,
-            f"🔄 Replication restarted! Task ID: {task.id}"
-        )
-        
+
+        # Use orchestrator to restart replication
+        from client.replication import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(config)
+
+        logger.info(f"Restarting replication for config {config_id}")
+
+        success, message = orchestrator.restart_replication()
+
+        if success:
+            messages.success(
+                request,
+                f"🔄 Replication restarted! {message}"
+            )
+        else:
+            messages.error(
+                request,
+                f"❌ Failed to restart replication: {message}"
+            )
+
         return redirect('cdc_config_detail', config_id=config_id)
-        
+
     except Exception as e:
+        logger.error(f"Failed to restart replication: {e}", exc_info=True)
         messages.error(request, f"Failed to restart replication: {str(e)}")
         return redirect('cdc_config_detail', config_id=config_id)
 
 
 @require_http_methods(["GET"])
 def replication_status(request, config_id):
-    """Get replication status (AJAX endpoint)"""
+    """Get replication status (AJAX endpoint) - NEW: Uses orchestrator"""
     try:
         config = get_object_or_404(ReplicationConfig, id=config_id)
-        
-        data = {
-            'is_active': config.is_active,
-            'status': config.status,
-            'connector_name': config.connector_name,
-            'last_sync_at': config.last_sync_at.isoformat() if config.last_sync_at else None,
-            'table_count': config.table_mappings.filter(is_enabled=True).count(),
-        }
-        
-        # Get connector status if exists
-        if config.connector_name:
-            from client.utils.debezium_manager import DebeziumConnectorManager
-            manager = DebeziumConnectorManager()
-            
-            exists, status_data = manager.get_connector_status(config.connector_name)
-            
-            if exists and status_data:
-                data['connector_state'] = status_data.get('connector', {}).get('state', 'UNKNOWN')
-                data['tasks'] = status_data.get('tasks', [])
-        
-        return JsonResponse(data)
+
+        # Use orchestrator for unified status
+        from client.replication import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(config)
+        unified_status = orchestrator.get_unified_status()
+
+        # Return comprehensive status
+        return JsonResponse({
+            'success': True,
+            'status': unified_status
+        })
 
     except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
+        logger.error(f"Failed to get replication status: {e}", exc_info=True)
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
 
 
 @require_http_methods(["GET", "POST"])
@@ -1319,27 +1313,12 @@ def cdc_config_update(request, config_pk):
                     'error': f'Failed to create target tables: {str(e)}'
                 }, status=500)
 
-        # CRITICAL: Trigger incremental snapshot for newly added tables
-        # This is REQUIRED because Debezium doesn't automatically snapshot new tables
-        # The snapshot must be triggered via the signaling mechanism
+        # NOTE: Incremental snapshot via signal table removed
+        # If you add new tables, the connector will need to be restarted to get initial data
         if newly_added_tables:
-            try:
-                from client.utils.debezium_snapshot import trigger_incremental_snapshot
-                logger.info(f"📸 Triggering incremental snapshot for {len(newly_added_tables)} new tables: {newly_added_tables}")
-
-                success = trigger_incremental_snapshot(replication_config, newly_added_tables)
-
-                if success:
-                    logger.info(f"✅ Incremental snapshot signal sent successfully!")
-                    logger.info(f"   The snapshot will start automatically and data will flow to Kafka")
-                else:
-                    logger.error(f"❌ Failed to trigger incremental snapshot")
-                    logger.warning(f"⚠️ MANUAL ACTION REQUIRED: New tables will NOT have initial data!")
-                    logger.warning(f"   Run: python manage.py trigger_snapshot --config-id={replication_config.id}")
-            except Exception as e:
-                logger.error(f"❌ Error triggering incremental snapshot: {e}", exc_info=True)
-                logger.warning(f"⚠️ MANUAL ACTION REQUIRED: Newly added tables will NOT get initial snapshot!")
-                # Don't fail the entire update - user can manually trigger snapshot later
+            logger.info(f"⚠️ {len(newly_added_tables)} new tables added: {newly_added_tables}")
+            logger.info(f"   To get initial data, you'll need to restart the connector")
+            logger.info(f"   Or delete and recreate the connector with all tables")
 
         # Update connector configuration if it exists
         if replication_config.connector_name:
@@ -1503,6 +1482,42 @@ def ajax_get_table_schemas_batch(request, database_pk):
 
     except Exception as e:
         logger.error(f"Failed to fetch table schemas: {e}", exc_info=True)
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@login_required
+def cdc_unified_status(request, config_pk):
+    """
+    Get comprehensive unified status for replication (NEW API).
+
+    Returns detailed health information for both connector and consumer.
+    Useful for debugging and monitoring.
+    """
+    try:
+        config = ReplicationConfig.objects.get(pk=config_pk)
+
+        # Use new ReplicationOrchestrator for unified status
+        from client.replication import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+
+        status = orchestrator.get_unified_status()
+
+        return JsonResponse({
+            'success': True,
+            'status': status
+        })
+
+    except ReplicationConfig.DoesNotExist:
+        return JsonResponse({
+            'success': False,
+            'error': 'Replication configuration not found'
+        }, status=404)
+
+    except Exception as e:
+        logger.error(f"Failed to get unified status: {e}", exc_info=True)
         return JsonResponse({
             'success': False,
             'error': str(e)
