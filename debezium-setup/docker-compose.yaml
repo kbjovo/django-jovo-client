@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ============================================
   # MySQL Database
@@ -158,7 +156,7 @@ services:
   # Kafka Connect with Debezium
   # ============================================
   kafka-connect:
-    image: debezium/connect:2.4
+    image: quay.io/debezium/connect:3.3
     container_name: kafka-connect
     hostname: kafka-connect
     depends_on:
@@ -225,12 +223,118 @@ services:
       - replication-network
     restart: unless-stopped
 
+  # ============================================
+  # Django Web Application
+  # ============================================
+  django:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: django-web
+    hostname: django
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_SETTINGS_MODULE=jovoclient.settings
+    env_file:
+      - ../.env.docker
+    volumes:
+      - ..:/app
+      - django-static:/app/staticfiles
+      - django-media:/app/mediafiles
+    networks:
+      - replication-network
+    command: python manage.py runserver 0.0.0.0:8000
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Worker - Main Queue
+  # ============================================
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: celery-worker
+    hostname: celery-worker
+    depends_on:
+      - django
+      - redis
+      - kafka
+    environment:
+      - DJANGO_SETTINGS_MODULE=jovoclient.settings
+    env_file:
+      - ../.env.docker
+    volumes:
+      - ..:/app
+    networks:
+      - replication-network
+    command: celery -A jovoclient worker -l info -Q celery --concurrency=4 -n worker@%h
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Worker - Consumer Queue
+  # ============================================
+  celery-consumer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: celery-consumer
+    hostname: celery-consumer
+    depends_on:
+      - django
+      - redis
+      - kafka
+    environment:
+      - DJANGO_SETTINGS_MODULE=jovoclient.settings
+    env_file:
+      - ../.env.docker
+    volumes:
+      - ..:/app
+    networks:
+      - replication-network
+    command: celery -A jovoclient worker -Q consumers -l info -n consumer@%h --concurrency=2
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Beat - Periodic Tasks
+  # ============================================
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: celery-beat
+    hostname: celery-beat
+    depends_on:
+      - django
+      - redis
+    environment:
+      - DJANGO_SETTINGS_MODULE=jovoclient.settings
+    env_file:
+      - ../.env.docker
+    volumes:
+      - ..:/app
+    networks:
+      - replication-network
+    command: celery -A jovoclient beat -l info
+    restart: unless-stopped
+
 volumes:
   mysql-data:
     driver: local
   redis-data:
     driver: local
   kafka-data:
+    driver: local
+  django-static:
+    driver: local
+  django-media:
     driver: local
 
 networks:

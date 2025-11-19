@@ -16,6 +16,7 @@ from client.utils.debezium_manager import DebeziumConnectorManager
 from client.utils.kafka_topic_manager import KafkaTopicManager
 from client.utils.connector_templates import get_connector_config_for_database
 from .validators import ReplicationValidator
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -48,25 +49,32 @@ class ReplicationOrchestrator:
         """
         Start complete replication (connector + consumer).
 
-        NEW SIMPLIFIED FLOW (Option A):
-        1. Validate prerequisites
-        2. Perform initial SQL copy (if needed)
-        3. Start Debezium connector (CDC-only mode)
-        4. Start consumer with fresh group ID
+        SIMPLIFIED FLOW:
+        1. Validate prerequisites (database connectivity, permissions, binlog settings)
+        2. Start Debezium connector with 'initial' snapshot mode
+           - Debezium performs initial snapshot → Kafka topics (auto-created)
+           - Then streams real-time CDC events
+        3. Start consumer to process messages from Kafka → Target database
 
         Args:
-            force_resync: If True, truncate target tables and reload all data
+            force_resync: If True, restart connector to re-snapshot all data
 
         Returns:
             (success, message)
         """
         self._log_info("=" * 60)
-        self._log_info("STARTING REPLICATION (SIMPLIFIED)")
+        self._log_info("STARTING CDC REPLICATION")
         self._log_info("=" * 60)
 
         try:
-            # STEP 1: Validate prerequisites
-            self._log_info("STEP 1/4: Validating prerequisites...")
+            # ========================================
+            # STEP 1: Validate Prerequisites
+            # ========================================
+            self._log_info("STEP 1/3: Validating prerequisites...")
+            self._log_info("  → Checking database connectivity")
+            self._log_info("  → Verifying MySQL binlog configuration")
+            self._log_info("  → Validating user permissions")
+
             is_valid, errors = self.validator.validate_all()
             if not is_valid:
                 error_msg = f"Validation failed: {'; '.join(errors)}"
@@ -74,43 +82,83 @@ class ReplicationOrchestrator:
                 self._update_status('error', error_msg)
                 return False, error_msg
 
-            self._log_info("✓ All prerequisites validated")
+            self._log_info("✓ All prerequisites validated successfully")
+            self._log_info("")
 
-            # STEP 2: Initial data load via SQL copy
-            self._log_info("STEP 2/4: Performing initial data sync...")
-            success, message = self._perform_initial_sync(force_resync=force_resync)
+            # ========================================
+            # STEP 2: Start Debezium Connector
+            # ========================================
+            self._log_info("STEP 2/3: Starting Debezium connector...")
+            self._log_info("  → Snapshot mode: 'initial' (full snapshot + CDC streaming)")
+            self._log_info("  → Source: {}.{}".format(
+                self.config.client_database.host,
+                self.config.client_database.database_name
+            ))
+
+            enabled_tables = list(
+                self.config.table_mappings.filter(is_enabled=True).values_list('source_table', flat=True)
+            )
+            self._log_info(f"  → Tables: {', '.join(enabled_tables)}")
+
+            # Delete old connector if force_resync
+            if force_resync:
+                self._log_info("  → Force resync enabled: deleting old connector...")
+                try:
+                    self.connector_manager.delete_connector(self.config.connector_name)
+                    self._log_info("  ✓ Old connector deleted")
+                except:
+                    self._log_info("  → No old connector to delete")
+
+            # Start connector with initial snapshot
+            success, message = self._ensure_connector_running(snapshot_mode='initial')
             if not success:
                 self._update_status('error', message)
                 return False, message
 
-            self._log_info("✓ Initial data sync completed")
+            self._log_info(f"✓ Debezium connector started: {self.config.connector_name}")
+            self._log_info("  → Initial snapshot in progress (Debezium → Kafka)")
+            self._log_info("  → Kafka topics will be auto-created")
+            self._log_info("  → Binlog streaming will begin after snapshot completes")
+            self._log_info("")
 
-            # STEP 3: Ensure connector exists and is running (CDC-only mode)
-            # Use 'schema_only' to snapshot schema (not data) and establish binlog position
-            self._log_info("STEP 3/4: Starting Debezium connector (CDC-only)...")
-            success, message = self._ensure_connector_running(snapshot_mode='schema_only')
-            if not success:
-                self._update_status('error', message)
-                return False, message
-
-            self._log_info(f"✓ Connector is running: {self.config.connector_name}")
+            # ========================================
+            # STEP 3: Start Consumer
+            # ========================================
+            self._log_info("STEP 3/3: Starting Kafka consumer...")
+            self._log_info("  → Consumer will read from Kafka topics")
+            self._log_info("  → Data flow: Kafka → Consumer → Target database")
 
             # Mark as active BEFORE starting consumer (consumer task checks this)
-            self._update_status('active', 'Replication active')
+            self._update_status('active', 'Consumer starting...')
             self.config.is_active = True
             self.config.save()
 
-            # STEP 4: Start consumer with fresh group ID
-            self._log_info("STEP 4/4: Starting consumer with fresh group ID...")
             success, message = self._start_consumer_with_fresh_group()
             if not success:
                 self._update_status('error', message)
                 return False, message
 
+            self._log_info(f"✓ Consumer started successfully")
+            self._log_info("")
+
+            # ========================================
+            # Success Summary
+            # ========================================
             self._log_info("=" * 60)
-            self._log_info("✓ REPLICATION STARTED SUCCESSFULLY")
+            self._log_info("✓ CDC REPLICATION STARTED SUCCESSFULLY")
+            self._log_info("=" * 60)
+            self._log_info("Status: ACTIVE")
+            self._log_info(f"Connector: {self.config.connector_name}")
+            self._log_info(f"Topics: {self.config.kafka_topic_prefix}.*")
+            self._log_info(f"Consumer Group: cdc_consumer_{self.config.client_database.client.id}_{self.config.id}")
+            self._log_info("")
+            self._log_info("Next steps:")
+            self._log_info("  1. Monitor initial snapshot progress in Debezium logs")
+            self._log_info("  2. Check consumer is processing messages")
+            self._log_info("  3. Verify data appearing in target database")
             self._log_info("=" * 60)
 
+            self._update_status('active', 'Replication active')
             return True, "Replication started successfully"
 
         except Exception as e:
@@ -390,6 +438,7 @@ class ReplicationOrchestrator:
             self.connector_manager.delete_connector(self.config.connector_name)
             self._log_info("Deleted old connector for fresh start")
         except:
+            self._log_info("Connector didn't exist")
             pass  # Connector didn't exist, that's fine
 
         # Create fresh connector
@@ -459,238 +508,6 @@ class ReplicationOrchestrator:
     def _log_error(self, message: str):
         """Log error message with structured format."""
         logger.error(f"[{self.config.connector_name}] {message}")
-
-    # ==========================================
-    # NEW: Initial Data Sync Methods
-    # ==========================================
-
-    def _perform_initial_sync(self, force_resync: bool = False) -> Tuple[bool, str]:
-        """
-        Perform initial data sync via direct SQL copy.
-
-        For each enabled table:
-        1. Check if target has data (skip if has data and not force_resync)
-        2. Optionally truncate if force_resync=True
-        3. Copy data via INSERT INTO target SELECT * FROM source
-        4. Track progress
-
-        Args:
-            force_resync: If True, truncate and reload all data
-
-        Returns:
-            (success, message)
-        """
-        try:
-            from sqlalchemy import create_engine, text, inspect
-            from client.utils.database_utils import get_database_engine
-
-            # Get source and target engines
-            source_engine = get_database_engine(self.config.client_database)
-            client = self.config.client_database.client
-            target_db = client.get_target_database()
-
-            if not target_db:
-                return False, "No target database configured"
-
-            target_engine = get_database_engine(target_db)
-
-            # Get enabled tables
-            enabled_mappings = self.config.table_mappings.filter(is_enabled=True)
-
-            if not enabled_mappings.exists():
-                self._log_warning("No tables enabled for replication")
-                return True, "No tables to sync (skipped)"
-
-            total_tables = enabled_mappings.count()
-            synced_tables = 0
-            total_rows = 0
-
-            for table_mapping in enabled_mappings:
-                self._log_info(f"Syncing table {table_mapping.source_table}...")
-
-                # Check if this is a large table (determine sync vs async)
-                source_row_count = self._get_table_row_count(
-                    source_engine,
-                    self.config.client_database.database_name,
-                    table_mapping.source_table
-                )
-
-                self._log_info(f"Source table has {source_row_count} rows")
-
-                # Check if target already has data
-                target_row_count = self._get_table_row_count(
-                    target_engine,
-                    target_db.database_name,
-                    table_mapping.target_table
-                )
-
-                # Skip if target has data and not force_resync
-                if target_row_count > 0 and not force_resync:
-                    self._log_info(f"Target table already has {target_row_count} rows, skipping")
-                    synced_tables += 1
-                    continue
-
-                # Decide: sync or async based on size
-                if source_row_count > 100000:
-                    # Large table - use background task
-                    self._log_info(f"Large table ({source_row_count} rows), syncing in background...")
-                    success, rows = self._copy_table_async(
-                        source_engine, target_engine,
-                        table_mapping, force_resync
-                    )
-                else:
-                    # Small table - sync inline
-                    success, rows = self._copy_table_sync(
-                        source_engine, target_engine,
-                        table_mapping, force_resync
-                    )
-
-                if not success:
-                    return False, f"Failed to sync table {table_mapping.source_table}"
-
-                # Update stats
-                table_mapping.total_rows_synced = rows
-                table_mapping.save()
-
-                total_rows += rows
-                synced_tables += 1
-                self._log_info(f"✓ Synced {rows} rows to {table_mapping.target_table}")
-
-            # Close engines
-            source_engine.dispose()
-            target_engine.dispose()
-
-            self._log_info(f"✓ Initial sync completed: {synced_tables}/{total_tables} tables, {total_rows} rows")
-            return True, f"Synced {synced_tables} tables ({total_rows} rows)"
-
-        except Exception as e:
-            error_msg = f"Initial sync failed: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
-
-    def _get_table_row_count(self, engine, database_name: str, table_name: str) -> int:
-        """Get row count for a table."""
-        from sqlalchemy import text
-
-        try:
-            with engine.connect() as conn:
-                # Handle different database types
-                if 'mysql' in engine.dialect.name or 'mariadb' in engine.dialect.name:
-                    result = conn.execute(text(f"SELECT COUNT(*) FROM `{database_name}`.`{table_name}`"))
-                elif 'postgresql' in engine.dialect.name:
-                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
-                elif 'oracle' in engine.dialect.name:
-                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
-                else:
-                    # Fallback
-                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
-
-                return result.scalar() or 0
-        except Exception as e:
-            self._log_warning(f"Could not get row count for {table_name}: {e}")
-            return 0
-
-    def _copy_table_sync(self, source_engine, target_engine, table_mapping, force_resync: bool) -> Tuple[bool, int]:
-        """
-        Copy table data synchronously via direct SQL.
-        Works for MySQL, PostgreSQL, Oracle.
-        """
-        import traceback
-        from sqlalchemy import inspect
-
-        source_db = self.config.client_database.database_name
-        target_db = self.config.client_database.client.get_target_database().database_name
-        source_table = table_mapping.source_table
-        target_table = table_mapping.target_table
-
-        try:
-            # Verify target table exists
-            self._log_info(f"Checking if target table {target_table} exists...")
-            inspector = inspect(target_engine)
-            target_tables = inspector.get_table_names(schema=target_db if 'mysql' in target_engine.dialect.name else None)
-
-            if target_table not in target_tables:
-                error_msg = f"Target table '{target_table}' does not exist in database '{target_db}'. Please create it first."
-                self._log_error(error_msg)
-                return False, 0
-
-            self._log_info(f"✓ Target table {target_table} exists")
-        except Exception as e:
-            self._log_warning(f"Could not verify target table existence: {e}")
-            # Continue anyway - might work
-
-        try:
-            # Truncate if force_resync
-            if force_resync:
-                self._log_info(f"Truncating target table {target_table}...")
-                try:
-                    with target_engine.connect() as conn:
-                        if 'mysql' in target_engine.dialect.name:
-                            conn.execute(text(f"TRUNCATE TABLE `{target_db}`.`{target_table}`"))
-                        else:
-                            conn.execute(text(f"TRUNCATE TABLE {target_table}"))
-                        conn.commit()
-                except Exception as e:
-                    self._log_error(f"Failed to truncate target table {target_table}: {e}")
-                    raise
-
-            # Copy data - database-agnostic approach
-            # We'll use pandas for simplicity and database compatibility
-            import pandas as pd
-
-            # Read from source
-            self._log_info(f"Reading data from source: {source_db}.{source_table}")
-            try:
-                if 'mysql' in source_engine.dialect.name:
-                    query = f"SELECT * FROM `{source_db}`.`{source_table}`"
-                else:
-                    query = f"SELECT * FROM {source_table}"
-
-                df = pd.read_sql(query, source_engine)
-                rows_copied = len(df)
-                self._log_info(f"Read {rows_copied} rows from source")
-            except Exception as e:
-                self._log_error(f"Failed to read from source table {source_table}: {e}")
-                raise
-
-            if rows_copied == 0:
-                self._log_info("Source table is empty, nothing to copy")
-                return True, 0
-
-            # Write to target
-            self._log_info(f"Writing {rows_copied} rows to target: {target_db}.{target_table}")
-            try:
-                df.to_sql(
-                    name=target_table,
-                    con=target_engine,
-                    if_exists='append',
-                    index=False,
-                    chunksize=1000
-                )
-                self._log_info(f"Successfully wrote {rows_copied} rows to target")
-            except Exception as e:
-                self._log_error(f"Failed to write to target table {target_table}: {e}")
-                self._log_error(f"Target table schema may not match source. Check table structure.")
-                raise
-
-            return True, rows_copied
-
-        except Exception as e:
-            self._log_error(f"=" * 60)
-            self._log_error(f"TABLE COPY FAILED: {source_table} → {target_table}")
-            self._log_error(f"Error: {str(e)}")
-            self._log_error(f"Traceback:\n{traceback.format_exc()}")
-            self._log_error(f"=" * 60)
-            return False, 0
-
-    def _copy_table_async(self, source_engine, target_engine, table_mapping, force_resync: bool) -> Tuple[bool, int]:
-        """
-        Copy table data asynchronously for large tables.
-        Queues a background Celery task and returns immediately.
-        """
-        # For now, fall back to sync (we can implement async later if needed)
-        self._log_warning("Async copy not yet implemented, using sync copy")
-        return self._copy_table_sync(source_engine, target_engine, table_mapping, force_resync)
 
     def _start_consumer_with_fresh_group(self) -> Tuple[bool, str]:
         """

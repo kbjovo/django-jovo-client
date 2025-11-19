@@ -95,15 +95,15 @@ def get_mysql_connector_config(
         # Using both client ID and database ID ensures uniqueness when same client has multiple databases
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
         
-        # Use file-based schema history instead of Kafka-based to avoid topic issues
-        # This stores schema history in the Kafka Connect worker's local filesystem
-        "schema.history.internal": "io.debezium.storage.file.history.FileSchemaHistory",
-        "schema.history.internal.file.filename": f"/tmp/schema-history-{connector_name}.dat",
+        # Use Kafka-based schema history (more reliable in containerized environments)
+        "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
-        # Snapshot mode - configurable
+        # Snapshot mode - configurable (Debezium 3.x)
         # never: No snapshot, CDC only
         # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Snapshot only on first connector creation
+        # initial: Full snapshot on first connector creation
+        # no_data: Capture schema only, no data (use after manual data copy)
         "snapshot.mode": snapshot_mode,
 
         # Include schema changes
@@ -215,15 +215,15 @@ def get_postgresql_connector_config(
         # Publication name (logical replication)
         "publication.name": f"debezium_pub_{client.id}",
 
-        # Use file-based schema history instead of Kafka-based to avoid topic issues
-        # This stores schema history in the Kafka Connect worker's local filesystem
-        "schema.history.internal": "io.debezium.storage.file.history.FileSchemaHistory",
-        "schema.history.internal.file.filename": f"/tmp/schema-history-{connector_name}.dat",
+        # Use Kafka-based schema history (more reliable in containerized environments)
+        "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
-        # Snapshot mode - configurable
+        # Snapshot mode - configurable (Debezium 3.x)
         # never: No snapshot, CDC only
         # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Snapshot only on first connector creation
+        # initial: Full snapshot on first connector creation
+        # no_data: Capture schema only, no data (use after manual data copy)
         "snapshot.mode": snapshot_mode,
 
         # Include schema changes
@@ -302,15 +302,15 @@ def get_oracle_connector_config(
         "database.server.name": connector_name.replace('_connector', ''),
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
 
-        # Use file-based schema history instead of Kafka-based to avoid topic issues
-        # This stores schema history in the Kafka Connect worker's local filesystem
-        "schema.history.internal": "io.debezium.storage.file.history.FileSchemaHistory",
-        "schema.history.internal.file.filename": f"/tmp/schema-history-{connector_name}.dat",
+        # Use Kafka-based schema history (more reliable in containerized environments)
+        "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
-        # Snapshot mode - configurable
+        # Snapshot mode - configurable (Debezium 3.x)
         # never: No snapshot, CDC only
         # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Snapshot only on first connector creation
+        # initial: Full snapshot on first connector creation
+        # no_data: Capture schema only, no data (use after manual data copy)
         "snapshot.mode": snapshot_mode,
 
         # Incremental snapshot configuration (for adding new tables after creation)

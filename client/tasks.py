@@ -260,7 +260,7 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
         logger.info(f"✓ Target database engine created")
 
         # Determine topics to subscribe to
-        kafka_topic_prefix = config.kafka_topic_prefix or f"client_{client.id}"
+        kafka_topic_prefix = config.kafka_topic_prefix
         source_db_name = config.client_database.database_name
 
         # Get all table topics
@@ -269,6 +269,7 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
             f"{kafka_topic_prefix}.{source_db_name}.{tm.source_table}"
             for tm in enabled_tables
         ]
+        logger.info(f"✓ Subscribed to {[topics]}")
 
         logger.info(f"✓ Subscribing to {len(topics)} topics:")
         for topic in topics:
@@ -291,14 +292,18 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
 
         # Create and start ResilientKafkaConsumer (NEW)
         from client.replication import ResilientKafkaConsumer
+        from django.conf import settings
 
-        logger.info(f"🔄 Creating ResilientKafkaConsumer...")
+        # Use Docker internal Kafka address for container-to-container communication
+        bootstrap_servers = settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'kafka:29092')
+        logger.info(f"🔄 Creating ResilientKafkaConsumer with bootstrap_servers={bootstrap_servers}...")
+
         consumer = ResilientKafkaConsumer(
             replication_config=config,
             consumer_group_id=consumer_group,
             topics=topics,
             target_engine=target_engine,
-            bootstrap_servers='localhost:9092',
+            bootstrap_servers=bootstrap_servers,
         )
 
         # Update state to RUNNING

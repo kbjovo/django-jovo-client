@@ -99,12 +99,13 @@
           <p><strong>Status:</strong> Consumer is actively listening for database changes.</p>
           <p class="mt-2"><strong>Current state:</strong></p>
           <ul class="list-disc list-inside mt-1 ml-2">
-            <li>✓ Initial data sync completed</li>
-            <li>✓ Consumer is RUNNING</li>
-            <li>⏳ Waiting for first CDC event (INSERT/UPDATE/DELETE)</li>
+            <li>✓ Debezium connector performing initial snapshot</li>
+            <li>✓ Consumer is RUNNING and processing events</li>
+            <li>✓ Kafka topics auto-created by Debezium</li>
+            <li>⏳ Real-time CDC streaming active</li>
           </ul>
           <p class="mt-3 text-xs">
-            <strong>Note:</strong> Kafka topics will be created automatically when the first database change occurs. Try inserting/updating a row in the source table.
+            <strong>Note:</strong> With the simplified flow, Debezium automatically snapshots existing data and then streams changes in real-time. No manual steps required!
           </p>
         </div>
       </div>
@@ -152,9 +153,10 @@
           <p>The replication process is initializing. This usually takes 5-15 seconds.</p>
           <p class="mt-2"><strong>Current progress:</strong></p>
           <ul class="list-disc list-inside mt-1 ml-2">
-            <li>✓ Initial data sync completed</li>
-            <li>⏳ Debezium connector is being registered in Kafka Connect...</li>
-            <li>⏳ Consumer is starting...</li>
+            <li>✓ Validating prerequisites (database, binlog, permissions)</li>
+            <li>⏳ Creating Debezium connector with snapshot.mode='initial'...</li>
+            <li>⏳ Debezium will automatically snapshot data & create topics</li>
+            <li>⏳ Consumer starting to process events...</li>
           </ul>
           <p class="mt-3 text-xs">
             <strong>Tip:</strong> The page will auto-refresh every 30 seconds. You can also click "Refresh" above.
@@ -176,13 +178,18 @@
         <h3 class="text-sm font-medium text-blue-800 dark:text-blue-300">Configuration Saved - Ready to Start</h3>
         <div class="mt-2 text-sm text-blue-700 dark:text-blue-400">
           <p>The replication configuration has been saved successfully.</p>
-          <p class="mt-2">The Debezium connector <span class="font-mono">{{ replication_config.connector_name }}</span> will be created when you click <strong>"Start Replication"</strong> below.</p>
-          <p class="mt-2"><strong>What will happen:</strong></p>
+          <p class="mt-2">Click <strong>"Start Replication"</strong> below to begin the simplified one-click setup.</p>
+          <p class="mt-2"><strong>What will happen (automatically):</strong></p>
           <ul class="list-disc list-inside mt-1 ml-2">
-            <li>Initial data will be copied from source to target database</li>
-            <li>Debezium connector will be created (CDC-only mode)</li>
-            <li>Real-time replication will begin</li>
+            <li><strong>Step 1:</strong> Validate prerequisites (database connectivity, binlog, permissions)</li>
+            <li><strong>Step 2:</strong> Create Debezium connector with snapshot.mode='initial'</li>
+            <li><strong>Step 3:</strong> Debezium snapshots existing data → Kafka topics (auto-created)</li>
+            <li><strong>Step 4:</strong> Start real-time CDC streaming from MySQL binlog</li>
+            <li><strong>Step 5:</strong> Start consumer to replicate changes to target database</li>
           </ul>
+          <p class="mt-3 text-xs text-blue-600 dark:text-blue-400">
+            <strong>✨ Simplified Flow:</strong> No manual data copying or topic pre-creation needed - Debezium handles everything!
+          </p>
         </div>
       </div>
     </div>
@@ -203,7 +210,7 @@
         Start Replication
       </button>
       <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
-        This will perform initial data sync and start real-time CDC replication
+        This will automatically validate, snapshot data, create topics, and start CDC streaming - all in one click!
       </p>
     </div>
   </div>
@@ -392,9 +399,9 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
           </svg>
           <div>
-            <h4 class="text-sm font-semibold text-blue-800 dark:text-blue-400 mb-1">Connector Ready</h4>
+            <h4 class="text-sm font-semibold text-blue-800 dark:text-blue-400 mb-1">Ready to Start Replication</h4>
             <p class="text-sm text-blue-700 dark:text-blue-500">
-              The Debezium connector has been created successfully. Click <strong>"Start Replication"</strong> to begin consuming CDC events and replicating data to the target database.
+              Configuration saved! Click <strong>"Start Replication"</strong> to: (1) Validate prerequisites, (2) Create Debezium connector with automatic snapshot, (3) Auto-create Kafka topics, and (4) Start consumer - all in one click!
             </p>
           </div>
         </div>

@@ -416,15 +416,19 @@ class DebeziumCDCConsumer:
     # -------------------------
     def apply_insert(self, prefixed_table: str, row: Dict[str, Any]):
         try:
+            logger.info(f"   🔹 Starting INSERT operation for table: {prefixed_table}")
+            logger.info(f"   🔹 Original row data: {json.dumps(row, default=str)[:300]}...")
+
             # CRITICAL: Convert timestamps BEFORE inserting
             row = self.convert_debezium_timestamps(row)
-            logger.debug(f"Final row before insert into {prefixed_table}: {row}") 
+            logger.info(f"   🔹 After timestamp conversion: {json.dumps(row, default=str)[:300]}...")
 
             with self.target_engine.connect() as conn:
                 table = self.table_cache.get(prefixed_table)
                 if table is None:
                     raise Exception(f"Table object not found for {prefixed_table}")
 
+                logger.info(f"   🔹 Using INSERT ... ON DUPLICATE KEY UPDATE strategy")
                 # Use INSERT ... ON DUPLICATE KEY UPDATE for MySQL to handle replays
                 from sqlalchemy.dialects.mysql import insert
                 stmt = insert(table).values(**row)
@@ -437,17 +441,21 @@ class DebeziumCDCConsumer:
                 conn.execute(stmt)
                 conn.commit()
             self.stats["inserts"] += 1
-            logger.debug(f"✅ Inserted/Updated into {prefixed_table}")
+            logger.info(f"   ✅ Successfully inserted/updated row in {prefixed_table}")
         except Exception as e:
             self.stats["errors"] += 1
-            logger.exception(f"Failed to insert into {prefixed_table}: {e}")
+            logger.error(f"   ❌ FAILED to insert into {prefixed_table}: {e}")
+            logger.exception(f"   ❌ Full exception:")
             raise
 
     def apply_update(self, prefixed_table: str, before: Dict[str, Any], after: Dict[str, Any]):
         try:
+            logger.info(f"   🔹 Starting UPDATE operation for table: {prefixed_table}")
+
             # CRITICAL: Convert timestamps in the 'after' data
             after = self.convert_debezium_timestamps(after)
-            
+            logger.info(f"   🔹 After timestamp conversion: {json.dumps(after, default=str)[:300]}...")
+
             with self.target_engine.connect() as conn:
                 table = self.table_cache.get(prefixed_table)
                 if table is None:
@@ -457,40 +465,46 @@ class DebeziumCDCConsumer:
                 pk_val = (after or {}).get("id") or (before or {}).get("id")
                 if pk_val is None:
                     # if no id, try to use all primary key columns (not implemented) => skip
-                    logger.warning(f"No PK for update on {prefixed_table}, skipping")
+                    logger.warning(f"   ⚠️  No PK for update on {prefixed_table}, skipping")
                     return
 
+                logger.info(f"   🔹 Updating row with PK id={pk_val}")
                 stmt = table.update().where(table.c.id == pk_val).values(**after)
                 conn.execute(stmt)
                 conn.commit()
             self.stats["updates"] += 1
-            logger.debug(f"✅ Updated row in {prefixed_table}")
+            logger.info(f"   ✅ Successfully updated row in {prefixed_table}")
         except Exception as e:
             self.stats["errors"] += 1
-            logger.exception(f"Failed to update {prefixed_table}: {e}")
+            logger.error(f"   ❌ FAILED to update {prefixed_table}: {e}")
+            logger.exception(f"   ❌ Full exception:")
             raise
 
     def apply_delete(self, prefixed_table: str, before: Dict[str, Any]):
         try:
+            logger.info(f"   🔹 Starting DELETE operation for table: {prefixed_table}")
+
             with self.target_engine.connect() as conn:
                 table = self.table_cache.get(prefixed_table)
                 if table is None:
-                    logger.warning(f"Table {prefixed_table} not found for delete - skipping")
+                    logger.warning(f"   ⚠️  Table {prefixed_table} not found for delete - skipping")
                     return
 
                 pk_val = (before or {}).get("id")
                 if pk_val is None:
-                    logger.warning(f"No PK for delete on {prefixed_table}, skipping")
+                    logger.warning(f"   ⚠️  No PK for delete on {prefixed_table}, skipping")
                     return
 
+                logger.info(f"   🔹 Deleting row with PK id={pk_val}")
                 stmt = table.delete().where(table.c.id == pk_val)
                 conn.execute(stmt)
                 conn.commit()
             self.stats["deletes"] += 1
-            logger.debug(f"✅ Deleted row from {prefixed_table}")
+            logger.info(f"   ✅ Successfully deleted row from {prefixed_table}")
         except Exception as e:
             self.stats["errors"] += 1
-            logger.exception(f"Failed to delete from {prefixed_table}: {e}")
+            logger.error(f"   ❌ FAILED to delete from {prefixed_table}: {e}")
+            logger.exception(f"   ❌ Full exception:")
             raise
 
     # -------------------------
@@ -502,30 +516,54 @@ class DebeziumCDCConsumer:
         """
         try:
             topic = msg.topic()
+            partition = msg.partition()
+            offset = msg.offset()
+
+            logger.info("=" * 80)
+            logger.info(f"📨 NEW MESSAGE RECEIVED")
+            logger.info(f"   Topic: {topic}")
+            logger.info(f"   Partition: {partition}")
+            logger.info(f"   Offset: {offset}")
+            logger.info("=" * 80)
+
             raw_value = msg.value()
             if raw_value is None:
+                logger.warning(f"⚠️  Empty message received on topic {topic}")
                 return
 
             # raw_value may already be bytes/string/json depending on producer config
             if isinstance(raw_value, (bytes, str)):
                 try:
                     message_value = json.loads(raw_value.decode("utf-8") if isinstance(raw_value, bytes) else raw_value)
-                except Exception:
+                    logger.debug(f"📄 Raw message payload: {json.dumps(message_value, indent=2)[:500]}...")
+                except Exception as e:
                     # not JSON -> skip
-                    logger.warning(f"Non-JSON message on topic {topic} - skipping")
+                    logger.warning(f"⚠️  Non-JSON message on topic {topic} - skipping. Error: {e}")
                     return
             else:
                 message_value = raw_value
+                logger.debug(f"📄 Message value type: {type(message_value)}")
 
             op, before, after, payload_source_db = self.parse_debezium_payload(message_value)
+
+            logger.info(f"🔍 Parsed CDC Event:")
+            logger.info(f"   Operation: {op}")
+            logger.info(f"   Source DB: {payload_source_db}")
+            logger.info(f"   Has 'before': {before is not None}")
+            logger.info(f"   Has 'after': {after is not None}")
 
             # determine source_db & table (prefer payload source, fallback to topic)
             topic_db, topic_table = self.extract_table_from_topic(topic)
             source_db = payload_source_db or topic_db or "unknown_source"
             table_name = topic_table or "unknown_table"
 
+            logger.info(f"📊 Table Info:")
+            logger.info(f"   Source DB: {source_db}")
+            logger.info(f"   Source Table: {table_name}")
+
             # Create prefixed table name (source_db_table)
             prefixed_table = self._prefixed_table_name(source_db, table_name)
+            logger.info(f"   Target Prefixed Table: {prefixed_table}")
 
             # ensure table exists (use after|before to infer)
             # Convert timestamps in sample data for proper type inference
@@ -544,26 +582,43 @@ class DebeziumCDCConsumer:
                     return  # skip this message
 
             # handle operations
+            logger.info(f"🔧 Processing Operation: {op}")
+
             if op in ("c", "r"):  # create or snapshot read
                 if after:
+                    logger.info(f"➕ INSERT operation detected")
+                    logger.info(f"   Data to insert: {json.dumps(after, default=str)[:200]}...")
                     # Debezium 'after' is a dict of column->value
                     self.apply_insert(prefixed_table, after)
+                else:
+                    logger.warning(f"⚠️  CREATE/READ operation but no 'after' data")
             elif op == "u":
+                logger.info(f"✏️  UPDATE operation detected")
+                logger.info(f"   Before: {json.dumps(before, default=str)[:150] if before else 'None'}...")
+                logger.info(f"   After: {json.dumps(after, default=str)[:150] if after else 'None'}...")
                 # update
                 self.apply_update(prefixed_table, before or {}, after or {})
             elif op == "d":
+                logger.info(f"🗑️  DELETE operation detected")
+                logger.info(f"   Before: {json.dumps(before, default=str)[:200] if before else 'None'}...")
                 # delete
                 self.apply_delete(prefixed_table, before or {})
             else:
+                logger.warning(f"⚠️  Unknown operation '{op}'")
                 # Unknown op: could still be message with payload structure; treat as insert if 'after' present
                 if after:
+                    logger.info(f"   Treating as INSERT since 'after' data is present")
                     self.apply_insert(prefixed_table, after)
                 else:
-                    logger.debug(f"Unknown op '{op}' on topic {topic} - skipping")
+                    logger.warning(f"   No 'after' data - skipping message")
 
             # update stats
             self.stats["messages_processed"] += 1
             self.stats["last_message_time"] = datetime.utcnow()
+
+            logger.info(f"✅ Message processed successfully")
+            logger.info(f"📈 Stats: {self.stats['messages_processed']} messages, {self.stats['inserts']} inserts, {self.stats['updates']} updates, {self.stats['deletes']} deletes, {self.stats['errors']} errors")
+            logger.info("=" * 80)
 
         except Exception as e:
             self.stats["errors"] += 1

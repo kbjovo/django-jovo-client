@@ -171,9 +171,13 @@ class ResilientKafkaConsumer:
         """
         last_heartbeat_time = time.time()
         message_count = 0
+        last_poll_log_time = time.time()
+        no_message_count = 0
 
         try:
             self._log_info(f"✓ Starting consumption loop (topics: {', '.join(self.topics)})")
+            self._log_info(f"   Consumer group: {self.consumer.consumer_group_id}")
+            self._log_info(f"   Heartbeat interval: {self.HEARTBEAT_INTERVAL_SECONDS}s")
 
             while not self.should_stop:
                 # Poll for messages (1 second timeout)
@@ -188,11 +192,23 @@ class ResilientKafkaConsumer:
                     msg = self.consumer.consumer.poll(timeout=1.0)
 
                     if msg is None:
+                        no_message_count += 1
+                        # Log "waiting for messages" every 30 seconds
+                        if current_time - last_poll_log_time >= 30:
+                            self._log_info(f"⏳ Waiting for messages... (polled {no_message_count} times with no messages)")
+                            last_poll_log_time = current_time
+                            no_message_count = 0
                         continue
+
+                    # Reset no-message counter when we receive a message
+                    no_message_count = 0
 
                     if msg.error():
                         self._handle_kafka_error(msg.error())
                         continue
+
+                    # Log that we're about to process a message
+                    logger.debug(f"[{self.config.connector_name}] Passing message to DebeziumCDCConsumer.process_message()")
 
                     # Process message
                     self.consumer.process_message(msg)
@@ -203,26 +219,29 @@ class ResilientKafkaConsumer:
                     # Commit offset
                     try:
                         self.consumer.consumer.commit(asynchronous=False)
+                        logger.debug(f"[{self.config.connector_name}] Offset committed successfully")
                     except Exception as e:
                         logger.warning(f"Failed to commit offset: {e}")
 
-                    # Log progress every 100 messages
-                    if message_count % 100 == 0:
-                        self._log_info(f"Processed {message_count} messages (total: {self.stats['messages_processed']})")
+                    # Log progress every 10 messages (changed from 100 for better visibility)
+                    if message_count % 10 == 0:
+                        self._log_info(f"📊 Processed {message_count} messages this session (total: {self.stats['messages_processed']})")
 
                 except Exception as e:
                     # Error processing individual message - log and continue
                     self.stats['errors_encountered'] += 1
-                    self._log_error(f"Error processing message: {str(e)}")
+                    self._log_error(f"❌ Error processing message: {str(e)}")
+                    logger.exception(f"[{self.config.connector_name}] Full exception:")
 
                     # If too many errors in a row, raise
                     if self.stats['errors_encountered'] % 10 == 0:
+                        self._log_error(f"⚠️  Multiple errors ({self.stats['errors_encountered']} total) - may indicate persistent issue")
                         raise TransientError(f"Multiple message processing errors: {str(e)}")
 
         except KeyboardInterrupt:
-            self._log_info("Consumption interrupted by user")
+            self._log_info("⏹️  Consumption interrupted by user")
         except Exception as e:
-            self._log_error(f"Consumption loop error: {str(e)}")
+            self._log_error(f"❌ Consumption loop error: {str(e)}")
             raise
 
     def _handle_kafka_error(self, error):
@@ -254,7 +273,7 @@ class ResilientKafkaConsumer:
                 consumer_last_heartbeat=self.last_heartbeat
             )
 
-            logger.debug(f"[{self.config.connector_name}] Heartbeat updated")
+            self._log_info(f"💓 Heartbeat updated (messages: {self.stats['messages_processed']}, errors: {self.stats['errors_encountered']})")
 
         except Exception as e:
             logger.warning(f"Failed to update heartbeat: {e}")
@@ -270,22 +289,26 @@ class ResilientKafkaConsumer:
         self.stats['retries_attempted'] += 1
         self.last_error = str(error)
 
+        self._log_warning("=" * 60)
+        self._log_warning(f"⚠️  TRANSIENT ERROR DETECTED")
+        self._log_warning(f"   Error: {error}")
+        self._log_warning(f"   Retry attempt: {self.retry_count}/{self.MAX_RETRIES}")
+        self._log_warning("=" * 60)
+
         if self.retry_count >= self.MAX_RETRIES:
             # Max retries exceeded - convert to persistent error
             error_msg = f"Max retries ({self.MAX_RETRIES}) exceeded. Last error: {error}"
-            self._log_error(error_msg)
+            self._log_error(f"❌ {error_msg}")
             self._update_config_status('error', error_msg)
             raise PersistentError(error_msg)
 
         # Calculate backoff delay: 2, 4, 8, 16, 32 seconds
         backoff_delay = self.BASE_BACKOFF_SECONDS * (2 ** (self.retry_count - 1))
 
-        self._log_warning(
-            f"Transient error (retry {self.retry_count}/{self.MAX_RETRIES}): {error}. "
-            f"Retrying in {backoff_delay} seconds..."
-        )
+        self._log_warning(f"🔄 Retrying in {backoff_delay} seconds...")
 
         time.sleep(backoff_delay)
+        self._log_info(f"🔄 Retry #{self.retry_count} starting now...")
 
     def _handle_persistent_error(self, error: PersistentError):
         """

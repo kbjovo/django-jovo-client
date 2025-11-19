@@ -383,7 +383,12 @@ def cdc_configure_tables(request, database_pk):
 @require_http_methods(["GET", "POST"])
 def cdc_create_connector(request, config_pk):
     """
-    Finalize replication configuration (NEW: Just saves config, orchestrator creates connector)
+    Finalize replication configuration and optionally auto-start.
+
+    With simplified flow:
+    1. Saves configuration (connector name, topic prefix, tables)
+    2. Optionally validates prerequisites
+    3. Optionally auto-starts replication (all-in-one)
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     db_config = replication_config.client_database
@@ -408,8 +413,6 @@ def cdc_create_connector(request, config_pk):
                 raise Exception(f"Kafka Connect is not healthy: {health_error}")
 
             # Update replication config
-            # NOTE: We're NOT creating the actual Debezium connector here anymore
-            # The orchestrator will create it when user clicks "Start Replication"
             replication_config.connector_name = connector_name
             replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
             replication_config.status = 'configured'
@@ -419,29 +422,54 @@ def cdc_create_connector(request, config_pk):
             logger.info(f"Configuration saved for connector: {connector_name}")
             logger.info(f"Tables configured: {len(tables_list)}")
 
-            messages.success(
-                request,
-                f'✅ Replication configured successfully! '
-                f'Configuration: {connector_name} with {len(tables_list)} tables. '
-                f'Click "Start Replication" to begin.'
-            )
+            # Check if user wants to auto-start
+            auto_start = request.POST.get('auto_start', 'false').lower() == 'true'
+
+            if auto_start:
+                # Auto-start replication using simplified flow
+                logger.info(f"Auto-starting replication for {connector_name}")
+
+                from client.replication import ReplicationOrchestrator
+                orchestrator = ReplicationOrchestrator(replication_config)
+
+                success, message = orchestrator.start_replication(force_resync=False)
+
+                if success:
+                    messages.success(
+                        request,
+                        f'✅ Replication started successfully! '
+                        f'{len(tables_list)} tables are now being replicated in real-time.'
+                    )
+                else:
+                    messages.warning(
+                        request,
+                        f'⚠️ Configuration saved, but failed to start: {message}'
+                    )
+            else:
+                # Just save configuration
+                messages.success(
+                    request,
+                    f'✅ Replication configured successfully! '
+                    f'{len(tables_list)} tables ready. '
+                    f'Click "Start Replication" to begin.'
+                )
 
             return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
 
         except Exception as e:
             logger.error(f"Failed to configure replication: {e}", exc_info=True)
             messages.error(request, f'Failed to configure replication: {str(e)}')
-    
+
     # GET: Show connector creation confirmation
     table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-    
+
     context = {
         'replication_config': replication_config,
         'db_config': db_config,
         'client': client,
         'table_mappings': table_mappings,
     }
-    
+
     return render(request, 'client/cdc/create_connector.html', context)
 
 

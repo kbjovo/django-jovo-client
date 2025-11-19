@@ -37,7 +37,7 @@
           <svg class="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
             <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
           </svg>
-          <span class="ml-1 text-sm font-medium text-gray-500 md:ml-2 dark:text-gray-400">Create Connector</span>
+          <span class="ml-1 text-sm font-medium text-gray-500 md:ml-2 dark:text-gray-400">Finalize Setup</span>
         </div>
       </li>
     </ol>
@@ -50,16 +50,16 @@
     <div class="px-8 py-6 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
       <div class="flex items-center justify-between">
         <div>
-          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Create CDC Connector</h1>
+          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Finalize Replication Setup</h1>
           <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-            Review configuration and create Debezium connector
+            Review configuration and start real-time data replication
           </p>
         </div>
-        
+
         <!-- Progress Badge -->
         <div class="flex items-center gap-2">
           <span class="inline-flex items-center px-3 py-1 text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">
-            Step 3 of 3
+            Step 3 of 3 - Ready to Start
           </span>
         </div>
       </div>
@@ -229,20 +229,43 @@
           </div>
         </div>
 
-        <!-- Important Notes -->
-        <div class="bg-yellow-50 dark:bg-yellow-900/10 border border-yellow-200 dark:border-yellow-800 rounded-lg p-5">
+        <!-- Simplified Flow Information -->
+        <div class="bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/10 dark:to-emerald-900/10 border border-green-200 dark:border-green-800 rounded-lg p-5">
           <div class="flex items-start gap-3">
-            <svg class="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+            <svg class="w-6 h-6 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
             </svg>
             <div>
-              <h4 class="text-sm font-semibold text-yellow-800 dark:text-yellow-400 mb-2">Important Notes</h4>
-              <ul class="text-sm text-yellow-700 dark:text-yellow-500 space-y-1 list-disc list-inside">
-                <li>Binary logging must be enabled on the source MySQL database</li>
-                <li>The source database user needs REPLICATION SLAVE and REPLICATION CLIENT privileges</li>
-                <li>Initial snapshot will be taken for all selected tables</li>
-                <li>Kafka and Kafka Connect must be running and accessible</li>
-                <li>This process may take a few seconds to complete</li>
+              <h4 class="text-sm font-semibold text-green-800 dark:text-green-400 mb-2">Simplified Replication Flow</h4>
+              <p class="text-sm text-green-700 dark:text-green-500 mb-3">
+                When you start replication, the system will automatically:
+              </p>
+              <ol class="text-sm text-green-700 dark:text-green-500 space-y-2 list-decimal list-inside ml-2">
+                <li><strong>Validate Prerequisites</strong> - Check database connectivity, binlog settings, and permissions</li>
+                <li><strong>Create Debezium Connector</strong> - Automatically performs initial snapshot of all data</li>
+                <li><strong>Start Real-time CDC</strong> - Begin streaming changes from MySQL binlog</li>
+                <li><strong>Start Consumer</strong> - Process changes and apply them to target database</li>
+              </ol>
+              <p class="text-sm text-green-700 dark:text-green-500 mt-3">
+                <strong>No manual steps required!</strong> Debezium handles the initial data copy and topic creation automatically.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Prerequisites Check -->
+        <div class="bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800 rounded-lg p-5">
+          <div class="flex items-start gap-3">
+            <svg class="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <div>
+              <h4 class="text-sm font-semibold text-blue-800 dark:text-blue-400 mb-2">Prerequisites (will be validated automatically)</h4>
+              <ul class="text-sm text-blue-700 dark:text-blue-500 space-y-1 list-disc list-inside">
+                <li>Binary logging enabled on MySQL (binlog_format=ROW, binlog_row_image=FULL)</li>
+                <li>Database user has REPLICATION SLAVE and REPLICATION CLIENT privileges</li>
+                <li>Kafka and Kafka Connect are running and accessible</li>
+                <li>Target database is configured and accessible</li>
               </ul>
             </div>
           </div>
@@ -252,36 +275,62 @@
     </div>
 
     <!-- Footer Actions -->
-    <div class="border-t border-gray-200 dark:border-gray-700 px-8 py-4 flex items-center justify-between flex-shrink-0">
-      <a 
-        href="{% url 'cdc_configure_tables' db_config.pk %}"
-        class="inline-flex items-center px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 font-medium transition">
-        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
-        </svg>
-        Back
-      </a>
-      
-      <form method="post" @submit="isCreating = true">
-        {% csrf_token %}
-        <button 
-          type="submit"
-          :disabled="isCreating"
-          class="inline-flex items-center px-6 py-2 border border-transparent rounded-lg shadow-sm text-sm font-semibold text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
-          <svg 
-            x-show="!isCreating"
-            class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+    <div class="border-t border-gray-200 dark:border-gray-700 px-8 py-4 flex-shrink-0">
+      <div class="flex items-center justify-between mb-3">
+        <a
+          href="{% url 'cdc_configure_tables' db_config.pk %}"
+          class="inline-flex items-center px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 font-medium transition">
+          <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
           </svg>
-          <svg dc
-            x-show="isCreating"
-            class="animate-spin w-4 h-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-          <span x-text="isCreating ? 'Creating Connector...' : 'Create Connector'"></span>
-        </button>
-      </form>
+          Back
+        </a>
+
+        <div class="flex items-center gap-3">
+          <!-- Option: Save config only -->
+          <form method="post" @submit="isCreating = true">
+            {% csrf_token %}
+            <input type="hidden" name="auto_start" value="false">
+            <button
+              type="submit"
+              :disabled="isCreating"
+              class="inline-flex items-center px-5 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+              <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
+              </svg>
+              Save Configuration
+            </button>
+          </form>
+
+          <!-- Option: Save & Start -->
+          <form method="post" @submit="isCreating = true">
+            {% csrf_token %}
+            <input type="hidden" name="auto_start" value="true">
+            <button
+              type="submit"
+              :disabled="isCreating"
+              class="inline-flex items-center px-6 py-2.5 border border-transparent rounded-lg shadow-sm text-sm font-semibold text-white bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+              <svg
+                x-show="!isCreating"
+                class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+              </svg>
+              <svg
+                x-show="isCreating"
+                class="animate-spin w-5 h-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span x-text="isCreating ? 'Starting Replication...' : 'Save & Start Replication'"></span>
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Helper text -->
+      <p class="text-xs text-gray-500 dark:text-gray-400 text-right">
+        <strong>Recommended:</strong> Click "Save & Start Replication" to configure and start in one step
+      </p>
     </div>
 
   </div>
