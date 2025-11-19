@@ -334,14 +334,27 @@ class ReplicationOrchestrator:
     def _get_connector_status(self) -> Dict[str, Any]:
         """Get Debezium connector status from Kafka Connect."""
         try:
-            status_data = self.connector_manager.get_connector_status(self.config.connector_name)
+            # BUG FIX: get_connector_status() returns (success, data) tuple, not just data
+            result = self.connector_manager.get_connector_status(self.config.connector_name)
 
-            if not status_data:
-                return {
-                    'state': 'NOT_FOUND',
-                    'healthy': False,
-                    'message': 'Connector does not exist',
-                }
+            # Handle tuple return (success, status_dict)
+            if isinstance(result, tuple):
+                success, status_data = result
+                if not success or not status_data:
+                    return {
+                        'state': 'NOT_FOUND',
+                        'healthy': False,
+                        'message': 'Connector does not exist',
+                    }
+            else:
+                # Fallback for dict return (for backward compatibility)
+                status_data = result
+                if not status_data:
+                    return {
+                        'state': 'NOT_FOUND',
+                        'healthy': False,
+                        'message': 'Connector does not exist',
+                    }
 
             connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
             tasks = status_data.get('tasks', [])

@@ -45,7 +45,7 @@ def get_mysql_connector_config(
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
     use_docker_internal_host: bool = True,
-    snapshot_mode: str = 'when_needed',
+    snapshot_mode: str = 'initial',
 ) -> Dict[str, Any]:
     """
     Generate MySQL Debezium connector configuration
@@ -102,7 +102,8 @@ def get_mysql_connector_config(
         # Snapshot mode - configurable (Debezium 3.x)
         # never: No snapshot, CDC only
         # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Full snapshot on first connector creation
+        # initial: Full snapshot on first connector creation (respects existing offsets)
+        # always: ALWAYS perform snapshot on every connector start (ignores offsets)
         # no_data: Capture schema only, no data (use after manual data copy)
         "snapshot.mode": snapshot_mode,
 
@@ -222,7 +223,8 @@ def get_postgresql_connector_config(
         # Snapshot mode - configurable (Debezium 3.x)
         # never: No snapshot, CDC only
         # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Full snapshot on first connector creation
+        # initial: Full snapshot on first connector creation (respects existing offsets)
+        # always: ALWAYS perform snapshot on every connector start (ignores offsets)
         # no_data: Capture schema only, no data (use after manual data copy)
         "snapshot.mode": snapshot_mode,
 
@@ -309,7 +311,8 @@ def get_oracle_connector_config(
         # Snapshot mode - configurable (Debezium 3.x)
         # never: No snapshot, CDC only
         # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Full snapshot on first connector creation
+        # initial: Full snapshot on first connector creation (respects existing offsets)
+        # always: ALWAYS perform snapshot on every connector start (ignores offsets)
         # no_data: Capture schema only, no data (use after manual data copy)
         "snapshot.mode": snapshot_mode,
 
@@ -349,7 +352,7 @@ def get_connector_config_for_database(
     tables_whitelist: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
-    snapshot_mode: str = 'when_needed',
+    snapshot_mode: str = 'initial',
 ) -> Optional[Dict[str, Any]]:
     """
     Get connector configuration based on database type

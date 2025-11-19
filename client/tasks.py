@@ -402,17 +402,18 @@ def stop_kafka_consumer(replication_config_id):
 
 
 @shared_task
-def delete_debezium_connector(connector_name, replication_config_id=None, delete_topics=True):
+def delete_debezium_connector(connector_name, replication_config_id=None, delete_topics=True, clear_offsets=True):
     """
-    Task: Delete a Debezium connector and optionally its topics
+    Task: Delete a Debezium connector and optionally its topics and offsets
 
     Args:
         connector_name: Name of the connector to delete
         replication_config_id: Optional replication config ID to update
         delete_topics: Whether to delete associated Kafka topics (default: True)
+        clear_offsets: Whether to clear connector offsets (default: True, RECOMMENDED)
     """
     try:
-        logger.info(f"🗑️ Deleting connector: {connector_name} (delete_topics={delete_topics})")
+        logger.info(f"🗑️ Deleting connector: {connector_name} (delete_topics={delete_topics}, clear_offsets={clear_offsets})")
 
         # Stop consumer first
         if replication_config_id:
@@ -424,6 +425,20 @@ def delete_debezium_connector(connector_name, replication_config_id=None, delete
 
         if success:
             logger.info(f"✅ Successfully deleted connector: {connector_name}")
+
+            # Clear connector offsets from Kafka (IMPORTANT: Allows fresh snapshot on recreation)
+            if clear_offsets:
+                try:
+                    from client.utils.offset_manager import delete_connector_offsets
+                    logger.info(f"🧹 Clearing offsets for connector: {connector_name}")
+                    offset_deleted = delete_connector_offsets(connector_name)
+                    if offset_deleted:
+                        logger.info(f"✅ Successfully cleared offsets for: {connector_name}")
+                    else:
+                        logger.warning(f"⚠️ Failed to clear offsets for: {connector_name}")
+                except Exception as e:
+                    logger.error(f"❌ Error clearing offsets: {e}", exc_info=True)
+                    # Continue anyway - connector is deleted
 
             # Update config
             if replication_config_id:
@@ -452,36 +467,120 @@ def restart_replication(replication_config_id):
     """
     try:
         logger.info(f"🔄 Restarting replication for config {replication_config_id}")
-        
+
         config = ReplicationConfig.objects.get(id=replication_config_id)
-        
+
         if config.connector_name:
             # Stop consumer
             stop_kafka_consumer(replication_config_id)
-            
+
             # Restart connector
             manager = DebeziumConnectorManager()
             success, error = manager.restart_connector(config.connector_name)
-            
+
             if not success:
                 raise Exception(f"Failed to restart connector: {error}")
-        
+
         # Start consumer again
         start_kafka_consumer.apply_async(
             args=[replication_config_id],
             countdown=5
         )
-        
+
         config.status = 'active'
         config.is_active = True
         config.save()
-        
+
         logger.info(f"✅ Successfully restarted replication")
-        
+
         return {'success': True}
-        
+
     except Exception as e:
         logger.error(f"❌ Error restarting replication: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+@shared_task
+def force_resnapshot(replication_config_id):
+    """
+    Task: Force a fresh snapshot by clearing offsets and restarting connector
+
+    Use cases:
+    - When existing data was not captured in initial snapshot
+    - When source database had issues during initial snapshot
+    - When you want to re-sync all data from source
+
+    Process:
+    1. Stop consumer
+    2. Delete connector
+    3. Clear offsets (ensures fresh snapshot)
+    4. Recreate connector (will perform initial snapshot)
+    5. Start consumer
+
+    Args:
+        replication_config_id: ReplicationConfig ID
+
+    Returns:
+        dict: {'success': bool, 'message': str}
+    """
+    try:
+        logger.info(f"🔄 Forcing resnapshot for config {replication_config_id}")
+
+        config = ReplicationConfig.objects.get(id=replication_config_id)
+
+        if not config.connector_name:
+            raise Exception("No connector configured for this replication config")
+
+        connector_name = config.connector_name
+
+        # Step 1: Stop consumer
+        logger.info(f"Step 1/5: Stopping consumer...")
+        stop_kafka_consumer(replication_config_id)
+
+        # Step 2: Delete connector
+        logger.info(f"Step 2/5: Deleting connector...")
+        manager = DebeziumConnectorManager()
+        success, error = manager.delete_connector(connector_name, notify=False, delete_topics=False)
+        if not success:
+            raise Exception(f"Failed to delete connector: {error}")
+
+        # Step 3: Clear offsets (CRITICAL - allows fresh snapshot)
+        logger.info(f"Step 3/5: Clearing offsets...")
+        from client.utils.offset_manager import delete_connector_offsets
+        offset_deleted = delete_connector_offsets(connector_name)
+        if not offset_deleted:
+            logger.warning("Failed to clear offsets, but continuing...")
+
+        # Step 4: Recreate connector
+        logger.info(f"Step 4/5: Recreating connector for fresh snapshot...")
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+
+        # Create connector with snapshot.mode='initial' (default)
+        result = orchestrator.create_debezium_connector()
+        if not result['success']:
+            raise Exception(f"Failed to recreate connector: {result.get('error')}")
+
+        # Step 5: Start consumer
+        logger.info(f"Step 5/5: Starting consumer...")
+        start_kafka_consumer.apply_async(
+            args=[replication_config_id],
+            countdown=10  # Give connector time to start snapshot
+        )
+
+        config.status = 'active'
+        config.is_active = True
+        config.save()
+
+        logger.info(f"✅ Successfully forced resnapshot for {connector_name}")
+
+        return {
+            'success': True,
+            'message': 'Connector deleted and recreated with fresh snapshot. Consumer will start in 10 seconds.'
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error forcing resnapshot: {e}", exc_info=True)
         return {'success': False, 'error': str(e)}
 
 

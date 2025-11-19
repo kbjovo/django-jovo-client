@@ -664,7 +664,20 @@ def cdc_connector_action(request, config_pk, action):
                 message = None
             else:
                 error = None
-            
+
+        elif action == 'force_resnapshot':
+            # Force resnapshot by clearing offsets and recreating connector
+            logger.info(f"🔄 Forcing resnapshot for config {config_pk}")
+
+            from client.tasks import force_resnapshot as force_resnapshot_task
+
+            # Run async task
+            result = force_resnapshot_task.apply_async(args=[config_pk])
+
+            success = True
+            message = 'Resnapshot initiated. This will delete and recreate the connector with a fresh snapshot of all data.'
+            error = None
+
         else:
             return JsonResponse({
                 'success': False,
