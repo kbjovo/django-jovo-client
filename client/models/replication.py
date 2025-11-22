@@ -82,6 +82,10 @@ class ReplicationConfig(models.Model):
         null=True,
         help_text="Debezium connector name in Kafka Connect"
     )
+    connector_version = models.IntegerField(
+        default=1,
+        help_text="Version number for the connector (e.g., 1 for _v_1, 2 for _v_2)"
+    )
     kafka_topic_prefix = models.CharField(
         max_length=255,
         blank=True,
@@ -159,6 +163,42 @@ class ReplicationConfig(models.Model):
         for table_mapping in self.table_mappings.filter(is_enabled=True):
             total += table_mapping.column_mappings.filter(is_enabled=True).count()
         return total
+    
+    def delete(self, *args, **kwargs):
+        """
+        Override delete to clean up Debezium connector, Kafka topics, and offsets
+        before removing from database.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            logger.info(f"🧹 Cleaning up replication resources for config {self.id}")
+            logger.info(f"   Connector: {self.connector_name}")
+            logger.info(f"   Topic prefix: {self.kafka_topic_prefix}")
+            
+            # Only clean up if connector exists
+            if self.connector_name:
+                from client.replication import ReplicationOrchestrator
+                
+                orchestrator = ReplicationOrchestrator(self)
+                
+                # Delete connector, topics, and offsets
+                success, message = orchestrator.delete_replication(delete_topics=True)
+                
+                if success:
+                    logger.info(f"✅ Cleanup successful: {message}")
+                else:
+                    logger.warning(f"⚠️ Cleanup had issues: {message}")
+            else:
+                logger.info("   No connector configured - skipping cleanup")
+                
+        except Exception as e:
+            logger.error(f"❌ Error during cleanup: {e}", exc_info=True)
+            # Don't raise - allow deletion to proceed even if cleanup fails
+        
+        # Call parent delete to actually remove from database
+        super().delete(*args, **kwargs)
 
 
 class TableMapping(models.Model):

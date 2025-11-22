@@ -8,7 +8,7 @@ from client.replication import ReplicationOrchestrator
 from django.utils import timezone
 
 # Get the config (adjust ID as needed)
-config_id = 6  # CHANGE THIS TO YOUR CONFIG ID
+config_id = 11  # CHANGE THIS TO YOUR CONFIG ID
 config = ReplicationConfig.objects.get(id=config_id)
 
 print("=" * 80)

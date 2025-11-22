@@ -146,9 +146,12 @@ class ResilientKafkaConsumer:
             except Exception as e:
                 logger.warning(f"Error closing consumer: {e}")
 
+
     def _initialize_consumer(self):
         """Create DebeziumCDCConsumer instance."""
         try:
+
+            # Create the Debezium consumer using the normalized topics
             self.consumer = DebeziumCDCConsumer(
                 consumer_group_id=self.consumer_group_id,
                 topics=self.topics,
@@ -156,7 +159,17 @@ class ResilientKafkaConsumer:
                 bootstrap_servers=self.bootstrap_servers,
                 auto_offset_reset="earliest",
             )
-            self._log_info("✓ Consumer initialized successfully")
+        
+            # Force a short poll to trigger group join / partition assignment immediately
+            try:
+                # poll a tiny amount to ensure group join happens and assignment is created in Kafka
+                self.consumer.consumer.poll(0.1)
+            except Exception:
+                # ignore poll errors here but continue — poll will be used in the main loop
+                pass
+
+            # Log the actual topics used for consumption (use normalized_topics)
+            self._log_info(f"✓ Consumer initialized successfully with topics: {self.topics}")
 
         except Exception as e:
             error_msg = f"Failed to initialize consumer: {str(e)}"
@@ -173,7 +186,7 @@ class ResilientKafkaConsumer:
         message_count = 0
         last_poll_log_time = time.time()
         no_message_count = 0
-
+        
         try:
             self._log_info(f"✓ Starting consumption loop (topics: {', '.join(self.topics)})")
             self._log_info(f"   Consumer group: {self.consumer.consumer_group_id}")
@@ -191,6 +204,15 @@ class ResilientKafkaConsumer:
                     # Process one message
                     msg = self.consumer.consumer.poll(timeout=1.0)
 
+                    logger.info("[DEBUG] Waiting for Kafka partition assignment...")
+                    time.sleep(2)
+
+                    assigned = self.consumer.consumer.assignment()
+                    logger.info(f"[DEBUG] Assigned partitions BEFORE polling: {assigned}")
+                    
+                    if assigned := self.consumer.consumer.assignment():
+                        logger.debug(f"[DEBUG] Assigned partitions DURING polling: {assigned}")
+                    
                     if msg is None:
                         no_message_count += 1
                         # Log "waiting for messages" every 30 seconds
@@ -204,6 +226,7 @@ class ResilientKafkaConsumer:
                     no_message_count = 0
 
                     if msg.error():
+                        logger.error(f"[AVRO-ERROR] Kafka message error: {msg.error()}")
                         self._handle_kafka_error(msg.error())
                         continue
 

@@ -33,14 +33,14 @@ class DebeziumOffsetManager:
     def __init__(
         self,
         bootstrap_servers: Optional[str] = None,
-        offset_topic: str = 'debezium_connect_offsets'
+        offset_topic: str = 'connect-offsets'
     ):
         """
         Initialize offset manager
 
         Args:
             bootstrap_servers: Kafka bootstrap servers (e.g., 'kafka:29092')
-            offset_topic: Kafka topic where Debezium stores offsets
+            offset_topic: Kafka topic where Kafka Connect stores offsets (default: 'connect-offsets')
         """
         self.bootstrap_servers = bootstrap_servers or settings.DEBEZIUM_CONFIG.get(
             'KAFKA_INTERNAL_SERVERS',
@@ -84,7 +84,7 @@ class DebeziumOffsetManager:
             matching_keys = self._find_connector_offset_keys(connector_name)
 
             if not matching_keys:
-                logger.warning(f"No offsets found for connector: {connector_name}")
+                logger.info(f"No offsets found for connector: {connector_name}")
                 return True  # Nothing to delete, consider success
 
             logger.info(f"Found {len(matching_keys)} offset entries to delete")
@@ -95,6 +95,13 @@ class DebeziumOffsetManager:
             logger.info(f"✅ Successfully deleted {deleted_count} offset entries for {connector_name}")
             return True
 
+        except KafkaException as e:
+            # Handle "offset topic doesn't exist" as success (no offsets to clear)
+            if "UNKNOWN_TOPIC_OR_PART" in str(e):
+                logger.info(f"ℹ️  Offset topic doesn't exist yet - no offsets to clear for {connector_name}")
+                return True
+            logger.error(f"❌ Failed to delete offsets for {connector_name}: {e}", exc_info=True)
+            return False
         except Exception as e:
             logger.error(f"❌ Failed to delete offsets for {connector_name}: {e}", exc_info=True)
             return False
@@ -258,6 +265,12 @@ class DebeziumOffsetManager:
         try:
             matching_keys = self._find_connector_offset_keys(connector_name)
             return len(matching_keys) > 0
+        except KafkaException as e:
+            if "UNKNOWN_TOPIC_OR_PART" in str(e):
+                logger.info(f"Offset topic doesn't exist - no offsets for {connector_name}")
+                return False
+            logger.error(f"Error checking offsets for {connector_name}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Error checking offsets for {connector_name}: {e}")
             return False
@@ -317,6 +330,11 @@ class DebeziumOffsetManager:
 
             logger.info(f"Found offsets for {len(connector_offsets)} connectors")
 
+        except KafkaException as e:
+            if "UNKNOWN_TOPIC_OR_PART" in str(e):
+                logger.info(f"Offset topic doesn't exist yet - no connectors have offsets")
+                return {}
+            logger.error(f"Error listing connector offsets: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Error listing connector offsets: {e}", exc_info=True)
 

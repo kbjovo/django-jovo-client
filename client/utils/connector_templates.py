@@ -12,27 +12,33 @@ from client.models.job import ReplicationConfig
 logger = logging.getLogger(__name__)
 
 
-def generate_connector_name(client: Client, db_config: ClientDatabase) -> str:
+def generate_connector_name(client: Client, db_config: ClientDatabase, version: Optional[int] = None) -> str:
     """
-    Generate connector name following the pattern: {client_name}_{db_name}_connector
-    
+    Generate connector name following the pattern: {client_name}_{db_name}_connector[_v_{version}]
+
     Args:
         client: Client instance
         db_config: ClientDatabase instance
-        
+        version: Optional version number for the connector (e.g., 1 for _v_1, 2 for _v_2)
+
     Returns:
         str: Connector name
     """
     # Clean client name (remove spaces, special chars)
     client_name = client.name.lower().replace(' ', '_').replace('-', '_')
     client_name = ''.join(c for c in client_name if c.isalnum() or c == '_')
-    
+
     # Clean database name
     db_name = db_config.connection_name.lower().replace(' ', '_').replace('-', '_')
     db_name = ''.join(c for c in db_name if c.isalnum() or c == '_')
-    
+
+    # Generate base connector name
     connector_name = f"{client_name}_{db_name}_connector"
-    
+
+    # Add version suffix if provided
+    if version is not None:
+        connector_name = f"{connector_name}_v_{version}"
+
     logger.info(f"Generated connector name: {connector_name}")
     return connector_name
 
@@ -49,7 +55,7 @@ def get_mysql_connector_config(
 ) -> Dict[str, Any]:
     """
     Generate MySQL Debezium connector configuration
-    
+
     Args:
         client: Client instance
         db_config: ClientDatabase instance
@@ -58,11 +64,13 @@ def get_mysql_connector_config(
         kafka_bootstrap_servers: Kafka bootstrap servers
         schema_registry_url: Schema registry URL
         use_docker_internal_host: Use Docker internal hostname (default: True)
-        
+
     Returns:
         Dict[str, Any]: Connector configuration
     """
-    connector_name = generate_connector_name(client, db_config)
+    # Generate connector name with version if replication_config is provided
+    version = replication_config.connector_version if replication_config else None
+    connector_name = generate_connector_name(client, db_config, version=version)
     
     # Convert localhost/127.0.0.1 to Docker internal hostname for Debezium
     db_host = db_config.host
@@ -84,10 +92,10 @@ def get_mysql_connector_config(
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        "database.dbname": db_config.database_name,
+        "database.include.list": db_config.database_name,
         
         # Server identification
-        "database.server.id": str(hash(connector_name) % 100000 + 10000),  # Unique server ID
+        "database.server.id": str(54000 + db_config.id),  # Unique server ID
         "database.server.name": connector_name.replace('_connector', ''),
         
         # Topic prefix (this will be used in Kafka topic names)
@@ -99,16 +107,12 @@ def get_mysql_connector_config(
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
-        # Snapshot mode - configurable (Debezium 3.x)
-        # never: No snapshot, CDC only
-        # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Full snapshot on first connector creation (respects existing offsets)
-        # always: ALWAYS perform snapshot on every connector start (ignores offsets)
-        # no_data: Capture schema only, no data (use after manual data copy)
         "snapshot.mode": snapshot_mode,
 
         # Include schema changes
         "include.schema.changes": "true",
+        
+        "database.allowPublicKeyRetrieval": "true",
 
         # Incremental snapshot configuration (for adding new tables after creation)
         "incremental.snapshot.allow.schema.changes": "true",
@@ -135,12 +139,6 @@ def get_mysql_connector_config(
         "connect.max.attempts": "3",
         "connect.backoff.initial.delay.ms": "1000",
         "connect.backoff.max.delay.ms": "10000",
-        
-        # Transforms (optional - can be used to route to specific topics)
-        # "transforms": "route",
-        # "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
-        # "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
-        # "transforms.route.replacement": "client_$1_$3"
     }
     
     # Add table whitelist if specified
@@ -177,7 +175,7 @@ def get_postgresql_connector_config(
 ) -> Dict[str, Any]:
     """
     Generate PostgreSQL Debezium connector configuration
-    
+
     Args:
         client: Client instance
         db_config: ClientDatabase instance
@@ -186,11 +184,13 @@ def get_postgresql_connector_config(
         kafka_bootstrap_servers: Kafka bootstrap servers
         schema_registry_url: Schema registry URL
         schema_name: PostgreSQL schema name (default: public)
-        
+
     Returns:
         Dict[str, Any]: Connector configuration
     """
-    connector_name = generate_connector_name(client, db_config)
+    # Generate connector name with version if replication_config is provided
+    version = replication_config.connector_version if replication_config else None
+    connector_name = generate_connector_name(client, db_config, version=version)
     
     config = {
         # Connector class
@@ -201,7 +201,7 @@ def get_postgresql_connector_config(
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        "database.dbname": db_config.database_name,
+        "database.include.list": db_config.database_name,
 
         # Server identification
         "database.server.name": connector_name.replace('_connector', ''),
@@ -275,7 +275,7 @@ def get_oracle_connector_config(
 ) -> Dict[str, Any]:
     """
     Generate Oracle Debezium connector configuration
-    
+
     Args:
         client: Client instance
         db_config: ClientDatabase instance
@@ -283,11 +283,13 @@ def get_oracle_connector_config(
         tables_whitelist: List of tables to replicate
         kafka_bootstrap_servers: Kafka bootstrap servers
         schema_registry_url: Schema registry URL
-        
+
     Returns:
         Dict[str, Any]: Connector configuration
     """
-    connector_name = generate_connector_name(client, db_config)
+    # Generate connector name with version if replication_config is provided
+    version = replication_config.connector_version if replication_config else None
+    connector_name = generate_connector_name(client, db_config, version=version)
     
     config = {
         # Connector class
@@ -298,7 +300,7 @@ def get_oracle_connector_config(
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        "database.dbname": db_config.database_name,
+        "database.include.list": db_config.database_name,
 
         # Server identification
         "database.server.name": connector_name.replace('_connector', ''),
@@ -319,6 +321,8 @@ def get_oracle_connector_config(
         # Incremental snapshot configuration (for adding new tables after creation)
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
+        
+        "database.allowPublicKeyRetrieval": "true",
 
         # Log mining settings
         "log.mining.strategy": "online_catalog",
@@ -431,7 +435,7 @@ def validate_connector_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
         'database.port',
         'database.user',
         'database.password',
-        'database.dbname',
+        'database.include.list',
         'database.server.name',
     ]
     

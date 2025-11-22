@@ -406,12 +406,13 @@ def cdc_create_connector(request, config_pk):
             if not tables_list:
                 raise Exception("No tables selected for replication")
 
+            logger.info(f"Debezium connector manager starts")
             # Verify Kafka Connect is healthy
             manager = DebeziumConnectorManager()
             is_healthy, health_error = manager.check_kafka_connect_health()
             if not is_healthy:
                 raise Exception(f"Kafka Connect is not healthy: {health_error}")
-
+    
             # Update replication config
             replication_config.connector_name = connector_name
             replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
@@ -424,7 +425,7 @@ def cdc_create_connector(request, config_pk):
 
             # Check if user wants to auto-start
             auto_start = request.POST.get('auto_start', 'false').lower() == 'true'
-
+            logger.info(f"Auto-starting replication for {connector_name}")
             if auto_start:
                 # Auto-start replication using simplified flow
                 logger.info(f"Auto-starting replication for {connector_name}")

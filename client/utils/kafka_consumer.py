@@ -1,18 +1,19 @@
 """
 Kafka Consumer for Debezium CDC Events (multi-topic + table prefixing)
 
-FIXED: Proper timestamp conversion for Debezium events
 """
 
 import json
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, date
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import KafkaError
+from confluent_kafka.avro import AvroConsumer
 from sqlalchemy import MetaData, Table, Column, inspect, text
 from sqlalchemy import Integer, String, Text, Float, Boolean, DateTime, Date, Time
 from sqlalchemy.dialects.mysql import DECIMAL, BIGINT, TINYINT
 from sqlalchemy.exc import SQLAlchemyError
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -41,55 +42,37 @@ class DebeziumCDCConsumer:
             auto_offset_reset: 'earliest' or 'latest'
         """
         self.consumer_group_id = consumer_group_id
-        self.topics = topics if isinstance(topics, (list, tuple)) else [topics]
+        self.requested_topics = (topics if isinstance(topics, (list, tuple)) else [topics])
         self.target_engine = target_engine
         self.bootstrap_servers = bootstrap_servers
         self.auto_offset_reset = auto_offset_reset
 
-        # kafka consumer config
+        # kafka consumer config for Avro
         self.consumer_config = {
             "bootstrap.servers": self.bootstrap_servers,
             "group.id": self.consumer_group_id,
             "auto.offset.reset": self.auto_offset_reset,
             "enable.auto.commit": False,  # manual commit after processing
+            "schema.registry.url": "http://schema-registry:8081",  # Avro Schema Registry
         }
 
-        # initialize
+        logger.info(f"[DEBUG] Kafka Consumer Config: {json.dumps(self.consumer_config, indent=2)}")
+
+            # Debezium Kafka creates "-value" topics containing the actual CDC messages
+        self.topics = self.requested_topics
+
         try:
-            self.consumer = Consumer(self.consumer_config)
-
-            # Filter topics to only existing ones
-            self.requested_topics = self.topics
-            existing_topics = self._get_existing_topics()
-
-            # Check which topics exist
-            topics_to_subscribe = []
-            missing_topics = []
-
-            for topic in self.requested_topics:
-                if topic in existing_topics:
-                    topics_to_subscribe.append(topic)
-                else:
-                    missing_topics.append(topic)
-
-            # Log warnings for missing topics
-            if missing_topics:
-                logger.warning(f"⚠️  Topics not yet created (will be available after first CDC event): {', '.join(missing_topics)}")
-
-            # Subscribe to existing topics, or all if none exist yet
-            if topics_to_subscribe:
-                self.topics = topics_to_subscribe
-                logger.info(f"📡 Subscribing to existing topics: {', '.join(self.topics)}")
-            else:
-                # No topics exist yet - subscribe anyway (Kafka will handle once created)
-                self.topics = self.requested_topics
-                logger.warning(f"⚠️  No topics exist yet. Subscribing to: {', '.join(self.topics)} (waiting for creation)")
+            self.consumer = AvroConsumer(self.consumer_config)
+            logger.info(f"[DEBUG] Initializing AvroConsumer with group.id={self.consumer_group_id} and topics={self.topics}")
 
             self.consumer.subscribe(self.topics)
-            logger.info(f"Subscribed to topics: {', '.join(self.topics)}")
+
+            logger.info(f"📡 Subscribed to CDC topics: {', '.join(self.topics)}")
+            # logger.info(f"[DEBUG] Subscription done. Current subscription: {self.consumer.subscription()}")
+
         except Exception as e:
             logger.error(f"Failed to initialize Kafka consumer: {e}")
-            raise KafkaConsumerException(str(e)) from e
+            raise KafkaConsumerException(str(e))
 
         # SQLAlchemy metadata & caches
         self.metadata = MetaData()
@@ -526,23 +509,13 @@ class DebeziumCDCConsumer:
             logger.info(f"   Offset: {offset}")
             logger.info("=" * 80)
 
-            raw_value = msg.value()
-            if raw_value is None:
+            # AvroConsumer automatically deserializes Avro messages to Python dicts
+            message_value = msg.value()
+            if message_value is None:
                 logger.warning(f"⚠️  Empty message received on topic {topic}")
                 return
 
-            # raw_value may already be bytes/string/json depending on producer config
-            if isinstance(raw_value, (bytes, str)):
-                try:
-                    message_value = json.loads(raw_value.decode("utf-8") if isinstance(raw_value, bytes) else raw_value)
-                    logger.debug(f"📄 Raw message payload: {json.dumps(message_value, indent=2)[:500]}...")
-                except Exception as e:
-                    # not JSON -> skip
-                    logger.warning(f"⚠️  Non-JSON message on topic {topic} - skipping. Error: {e}")
-                    return
-            else:
-                message_value = raw_value
-                logger.debug(f"📄 Message value type: {type(message_value)}")
+            logger.debug(f"📄 Avro-deserialized message: {json.dumps(message_value, indent=2, default=str)[:500]}...")
 
             op, before, after, payload_source_db = self.parse_debezium_payload(message_value)
 

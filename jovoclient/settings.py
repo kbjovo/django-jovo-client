@@ -192,8 +192,6 @@ ENVIRONMENT = 'development'  # or 'staging', 'production'
 
 
 
-
-# Logging
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -206,10 +204,14 @@ LOGGING = {
     'handlers': {
         'file': {
             'level': 'INFO',
-            'class': 'logging.FileHandler',
+            'class': 'logging.handlers.TimedRotatingFileHandler',
             'filename': 'logs/replication.log',
+            'when': 'H',                # Rotate every hour
+            'interval': 1,              # 1 hour
+            'backupCount': 48,          # Keep last 48 hours (optional)
             'formatter': 'verbose',
-        },
+            'encoding': 'utf-8',
+        },  
         'console': {
             'level': 'DEBUG',
             'class': 'logging.StreamHandler',
@@ -224,6 +226,7 @@ LOGGING = {
         },
     },
 }
+
 
 
 # ====================================

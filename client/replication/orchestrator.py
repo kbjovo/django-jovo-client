@@ -15,6 +15,7 @@ from django.utils import timezone
 from client.utils.debezium_manager import DebeziumConnectorManager
 from client.utils.kafka_topic_manager import KafkaTopicManager
 from client.utils.connector_templates import get_connector_config_for_database
+from client.utils.offset_manager import DebeziumOffsetManager
 from .validators import ReplicationValidator
 from sqlalchemy import text
 
@@ -40,6 +41,7 @@ class ReplicationOrchestrator:
         self.validator = ReplicationValidator(replication_config)
         self.connector_manager = DebeziumConnectorManager()
         self.topic_manager = KafkaTopicManager()
+        self.offset_manager = DebeziumOffsetManager()
 
     # ==========================================
     # Main Operations
@@ -237,10 +239,12 @@ class ReplicationOrchestrator:
 
     def delete_replication(self, delete_topics: bool = False) -> Tuple[bool, str]:
         """
-        Delete replication completely (connector + topics).
+        Delete replication completely (connector + offsets).
+
+        Note: Topics are never deleted (delete_topics parameter ignored for safety).
 
         Args:
-            delete_topics: Whether to also delete Kafka topics
+            delete_topics: Ignored - topics are never deleted
 
         Returns:
             (success, message)
@@ -251,22 +255,37 @@ class ReplicationOrchestrator:
 
         try:
             # STEP 1: Stop replication
-            self._log_info("STEP 1/3: Stopping replication...")
+            self._log_info("STEP 1/4: Stopping replication...")
             self.stop_replication()
 
             # STEP 2: Delete connector
-            self._log_info("STEP 2/3: Deleting Debezium connector...")
+            self._log_info("STEP 2/4: Deleting Debezium connector...")
             try:
                 self.connector_manager.delete_connector(
                     self.config.connector_name,
-                    delete_topics=delete_topics
+                    delete_topics=True  # Never delete topics
                 )
                 self._log_info(f"✓ Connector deleted: {self.config.connector_name}")
             except Exception as e:
                 self._log_warning(f"Could not delete connector: {e}")
 
-            # STEP 3: Update status
-            self._log_info("STEP 3/3: Updating configuration...")
+            # STEP 3: Clear connector offsets
+            self._log_info("STEP 3/4: Clearing connector offsets...")
+            try:
+                success = self.offset_manager.delete_connector_offsets(self.config.connector_name)
+                if success:
+                    self._log_info(f"✓ Offsets cleared for: {self.config.connector_name}")
+                else:
+                    error_msg = f"Failed to clear offsets for: {self.config.connector_name}"
+                    self._log_error(error_msg)
+                    return False, error_msg
+            except Exception as e:
+                error_msg = f"Failed to clear offsets: {str(e)}"
+                self._log_error(error_msg)
+                return False, error_msg
+
+            # STEP 4: Update status
+            self._log_info("STEP 4/4: Updating configuration...")
             self.config.status = 'configured'
             self.config.is_active = False
             self.config.connector_state = 'DELETED'
@@ -446,13 +465,38 @@ class ReplicationOrchestrator:
         Returns:
             (success, message)
         """
+        # Generate versioned connector name to check for old connector
+        from client.utils.connector_templates import generate_connector_name
+        db_config = self.config.client_database
+        client = db_config.client
+        versioned_connector_name = generate_connector_name(
+            client,
+            db_config,
+            version=self.config.connector_version
+        )
+
         # Delete old connector if exists (for fresh start)
         try:
-            self.connector_manager.delete_connector(self.config.connector_name)
-            self._log_info("Deleted old connector for fresh start")
-        except:
-            self._log_info("Connector didn't exist")
-            pass  # Connector didn't exist, that's fine
+            self.connector_manager.delete_connector(versioned_connector_name)
+            self._log_info(f"Deleted old connector for fresh start: {versioned_connector_name}")
+            
+            # Also clear its offsets using the database.server.name (not connector name)
+            # Debezium uses database.server.name as the key in offset topic
+            server_name = versioned_connector_name.replace('_connector', '')
+            success = self.offset_manager.delete_connector_offsets(server_name)
+            if success:
+                self._log_info(f"Cleared offsets for server: {server_name}")
+            else:
+                error_msg = f"Failed to clear offsets for server: {server_name}"
+                self._log_error(error_msg)
+                return False, error_msg
+        except Exception as e:
+            # Connector didn't exist or offset clearing failed
+            if "Failed to clear offsets" in str(e):
+                self._log_error(f"Error clearing offsets: {e}")
+                return False, str(e)
+            else:
+                self._log_info("Connector didn't exist")
 
         # Create fresh connector
         self._log_info(f"Creating connector with snapshot_mode={snapshot_mode}...")
@@ -486,14 +530,27 @@ class ReplicationOrchestrator:
                 snapshot_mode=snapshot_mode,
             )
 
-            # Create connector
+            # Generate versioned connector name (same logic as in connector_templates)
+            from client.utils.connector_templates import generate_connector_name
+            client = db_config.client
+            versioned_connector_name = generate_connector_name(
+                client,
+                db_config,
+                version=self.config.connector_version
+            )
+
+            # Update the config with the versioned connector name
+            self.config.connector_name = versioned_connector_name
+            self.config.save()
+
+            # Create connector with versioned name
             success, error = self.connector_manager.create_connector(
-                connector_name=self.config.connector_name,
+                connector_name=versioned_connector_name,
                 config=config
             )
 
             if success:
-                self._log_info(f"✓ Connector created: {self.config.connector_name}")
+                self._log_info(f"✓ Connector created: {versioned_connector_name}")
                 return True, "Connector created successfully"
             else:
                 return False, f"Failed to create connector: {error}"
@@ -532,10 +589,10 @@ class ReplicationOrchestrator:
             from client.tasks import start_kafka_consumer
 
             # Generate fresh consumer group ID
-            timestamp = int(time.time())
+            # timestamp = int(time.time())
             client_id = self.config.client_database.client.id
             config_id = self.config.id
-            consumer_group = f"cdc_consumer_{client_id}_{config_id}_{timestamp}"
+            consumer_group = f"cdc_consumer_{client_id}_{config_id}"
 
             self._log_info(f"Starting consumer with group: {consumer_group}")
 

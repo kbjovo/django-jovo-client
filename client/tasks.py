@@ -16,109 +16,6 @@ from client.utils.notification_utils import send_error_notification
 logger = logging.getLogger(__name__)
 
 
-# @shared_task(bind=True, max_retries=3)
-# def create_debezium_connector(self, replication_config_id):
-#     """
-#     Task: Create Debezium connector for a replication config
-#     """
-#     try:
-#         logger.info(f"🚀 Creating Debezium connector for ReplicationConfig {replication_config_id}")
-        
-#         config = ReplicationConfig.objects.get(id=replication_config_id)
-        
-#         from client.utils.connector_templates import (
-#             generate_connector_name,
-#             get_connector_config_for_database
-#         )
-        
-#         # Generate connector configuration
-#         client = config.client_database.client
-#         db_config = config.client_database
-        
-#         connector_name = generate_connector_name(client, db_config)
-        
-#         # Get tables to replicate
-#         enabled_tables = config.table_mappings.filter(is_enabled=True)
-#         tables_list = [tm.source_table for tm in enabled_tables]
-        
-#         if not tables_list:
-#             logger.warning(f"⚠️ No tables enabled for replication in config {replication_config_id}")
-#             return {'success': False, 'error': 'No tables enabled'}
-        
-#         logger.info(f"📋 Tables to replicate: {tables_list}")
-        
-#         # Generate connector config
-#         connector_config = get_connector_config_for_database(
-#             db_config=db_config,
-#             replication_config=config,
-#             tables_whitelist=tables_list,
-#             kafka_bootstrap_servers='kafka:29092',  # Docker internal
-#             schema_registry_url='http://schema-registry:8081'
-#         )
-        
-#         if not connector_config:
-#             raise Exception("Failed to generate connector configuration")
-        
-#         # Create connector via Debezium Manager
-#         manager = DebeziumConnectorManager()
-        
-#         # Check Kafka Connect health first
-#         is_healthy, error = manager.check_kafka_connect_health()
-#         if not is_healthy:
-#             raise Exception(f"Kafka Connect is not healthy: {error}")
-        
-#         success, error = manager.create_connector(
-#             connector_name=connector_name,
-#             config=connector_config,
-#             notify_on_error=True
-#         )
-        
-#         if success:
-#             # Update replication config
-#             config.connector_name = connector_name
-#             config.kafka_topic_prefix = f"client_{client.id}"
-#             config.status = 'active'
-#             config.is_active = True
-#             config.last_sync_at = timezone.now()
-#             config.save()
-            
-#             logger.info(f"✅ Successfully created connector: {connector_name}")
-            
-#             # Start consumer task (run in background)
-#             start_kafka_consumer.apply_async(
-#                 args=[replication_config_id],
-#                 countdown=5  # Start after 5 seconds
-#             )
-            
-#             return {
-#                 'success': True,
-#                 'connector_name': connector_name,
-#                 'tables': len(tables_list)
-#             }
-#         else:
-#             raise Exception(f"Failed to create connector: {error}")
-            
-#     except ReplicationConfig.DoesNotExist:
-#         logger.error(f"❌ ReplicationConfig {replication_config_id} not found")
-#         return {'success': False, 'error': 'Config not found'}
-        
-#     except Exception as e:
-#         logger.error(f"❌ Error creating connector: {e}", exc_info=True)
-        
-#         # Retry with exponential backoff
-#         try:
-#             raise self.retry(countdown=60 * (2 ** self.request.retries))
-#         except self.MaxRetriesExceededError:
-#             logger.error(f"❌ Max retries exceeded for connector creation")
-#             send_error_notification(
-#                 error_title="Connector Creation Failed",
-#                 error_message=str(e),
-#                 context={'replication_config_id': replication_config_id}
-#             )
-        
-#         return {'success': False, 'error': str(e)}
-
-
 @shared_task(bind=True, max_retries=3)
 def create_debezium_connector(self, replication_config_id):
     """
@@ -273,7 +170,7 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
 
         logger.info(f"✓ Subscribing to {len(topics)} topics:")
         for topic in topics:
-            logger.info(f"   - {topic}")
+            logger.info(f" - {topic}")
 
         # Determine consumer group ID
         if consumer_group_override:
@@ -715,8 +612,6 @@ def check_replication_health():
         return {'success': False, 'error': str(e)}
 
 
-# Import new health monitoring tasks to register them with Celery
-# This ensures Celery can find them when scheduled by Celery Beat
 from client.replication.health_monitor import (
     monitor_replication_health,
     check_consumer_heartbeat,

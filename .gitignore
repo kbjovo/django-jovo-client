@@ -61,3 +61,7 @@ build/
 
 theme/static/css/dist/
 node_modules/
+
+logs/
+
+docs/
