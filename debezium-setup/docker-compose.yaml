@@ -11,9 +11,10 @@ services:
       - --log-bin=mysql-bin
       - --binlog-format=ROW
       - --binlog-row-image=FULL
-      - --expire-logs-days=3
+      - --binlog-expire-logs-seconds=259200
       - --default-authentication-plugin=mysql_native_password
       - --bind-address=0.0.0.0
+      - --max-connections=500
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: client
@@ -24,12 +25,6 @@ services:
     volumes:
       # OPTION A: Use Docker volume (recommended)
       - mysql-data:/var/lib/mysql
-      
-      # OPTION B: Use specific WSL directory (uncomment if preferred)
-      # - ~/mysql_data:/var/lib/mysql
-      
-      # OPTION C: Use /var/lib directory (uncomment if preferred)
-      # - /var/lib/mysql_docker:/var/lib/mysql
     networks:
       - replication-network
     healthcheck:
@@ -61,7 +56,7 @@ services:
     restart: unless-stopped
 
   # ============================================
-  # Kafka with KRaft (No Zookeeper)
+  # Kafka (Confluent KRaft mode)
   # ============================================
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -72,22 +67,37 @@ services:
       - "9093:9093"
     environment:
       KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://kafka:9093'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENERS: >-
+        PLAINTEXT://kafka:29092,
+        PLAINTEXT_HOST://0.0.0.0:9092,
+        CONTROLLER://kafka:9093
+      KAFKA_ADVERTISED_LISTENERS: >-
+        PLAINTEXT://kafka:29092,
+        PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >-
+        CONTROLLER:PLAINTEXT,
+        PLAINTEXT:PLAINTEXT,
+        PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # Internal topics
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+
+      # Auto-create topics for dev
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+      # Logging
       KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
       KAFKA_TOOLS_LOG4J_LOGLEVEL: ERROR
-      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+
     volumes:
       - kafka-data:/var/lib/kafka/data
     networks:
@@ -97,12 +107,12 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
-      start_period: 40s
     restart: unless-stopped
+
     command: >
       bash -c "
       if [ ! -f /var/lib/kafka/data/meta.properties ]; then
-        kafka-storage format -t $${CLUSTER_ID} -c /etc/kafka/kafka.properties;
+        kafka-storage format -t \${CLUSTER_ID} -c /etc/kafka/kafka.properties;
       fi;
       /etc/confluent/docker/run
       "
@@ -153,12 +163,14 @@ services:
     restart: unless-stopped
 
   # ============================================
-  # Kafka Connect with Debezium
+  # Kafka Connect (Confluent + Debezium plugins)
   # ============================================
   kafka-connect:
-    image: quay.io/debezium/connect:3.3
+    build:
+      context: .
+      dockerfile: Dockerfile.kafka-connect
+    image: kafka-connect-debezium:latest
     container_name: kafka-connect
-    hostname: kafka-connect
     depends_on:
       kafka:
         condition: service_healthy
@@ -169,56 +181,34 @@ services:
     ports:
       - "8083:8083"
     environment:
+      # Debezium uses different env var names (no CONNECT_ prefix for some)
       BOOTSTRAP_SERVERS: kafka:29092
-      GROUP_ID: debezium-cluster
-      REST_HOST_NAME: 0.0.0.0
-      REST_PORT: 8083
-      ADVERTISED_HOST_NAME: kafka-connect
-      ADVERTISED_PORT: 8083
-      CONFIG_STORAGE_TOPIC: debezium_connect_configs
-      OFFSET_STORAGE_TOPIC: debezium_connect_offsets
-      STATUS_STORAGE_TOPIC: debezium_connect_statuses
+      GROUP_ID: connect-cluster
+
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-statuses
+
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: 'false'
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: 'false'
-      INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+
+      # Avro Converter Configuration
+      KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      CONNECT_PLUGIN_PATH: /kafka/connect,/usr/share/java,/usr/share/confluent-hub-components
-      OFFSET_FLUSH_INTERVAL_MS: 60000
-      OFFSET_FLUSH_TIMEOUT_MS: 5000
-      LOG_LEVEL: INFO
-      CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
-      CONNECT_LOG4J_LOGGERS: org.apache.kafka.connect.runtime.rest=WARN,org.reflections=ERROR
-    networks:
-      - replication-network
+
+      # Internal converters
+      INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/"]
       interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 40s
-    restart: unless-stopped
-
-  # ============================================
-  # Adminer - Database Management UI
-  # ============================================
-  adminer:
-    image: adminer:latest
-    container_name: adminer
-    depends_on:
-      mysql:
-        condition: service_healthy
-    ports:
-      - "8082:8080"
-    environment:
-      ADMINER_DEFAULT_SERVER: mysql
-      ADMINER_DESIGN: 'nette'
+      timeout: 10s
+      retries: 20
+      start_period: 120s
     networks:
       - replication-network
     restart: unless-stopped
@@ -230,7 +220,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    container_name: django-web
+    container_name: django
     hostname: django
     depends_on:
       mysql:
@@ -252,6 +242,12 @@ services:
     networks:
       - replication-network
     command: python manage.py runserver 0.0.0.0:8000
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   # ============================================
@@ -275,7 +271,11 @@ services:
       - ..:/app
     networks:
       - replication-network
-    command: celery -A jovoclient worker -l info -Q celery --concurrency=4 -n worker@%h
+    command: celery -A jovoclient worker -l info -Q celery 
+      --concurrency=4 -n worker@%h 
+      --max-tasks-per-child=1000 
+      --time-limit=3600 
+      --soft-time-limit=3300
     restart: unless-stopped
 
   # ============================================
@@ -299,7 +299,11 @@ services:
       - ..:/app
     networks:
       - replication-network
-    command: celery -A jovoclient worker -Q consumers -l info -n consumer@%h --concurrency=2
+    command: celery -A jovoclient worker -Q consumers -l info -n consumer@%h 
+      --concurrency=1 
+      --max-tasks-per-child=1000
+      --time-limit=3600
+      --soft-time-limit=3300
     restart: unless-stopped
 
   # ============================================

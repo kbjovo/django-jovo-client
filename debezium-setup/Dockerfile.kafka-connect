@@ -1,0 +1,35 @@
+# Use official Debezium 3.3 image (Java 17, MySQL 8.0.26+ compatible)
+FROM quay.io/debezium/connect:3.0
+
+# Switch to root to install Avro converter
+USER root
+
+# Install Confluent Avro Converter and ALL dependencies
+RUN cd /tmp && \
+    # Confluent packages
+    curl -sO https://packages.confluent.io/maven/io/confluent/kafka-connect-avro-converter/7.6.0/kafka-connect-avro-converter-7.6.0.jar && \
+    curl -sO https://packages.confluent.io/maven/io/confluent/kafka-connect-avro-data/7.6.0/kafka-connect-avro-data-7.6.0.jar && \
+    curl -sO https://packages.confluent.io/maven/io/confluent/kafka-avro-serializer/7.6.0/kafka-avro-serializer-7.6.0.jar && \
+    curl -sO https://packages.confluent.io/maven/io/confluent/kafka-schema-serializer/7.6.0/kafka-schema-serializer-7.6.0.jar && \
+    curl -sO https://packages.confluent.io/maven/io/confluent/kafka-schema-registry-client/7.6.0/kafka-schema-registry-client-7.6.0.jar && \
+    curl -sO https://packages.confluent.io/maven/io/confluent/kafka-schema-converter/7.6.0/kafka-schema-converter-7.6.0.jar && \
+    curl -sO https://packages.confluent.io/maven/io/confluent/common-config/7.6.0/common-config-7.6.0.jar && \
+    curl -sO https://packages.confluent.io/maven/io/confluent/common-utils/7.6.0/common-utils-7.6.0.jar && \
+    # Apache Avro
+    curl -sO https://repo1.maven.org/maven2/org/apache/avro/avro/1.11.3/avro-1.11.3.jar && \
+    # Google Guava
+    curl -sO https://repo1.maven.org/maven2/com/google/guava/guava/32.0.1-jre/guava-32.0.1-jre.jar && \
+    curl -sO https://repo1.maven.org/maven2/com/google/guava/failureaccess/1.0.1/failureaccess-1.0.1.jar && \
+    # Jackson (for Avro JSON support)
+    curl -sO https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-core/2.15.2/jackson-core-2.15.2.jar && \
+    curl -sO https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.15.2/jackson-databind-2.15.2.jar && \
+    curl -sO https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-annotations/2.15.2/jackson-annotations-2.15.2.jar && \
+    # Additional dependencies
+    curl -sO https://repo1.maven.org/maven2/org/apache/commons/commons-compress/1.21/commons-compress-1.21.jar && \
+    curl -sO https://repo1.maven.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar && \
+    mkdir -p /kafka/connect/confluent-avro-converter && \
+    mv *.jar /kafka/connect/confluent-avro-converter/ && \
+    chown -R kafka:kafka /kafka/connect/confluent-avro-converter
+
+# Switch back to kafka user
+USER kafka
