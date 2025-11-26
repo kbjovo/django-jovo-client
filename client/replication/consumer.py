@@ -50,6 +50,10 @@ class ResilientKafkaConsumer:
     BASE_BACKOFF_SECONDS = 2  # 2, 4, 8, 16, 32 seconds
     HEARTBEAT_INTERVAL_SECONDS = 30
 
+    COMMIT_INTERVAL_MESSAGES = 100  # Commit every N messages
+    COMMIT_INTERVAL_SECONDS = 5     # Or every N seconds
+    LOG_PROGRESS_INTERVAL = 1000 
+
     def __init__(
         self,
         replication_config,
@@ -156,6 +160,7 @@ class ResilientKafkaConsumer:
                 consumer_group_id=self.consumer_group_id,
                 topics=self.topics,
                 target_engine=self.target_engine,
+                replication_config=self.config,
                 bootstrap_servers=self.bootstrap_servers,
                 auto_offset_reset="earliest",
             )
@@ -178,94 +183,160 @@ class ResilientKafkaConsumer:
 
     def _consume_with_heartbeat(self):
         """
-        Main consumption loop with heartbeat tracking.
-
-        Processes messages and updates heartbeat every 30 seconds.
+        OPTIMIZED consumption loop with batching and async commits.
+        
+        Key optimizations:
+        1. Remove blocking debug sleeps
+        2. Async offset commits with periodic sync
+        3. Reduced logging frequency
+        4. Batch progress tracking
         """
         last_heartbeat_time = time.time()
+        last_commit_time = time.time()
+        last_log_time = time.time()
+        
         message_count = 0
-        last_poll_log_time = time.time()
+        messages_since_commit = 0
         no_message_count = 0
+        consecutive_errors = 0
         
         try:
-            self._log_info(f"✓ Starting consumption loop (topics: {', '.join(self.topics)})")
+            self._log_info(f"✓ Starting OPTIMIZED consumption loop")
+            self._log_info(f"   Topics: {', '.join(self.topics)}")
             self._log_info(f"   Consumer group: {self.consumer.consumer_group_id}")
-            self._log_info(f"   Heartbeat interval: {self.HEARTBEAT_INTERVAL_SECONDS}s")
+            self._log_info(f"   Commit interval: {self.COMMIT_INTERVAL_MESSAGES} msgs or {self.COMMIT_INTERVAL_SECONDS}s")
+            
+            # Wait for initial partition assignment (one-time check)
+            max_wait = 10
+            waited = 0
+            while not self.consumer.consumer.assignment() and waited < max_wait:
+                time.sleep(0.5)
+                waited += 0.5
+            
+            if self.consumer.consumer.assignment():
+                self._log_info(f"✓ Assigned partitions: {self.consumer.consumer.assignment()}")
+            else:
+                self._log_warning("⚠️ No partitions assigned after 10s - continuing anyway")
 
             while not self.should_stop:
-                # Poll for messages (1 second timeout)
+                current_time = time.time()
+                
+                # ============================================
+                # HEARTBEAT UPDATE (every 30s)
+                # ============================================
+                if current_time - last_heartbeat_time >= self.HEARTBEAT_INTERVAL_SECONDS:
+                    self._update_heartbeat()
+                    last_heartbeat_time = current_time
+
+                # ============================================
+                # POLL FOR MESSAGE (non-blocking with 1s timeout)
+                # ============================================
                 try:
-                    # Update heartbeat periodically
-                    current_time = time.time()
-                    if current_time - last_heartbeat_time >= self.HEARTBEAT_INTERVAL_SECONDS:
-                        self._update_heartbeat()
-                        last_heartbeat_time = current_time
-
-                    # Process one message
                     msg = self.consumer.consumer.poll(timeout=1.0)
-
-                    logger.info("[DEBUG] Waiting for Kafka partition assignment...")
-                    time.sleep(2)
-
-                    assigned = self.consumer.consumer.assignment()
-                    logger.info(f"[DEBUG] Assigned partitions BEFORE polling: {assigned}")
-                    
-                    if assigned := self.consumer.consumer.assignment():
-                        logger.debug(f"[DEBUG] Assigned partitions DURING polling: {assigned}")
                     
                     if msg is None:
                         no_message_count += 1
-                        # Log "waiting for messages" every 30 seconds
-                        if current_time - last_poll_log_time >= 30:
-                            self._log_info(f"⏳ Waiting for messages... (polled {no_message_count} times with no messages)")
-                            last_poll_log_time = current_time
+                        
+                        # Log "waiting" every 30 seconds only
+                        if current_time - last_log_time >= 30:
+                            self._log_info(f"⏳ Waiting for messages... (no messages in last 30s)")
+                            last_log_time = current_time
                             no_message_count = 0
+                        
+                        # PERIODIC COMMIT: Commit even when no messages (every N seconds)
+                        if current_time - last_commit_time >= self.COMMIT_INTERVAL_SECONDS:
+                            if messages_since_commit > 0:
+                                self._commit_offsets(asynchronous=False)
+                                messages_since_commit = 0
+                                last_commit_time = current_time
+                        
                         continue
 
-                    # Reset no-message counter when we receive a message
+                    # Reset counters when we receive messages
                     no_message_count = 0
 
+                    # Handle Kafka errors
                     if msg.error():
-                        logger.error(f"[AVRO-ERROR] Kafka message error: {msg.error()}")
                         self._handle_kafka_error(msg.error())
                         continue
 
-                    # Log that we're about to process a message
-                    logger.debug(f"[{self.config.connector_name}] Passing message to DebeziumCDCConsumer.process_message()")
-
-                    # Process message
+                    # ============================================
+                    # PROCESS MESSAGE
+                    # ============================================
                     self.consumer.process_message(msg)
                     message_count += 1
+                    messages_since_commit += 1
                     self.stats['messages_processed'] += 1
                     self.stats['last_message_at'] = timezone.now()
+                    consecutive_errors = 0  # Reset error counter on success
 
-                    # Commit offset
-                    try:
-                        self.consumer.consumer.commit(asynchronous=False)
-                        logger.debug(f"[{self.config.connector_name}] Offset committed successfully")
-                    except Exception as e:
-                        logger.warning(f"Failed to commit offset: {e}")
+                    # ============================================
+                    # ASYNC COMMIT (every N messages OR N seconds)
+                    # ============================================
+                    should_commit = (
+                        messages_since_commit >= self.COMMIT_INTERVAL_MESSAGES or
+                        (current_time - last_commit_time) >= self.COMMIT_INTERVAL_SECONDS
+                    )
+                    
+                    if should_commit:
+                        # Use async commit for better throughput
+                        self._commit_offsets(asynchronous=True)
+                        messages_since_commit = 0
+                        last_commit_time = current_time
 
-                    # Log progress every 10 messages (changed from 100 for better visibility)
-                    if message_count % 10 == 0:
-                        self._log_info(f"📊 Processed {message_count} messages this session (total: {self.stats['messages_processed']})")
+                    # ============================================
+                    # PROGRESS LOGGING (reduced frequency)
+                    # ============================================
+                    if message_count % self.LOG_PROGRESS_INTERVAL == 0:
+                        elapsed = (current_time - self.stats['started_at'].timestamp())
+                        rate = message_count / elapsed if elapsed > 0 else 0
+                        self._log_info(
+                            f"📊 Progress: {message_count:,} msgs "
+                            f"({rate:.1f} msgs/sec, total: {self.stats['messages_processed']:,})"
+                        )
 
                 except Exception as e:
-                    # Error processing individual message - log and continue
+                    # Error processing message
+                    consecutive_errors += 1
                     self.stats['errors_encountered'] += 1
-                    self._log_error(f"❌ Error processing message: {str(e)}")
-                    logger.exception(f"[{self.config.connector_name}] Full exception:")
+                    
+                    # Log error but don't spam logs
+                    if consecutive_errors == 1 or consecutive_errors % 10 == 0:
+                        self._log_error(f"❌ Error processing message: {str(e)}")
+                        logger.exception(f"[{self.config.connector_name}] Exception details:")
+                    
+                    # If too many consecutive errors, raise
+                    if consecutive_errors >= 10:
+                        self._log_error(f"⚠️ 10 consecutive errors - may indicate persistent issue")
+                        raise TransientError(f"Multiple consecutive message processing errors: {str(e)}")
 
-                    # If too many errors in a row, raise
-                    if self.stats['errors_encountered'] % 10 == 0:
-                        self._log_error(f"⚠️  Multiple errors ({self.stats['errors_encountered']} total) - may indicate persistent issue")
-                        raise TransientError(f"Multiple message processing errors: {str(e)}")
+            # ============================================
+            # FINAL COMMIT ON EXIT
+            # ============================================
+            if messages_since_commit > 0:
+                self._log_info(f"Final commit: {messages_since_commit} pending messages")
+                self._commit_offsets(asynchronous=False)
 
         except KeyboardInterrupt:
-            self._log_info("⏹️  Consumption interrupted by user")
+            self._log_info("ℹ️ Consumption interrupted by user")
         except Exception as e:
             self._log_error(f"❌ Consumption loop error: {str(e)}")
             raise
+
+    def _commit_offsets(self, asynchronous: bool = True):
+        """
+        Commit consumer offsets.
+        
+        Args:
+            asynchronous: If True, commit async (fire-and-forget, faster).
+                         If False, commit sync (blocks until acknowledged, safer).
+        """
+        try:
+            self.consumer.consumer.commit(asynchronous=asynchronous)
+            if not asynchronous:
+                logger.debug(f"[{self.config.connector_name}] Offset committed (sync)")
+        except Exception as e:
+            logger.warning(f"Failed to commit offset: {e}")
 
     def _handle_kafka_error(self, error):
         """Handle Kafka-specific errors."""
@@ -274,12 +345,10 @@ class ResilientKafkaConsumer:
         if error.code() == KafkaError._PARTITION_EOF:
             # End of partition - not an error
             return
-
         elif error.code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
             # Topic doesn't exist yet - wait for it
             logger.debug(f"Topic not available yet: {error}")
             return
-
         else:
             # Other Kafka error
             self._log_error(f"Kafka error: {error}")
@@ -290,13 +359,16 @@ class ResilientKafkaConsumer:
         try:
             self.last_heartbeat = timezone.now()
 
-            # Update ReplicationConfig
             from client.models import ReplicationConfig
             ReplicationConfig.objects.filter(id=self.config.id).update(
                 consumer_last_heartbeat=self.last_heartbeat
             )
 
-            self._log_info(f"💓 Heartbeat updated (messages: {self.stats['messages_processed']}, errors: {self.stats['errors_encountered']})")
+            # Reduced logging frequency
+            logger.debug(
+                f"💚 Heartbeat (msgs: {self.stats['messages_processed']}, "
+                f"errors: {self.stats['errors_encountered']})"
+            )
 
         except Exception as e:
             logger.warning(f"Failed to update heartbeat: {e}")

@@ -14,6 +14,8 @@ It also provides:
 - Connector action handlers (pause, resume, delete)
 """
 
+# import pprint
+
 from client.utils.database_utils import get_table_list, get_table_schema
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
@@ -31,6 +33,7 @@ from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping
 from client.utils.debezium_manager import DebeziumConnectorManager
 from client.utils.kafka_topic_manager import KafkaTopicManager
+from client.replication import ReplicationOrchestrator
 
 from client.utils.connector_templates import (
     get_connector_config_for_database,
@@ -200,8 +203,20 @@ def cdc_configure_tables(request, database_pk):
     
     if request.method == "POST":
         try:
+            # VALIDATE BEFORE CREATING - Prevent transaction rollbacks and ID skipping
+            # Pre-validate that we can get schemas for all selected tables
+            for table_name in selected_tables:
+                try:
+                    schema = get_table_schema(db_config, table_name)
+                    if not schema.get('columns'):
+                        raise ValueError(f"Table {table_name} has no columns or doesn't exist")
+                except Exception as e:
+                    logger.error(f"Pre-validation failed for table {table_name}: {e}")
+                    messages.error(request, f'Cannot configure table {table_name}: {str(e)}')
+                    return redirect('cdc_configure_tables', database_pk=database_pk)
+
             with transaction.atomic():
-                # Create ReplicationConfig
+                # Create ReplicationConfig (only after validation passes)
                 logger.info(f"drop_before_sync: {request.POST.get('drop_before_sync')}")
                 replication_config = ReplicationConfig.objects.create(
                     client_database=db_config,
@@ -213,7 +228,7 @@ def cdc_configure_tables(request, database_pk):
                     drop_before_sync=request.POST.get('drop_before_sync') == 'on',
                     created_by=request.user if request.user.is_authenticated else None
                 )
-                
+
                 logger.info(f"Created ReplicationConfig: {replication_config.id}")
                 
                 # Create TableMappings for each table
@@ -433,7 +448,7 @@ def cdc_create_connector(request, config_pk):
                 from client.replication import ReplicationOrchestrator
                 orchestrator = ReplicationOrchestrator(replication_config)
 
-                success, message = orchestrator.start_replication(force_resync=False)
+                success, message = orchestrator.start_replication()
 
                 if success:
                     messages.success(
@@ -570,29 +585,27 @@ def cdc_connector_action(request, config_pk, action):
     """
     Handle connector actions: start, pause, resume, restart, delete
     """
+    from client.replication import ReplicationOrchestrator
+    
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     connector_name = replication_config.connector_name
-    logger.info(f" ✅✅✅✅ CDC Action Print: {action}")
     
-    if not connector_name:
+    if not connector_name and action not in ['start', 'delete']:
         return JsonResponse({
             'success': False,
             'error': 'No connector configured'
         }, status=400)
-    
+        
     try:
-        manager = DebeziumConnectorManager()
         
         if action == 'start':
-            # Use orchestrator to start replication (NEW)
+            # Use orchestrator to start replication
             logger.info(f"🚀 Starting replication for config {config_pk} via orchestrator")
-
-            from client.replication import ReplicationOrchestrator
 
             orchestrator = ReplicationOrchestrator(replication_config)
 
             # Start replication with new simplified flow
-            success, message = orchestrator.start_replication(force_resync=False)
+            success, message = orchestrator.start_replication()
 
             if success:
                 # Update client replication status
@@ -607,10 +620,8 @@ def cdc_connector_action(request, config_pk, action):
                 message = None
             
         elif action == 'pause':
-            # Use orchestrator to stop replication (NEW)
+            # Use orchestrator to stop replication
             logger.info(f"⏸️ Pausing replication for config {config_pk} via orchestrator")
-
-            from client.replication import ReplicationOrchestrator
 
             orchestrator = ReplicationOrchestrator(replication_config)
             success, message = orchestrator.stop_replication()
@@ -622,13 +633,11 @@ def cdc_connector_action(request, config_pk, action):
                 error = None
             
         elif action == 'resume':
-            # Use orchestrator to resume replication (NEW)
+            # Use orchestrator to resume replication
             logger.info(f"▶️ Resuming replication for config {config_pk} via orchestrator")
 
-            from client.replication import ReplicationOrchestrator
-
             orchestrator = ReplicationOrchestrator(replication_config)
-            success, message = orchestrator.start_replication(force_resync=False)
+            success, message = orchestrator.start_replication()
 
             if not success:
                 error = message
@@ -637,10 +646,8 @@ def cdc_connector_action(request, config_pk, action):
                 error = None
             
         elif action == 'restart':
-            # Use orchestrator to restart replication (NEW)
+            # Use orchestrator to restart replication
             logger.info(f"🔄 Restarting replication for config {config_pk} via orchestrator")
-
-            from client.replication import ReplicationOrchestrator
 
             orchestrator = ReplicationOrchestrator(replication_config)
             success, message = orchestrator.restart_replication()
@@ -652,19 +659,34 @@ def cdc_connector_action(request, config_pk, action):
                 error = None
             
         elif action == 'delete':
-            # Use orchestrator to delete replication (NEW)
+            # Use orchestrator to delete replication
             logger.info(f"🗑️ Deleting replication for config {config_pk} via orchestrator")
 
-            from client.replication import ReplicationOrchestrator
+            # Store client ID before deletion (for redirect)
+            client_id = replication_config.client_database.client.id
 
+            # Create orchestrator BEFORE deletion
             orchestrator = ReplicationOrchestrator(replication_config)
-            success, message = orchestrator.delete_replication(delete_topics=True)
+
+            # This will delete the config and all related records
+            success, message = orchestrator.delete_replication(delete_topics=False)
+
+            logger.info(f"Delete result: {success} - {message}")
 
             if not success:
                 error = message
                 message = None
             else:
                 error = None
+                # Note: replication_config no longer exists in DB after this point
+                # Return redirect URL so frontend knows where to go
+                from django.urls import reverse
+                messages.success(request, message)
+                return JsonResponse({
+                    'success': True,
+                    'message': message,
+                    'redirect_url': reverse('replications_list')
+                })
 
         elif action == 'force_resnapshot':
             # Force resnapshot by clearing offsets and recreating connector
@@ -686,7 +708,10 @@ def cdc_connector_action(request, config_pk, action):
             }, status=400)
         
         if success:
-            replication_config.save()
+            # Only save if config still exists (not deleted)
+            if action != 'delete':
+                replication_config.save()
+            
             messages.success(request, message)
             return JsonResponse({'success': True, 'message': message})
         else:
@@ -701,8 +726,6 @@ def cdc_connector_action(request, config_pk, action):
             'success': False,
             'error': str(e)
         }, status=500)
-
-
 
 @require_http_methods(["POST"])
 def start_replication(request, config_id):
@@ -1231,8 +1254,16 @@ def cdc_config_update(request, config_pk):
         # Track which tables to keep (by source_table name)
         submitted_table_names = {t['source_table'] for t in tables_data}
 
+        # Track tables being removed (BEFORE deletion)
+        removed_tables = replication_config.table_mappings.exclude(source_table__in=submitted_table_names)
+        removed_tables_count = removed_tables.count()
+        removed_table_names = list(removed_tables.values_list('source_table', flat=True))
+
+        if removed_tables_count > 0:
+            logger.info(f"🗑️ Removing {removed_tables_count} tables: {removed_table_names}")
+
         # Delete tables that were removed
-        replication_config.table_mappings.exclude(source_table__in=submitted_table_names).delete()
+        removed_tables.delete()
 
         # Track newly added tables for topic creation
         newly_added_tables = []
@@ -1362,7 +1393,7 @@ def cdc_config_update(request, config_pk):
             logger.info(f"   To get initial data, you'll need to restart the connector")
             logger.info(f"   Or delete and recreate the connector with all tables")
 
-        # Update connector configuration if it exists
+        # Update connector configuration if it exists AND is active
         if replication_config.connector_name:
             try:
                 manager = DebeziumConnectorManager()
@@ -1372,51 +1403,124 @@ def cdc_config_update(request, config_pk):
                 tables_list = [tm.source_table for tm in all_enabled_tables]
 
                 if tables_list:
-                    # Generate updated connector config with ALL tables
-                    logger.info(f"🔄 Updating connector config with {len(tables_list)} tables: {tables_list}")
+                    # Check if connector actually exists in Kafka Connect
+                    connector_result = manager.get_connector_status(replication_config.connector_name)
+                    connector_exists = isinstance(connector_result, tuple) and connector_result[0]
 
-                    client = replication_config.client_database.client
-                    db_config = replication_config.client_database
-
-                    # Generate full connector configuration
-                    updated_config = get_connector_config_for_database(
-                        db_config=db_config,
-                        replication_config=replication_config,
-                        tables_whitelist=tables_list,
-                        kafka_bootstrap_servers='kafka:29092',
-                        schema_registry_url='http://schema-registry:8081'
-                    )
-
-                    if updated_config:
-                        # Update the connector configuration
-                        success, error = manager.update_connector_config(
-                            replication_config.connector_name,
-                            updated_config
-                        )
-
-                        if success:
-                            logger.info(f"✅ Successfully updated connector configuration")
-
-                            # Only restart if requested
-                            if restart_connector:
-                                logger.info(f"🔄 Restarting connector to apply changes...")
-                                success, error = manager.restart_connector(replication_config.connector_name)
-                                if not success:
-                                    logger.warning(f"⚠️ Failed to restart connector: {error}")
-                                else:
-                                    logger.info(f"✅ Connector restarted successfully")
-                        else:
-                            logger.error(f"❌ Failed to update connector config: {error}")
-                            return JsonResponse({
-                                'success': False,
-                                'error': f'Failed to update connector configuration: {error}'
-                            }, status=500)
+                    if not connector_exists:
+                        logger.warning(f"⚠️ Connector {replication_config.connector_name} doesn't exist in Kafka Connect")
+                        logger.info(f"   Clearing connector_name from config. User will need to recreate connector.")
+                        # Clear the connector name since it doesn't exist
+                        replication_config.connector_name = None
+                        replication_config.status = 'configured'
+                        replication_config.is_active = False
+                        replication_config.save()
                     else:
-                        logger.error(f"❌ Failed to generate connector configuration")
-                        return JsonResponse({
-                            'success': False,
-                            'error': 'Failed to generate connector configuration'
-                        }, status=500)
+                        # Generate updated connector config with ALL tables
+                        logger.info(f"🔄 Updating connector config with {len(tables_list)} tables: {tables_list}")
+
+                        client = replication_config.client_database.client
+                        db_config = replication_config.client_database
+
+                        # CRITICAL: When adding/removing tables, we need to DELETE and RECREATE the connector
+                        # Simply updating the config doesn't work reliably for table list changes
+                        if newly_added_tables or removed_tables_count > 0:
+                            logger.info(f"⚠️ Table list changed (added: {len(newly_added_tables)}, removed: {removed_tables_count})")
+                            logger.info(f"   Deleting and recreating connector for reliable operation...")
+
+                            # Delete old connector
+                            delete_success, delete_error = manager.delete_connector(
+                                replication_config.connector_name,
+                                delete_topics=False  # Keep topics, just recreate connector
+                            )
+
+                            if delete_success:
+                                logger.info(f"✅ Old connector deleted")
+
+                                # Generate fresh connector configuration
+                                from client.utils.connector_templates import generate_connector_name
+                                # Increment connector version for new connector
+                                replication_config.connector_version += 1
+                                new_connector_name = generate_connector_name(
+                                    client,
+                                    db_config,
+                                    version=replication_config.connector_version
+                                )
+
+                                updated_config = get_connector_config_for_database(
+                                    db_config=db_config,
+                                    replication_config=replication_config,
+                                    tables_whitelist=tables_list,
+                                    kafka_bootstrap_servers='kafka:29092',
+                                    schema_registry_url='http://schema-registry:8081',
+                                    snapshot_mode='initial'  # Re-snapshot for new tables
+                                )
+
+                                # Update connector name
+                                replication_config.connector_name = new_connector_name
+                                replication_config.save()
+
+                                # Create new connector
+                                create_success, create_error = manager.create_connector(
+                                    new_connector_name,
+                                    updated_config
+                                )
+
+                                if create_success:
+                                    logger.info(f"✅ New connector created: {new_connector_name}")
+                                    logger.info(f"   Connector will re-snapshot all {len(tables_list)} tables")
+                                else:
+                                    logger.error(f"❌ Failed to create new connector: {create_error}")
+                                    return JsonResponse({
+                                        'success': False,
+                                        'error': f'Failed to create new connector: {create_error}'
+                                    }, status=500)
+                            else:
+                                logger.error(f"❌ Failed to delete old connector: {delete_error}")
+                                return JsonResponse({
+                                    'success': False,
+                                    'error': f'Failed to delete old connector: {delete_error}'
+                                }, status=500)
+                        else:
+                            # No table changes, just update config (for column/setting changes)
+                            updated_config = get_connector_config_for_database(
+                                db_config=db_config,
+                                replication_config=replication_config,
+                                tables_whitelist=tables_list,
+                                kafka_bootstrap_servers='kafka:29092',
+                                schema_registry_url='http://schema-registry:8081'
+                            )
+
+                            if updated_config:
+                                # Update the connector configuration
+                                success, error = manager.update_connector_config(
+                                    replication_config.connector_name,
+                                    updated_config
+                                )
+
+                                if success:
+                                    logger.info(f"✅ Successfully updated connector configuration")
+
+                                    # Restart if requested
+                                    if restart_connector:
+                                        logger.info(f"🔄 Restarting connector to apply changes...")
+                                        success, error = manager.restart_connector(replication_config.connector_name)
+                                        if not success:
+                                            logger.warning(f"⚠️ Failed to restart connector: {error}")
+                                        else:
+                                            logger.info(f"✅ Connector restarted successfully")
+                                else:
+                                    logger.error(f"❌ Failed to update connector config: {error}")
+                                    return JsonResponse({
+                                        'success': False,
+                                        'error': f'Failed to update connector configuration: {error}'
+                                    }, status=500)
+                            else:
+                                logger.error(f"❌ Failed to generate connector configuration")
+                                return JsonResponse({
+                                    'success': False,
+                                    'error': 'Failed to generate connector configuration'
+                                }, status=500)
 
             except Exception as e:
                 logger.error(f"❌ Error updating connector: {e}", exc_info=True)
@@ -1424,6 +1528,9 @@ def cdc_config_update(request, config_pk):
                     'success': False,
                     'error': f'Failed to update connector: {str(e)}'
                 }, status=500)
+        else:
+            # No connector yet - just save config changes
+            logger.info(f"ℹ️  No connector configured yet. Changes saved to database only.")
 
         # CRITICAL: Restart consumer if new tables were added and replication is active
         # The consumer needs to be restarted to subscribe to the new topics

@@ -92,6 +92,22 @@ services:
       # Auto-create topics for dev
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
+      KAFKA_NUM_NETWORK_THREADS: 8
+      KAFKA_NUM_IO_THREADS: 8
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: 1048576
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 1048576
+      KAFKA_SOCKET_REQUEST_MAX_BYTES: 104857600
+
+     # Increase batch sizes for better throughput
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+
+      KAFKA_COMPRESSION_TYPE: "lz4"
+      
+      # Log retention (keep snapshots for debugging)
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+
       # Logging
       KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
       KAFKA_TOOLS_LOG4J_LOGLEVEL: ERROR
@@ -203,6 +219,24 @@ services:
       INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
 
+      # PERFORMANCE TUNING for initial snapshots
+      # Increase task thread pool for parallel processing
+      CONNECT_TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS: 30000
+      
+      # Producer settings (Kafka Connect -> Kafka)
+      CONNECT_PRODUCER_BATCH_SIZE: 32768
+      CONNECT_PRODUCER_LINGER_MS: 10
+      CONNECT_PRODUCER_BUFFER_MEMORY: 67108864
+      CONNECT_PRODUCER_MAX_REQUEST_SIZE: 10485760
+      CONNECT_PRODUCER_COMPRESSION_TYPE: lz4
+      
+      # Consumer settings (for offset management)
+      CONNECT_CONSUMER_MAX_POLL_RECORDS: 1000
+      CONNECT_CONSUMER_FETCH_MIN_BYTES: 1048576
+      
+      # JVM heap size for better performance
+      KAFKA_HEAP_OPTS: "-Xms2G -Xmx2G"
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/"]
       interval: 10s
@@ -300,9 +334,10 @@ services:
     networks:
       - replication-network
     command: celery -A jovoclient worker -Q consumers -l info -n consumer@%h 
-      --concurrency=1 
+      --concurrency=4 
       --max-tasks-per-child=1000
-      --time-limit=3600
+      --time-limit=7200
+      --prefetch-multiplier=1
       --soft-time-limit=3300
     restart: unless-stopped
 

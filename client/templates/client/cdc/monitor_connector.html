@@ -673,8 +673,8 @@ function performAction(action) {
     if (data.success) {
       alert(data.message || action + ' completed successfully');
       if (action === 'delete') {
-        window.location.href = '{% url "main-dashboard" %}';
-        setTimeout(() => { const tab = document.querySelector('[\\@click*=replications]'); if(tab) tab.click(); }, 100);
+        // Use redirect_url from backend if provided, otherwise default to replications list
+        window.location.href = data.redirect_url || '{% url "replications_list" %}';
       } else {
         location.reload();
       }
@@ -683,7 +683,14 @@ function performAction(action) {
     }
   })
   .catch(error => {
-    alert('Error: ' + error);
+    console.error('Fetch error:', error);
+    // If delete action, still try to redirect (it might have succeeded on backend)
+    if (action === 'delete') {
+      console.log('Delete action - redirecting despite fetch error');
+      window.location.href = '{% url "replications_list" %}';
+    } else {
+      alert('Error: ' + error);
+    }
   });
 }
 

@@ -47,7 +47,7 @@ class ReplicationOrchestrator:
     # Main Operations
     # ==========================================
 
-    def start_replication(self, force_resync: bool = False) -> Tuple[bool, str]:
+    def start_replication(self) -> Tuple[bool, str]:
         """
         Start complete replication (connector + consumer).
 
@@ -102,14 +102,6 @@ class ReplicationOrchestrator:
             )
             self._log_info(f"  → Tables: {', '.join(enabled_tables)}")
 
-            # Delete old connector if force_resync
-            if force_resync:
-                self._log_info("  → Force resync enabled: deleting old connector...")
-                try:
-                    self.connector_manager.delete_connector(self.config.connector_name)
-                    self._log_info("  ✓ Old connector deleted")
-                except:
-                    self._log_info("  → No old connector to delete")
 
             # Start connector with initial snapshot
             success, message = self._ensure_connector_running(snapshot_mode='initial')
@@ -239,12 +231,16 @@ class ReplicationOrchestrator:
 
     def delete_replication(self, delete_topics: bool = False) -> Tuple[bool, str]:
         """
-        Delete replication completely (connector + offsets).
+        Delete replication resources and configuration.
 
-        Note: Topics are never deleted (delete_topics parameter ignored for safety).
+        This method performs complete cleanup:
+        1. Stops replication (consumer)
+        2. Deletes Debezium connector (without deleting topics by default)
+        3. Clears connector offsets (mandatory)
+        4. Deletes ReplicationConfig from database (cascades to table/column mappings)
 
         Args:
-            delete_topics: Ignored - topics are never deleted
+            delete_topics: Whether to delete Kafka topics (default: False for safety)
 
         Returns:
             (success, message)
@@ -253,46 +249,130 @@ class ReplicationOrchestrator:
         self._log_info("DELETING REPLICATION")
         self._log_info("=" * 60)
 
+        # Store config details before deletion
+        config_id = self.config.id
+        connector_name = self.config.connector_name
+        client_id = self.config.client_database.client.id
+    
+        # Build consumer group ID (same pattern as used in _start_consumer_with_fresh_group)
+        consumer_group_id = f"cdc_consumer_{client_id}_{config_id}"
+        
         try:
-            # STEP 1: Stop replication
-            self._log_info("STEP 1/4: Stopping replication...")
-            self.stop_replication()
+            # STEP 1: Stop consumer (CRITICAL - must stop before deleting group)
+            self._log_info("STEP 1/5: Stopping consumer...")
+            try:
+                # Mark as inactive to stop consumer loop
+                self.config.is_active = False
+                self.config.status = 'stopping'
+                self.config.save()
+                
+                # Revoke Celery task if it exists
+                if self.config.consumer_task_id:
+                    try:
+                        from jovoclient.celery import app as celery_app
+                        celery_app.control.revoke(
+                            self.config.consumer_task_id,
+                            terminate=True,
+                            signal='SIGTERM'
+                        )
+                        self._log_info(f"✓ Revoked Celery task: {self.config.consumer_task_id}")
+                    except Exception as e:
+                        self._log_warning(f"Could not revoke Celery task: {e}")
+                
+                # Pause connector to stop new messages
+                if connector_name:
+                    try:
+                        self.connector_manager.pause_connector(connector_name)
+                        self._log_info(f"✓ Connector paused: {connector_name}")
+                    except Exception as e:
+                        self._log_warning(f"Could not pause connector: {e}")
+                
+                # CRITICAL: Wait for consumer to actually disconnect
+                # The consumer checks is_active every 2 seconds in _consume_with_heartbeat
+                import time
+                self._log_info("⏳ Waiting 5 seconds for consumer to disconnect...")
+                time.sleep(5)
+                
+                self._log_info("✓ Consumer stop signal sent")
+            except Exception as e:
+                self._log_warning(f"Error while stopping consumer: {e}")
 
-            # STEP 2: Delete connector
+            # STEP 2: Delete Debezium connector (do NOT delete topics by default)
             self._log_info("STEP 2/4: Deleting Debezium connector...")
             try:
-                self.connector_manager.delete_connector(
-                    self.config.connector_name,
-                    delete_topics=True  # Never delete topics
-                )
-                self._log_info(f"✓ Connector deleted: {self.config.connector_name}")
+                if connector_name:
+                    self.connector_manager.delete_connector(
+                        connector_name,
+                        delete_topics=bool(delete_topics)
+                    )
+                    self._log_info(f"✓ Connector deleted: {connector_name}")
+                else:
+                    self._log_info("No connector to delete")
             except Exception as e:
                 self._log_warning(f"Could not delete connector: {e}")
 
-            # STEP 3: Clear connector offsets
+            # STEP 3: Clear connector offsets (mandatory)
             self._log_info("STEP 3/4: Clearing connector offsets...")
             try:
-                success = self.offset_manager.delete_connector_offsets(self.config.connector_name)
-                if success:
-                    self._log_info(f"✓ Offsets cleared for: {self.config.connector_name}")
+                if connector_name:
+                    # Try with connector_name first
+                    success = self.offset_manager.delete_connector_offsets(connector_name)
+                    
+                    if not success:
+                        # Fallback: try server-name variant
+                        server_name_guess = connector_name.replace('_connector', '')
+                        success = self.offset_manager.delete_connector_offsets(server_name_guess)
+
+                    if success:
+                        self._log_info(f"✓ Offsets cleared for connector: {connector_name}")
+                    else:
+                        error_msg = f"Failed to clear offsets for: {connector_name}"
+                        self._log_error(error_msg)
+                        return False, error_msg
                 else:
-                    error_msg = f"Failed to clear offsets for: {self.config.connector_name}"
-                    self._log_error(error_msg)
-                    return False, error_msg
+                    self._log_info("No offsets to clear")
             except Exception as e:
                 error_msg = f"Failed to clear offsets: {str(e)}"
                 self._log_error(error_msg)
                 return False, error_msg
+            
+            # STEP 4: Delete consumer group (NEW)
+            self._log_info("STEP 4/5: Deleting consumer group...")
+            try:
+                topic_manager = KafkaTopicManager()
+                success, error = topic_manager.delete_consumer_group(consumer_group_id)
+                
+                if success:
+                    self._log_info(f"✓ Consumer group deleted: {consumer_group_id}")
+                else:
+                    # Don't fail the operation if consumer group deletion fails
+                    # It might not exist or might be auto-cleaned by Kafka
+                    self._log_warning(f"Could not delete consumer group: {error}")
+            except Exception as e:
+                self._log_warning(f"Error deleting consumer group: {e}")
 
-            # STEP 4: Update status
-            self._log_info("STEP 4/4: Updating configuration...")
-            self.config.status = 'configured'
-            self.config.is_active = False
-            self.config.connector_state = 'DELETED'
-            self.config.save()
+            # STEP 5: Delete ReplicationConfig from database (cascades to table/column mappings)
+            self._log_info("STEP 5/5: Deleting configuration from database...")
+            try:
+                # Use Django's queryset delete to bypass model's delete() method
+                # This ensures no signals or custom logic interferes
+                from client.models import ReplicationConfig
+                ReplicationConfig.objects.filter(pk=config_id).delete()
+                
+                self._log_info(f"✓ Deleted ReplicationConfig (id={config_id})")
+                self._log_info("  → TableMapping records deleted (cascade)")
+                self._log_info("  → ColumnMapping records deleted (cascade)")
+            except Exception as e:
+                error_msg = f"Failed to delete configuration from database: {str(e)}"
+                self._log_error(error_msg)
+                return False, error_msg
 
             self._log_info("=" * 60)
             self._log_info("✓ REPLICATION DELETED SUCCESSFULLY")
+            self._log_info("=" * 60)
+            self._log_info(f"Connector: {connector_name}")
+            self._log_info(f"Config ID: {config_id}")
+            self._log_info("All database records removed")
             self._log_info("=" * 60)
 
             return True, "Replication deleted successfully"
@@ -301,7 +381,7 @@ class ReplicationOrchestrator:
             error_msg = f"Failed to delete replication: {str(e)}"
             self._log_error(error_msg)
             return False, error_msg
-
+    
     # ==========================================
     # Status and Health
     # ==========================================
@@ -606,7 +686,6 @@ class ReplicationOrchestrator:
             self.config.consumer_task_id = result.id
             self.config.consumer_state = 'STARTING'
             self.config.save()
-
             self._log_info(f"✓ Consumer task queued: {result.id}")
             return True, f"Consumer started with group {consumer_group}"
 

@@ -10,8 +10,12 @@ Complete Replication Models
 
 from django.db import models
 from django.utils import timezone
-
+import logging
 from .database import ClientDatabase
+
+
+logger = logging.getLogger(__name__)
+
 
 
 class ReplicationConfig(models.Model):
@@ -164,41 +168,31 @@ class ReplicationConfig(models.Model):
             total += table_mapping.column_mappings.filter(is_enabled=True).count()
         return total
     
+        # --- PATCH: ReplicationConfig.delete (client/models/replication.py) ---
     def delete(self, *args, **kwargs):
         """
-        Override delete to clean up Debezium connector, Kafka topics, and offsets
-        before removing from database.
+        Override delete to perform simple cascade deletion.
+        
+        NOTE: This does NOT clean up Debezium connector or offsets.
+        For proper cleanup with connector/offset removal, use:
+            orchestrator = ReplicationOrchestrator(config)
+            orchestrator.delete_replication()
+        
+        This method only handles direct model deletion (e.g., via admin panel).
+        The orchestrator handles the complete cleanup workflow.
         """
         import logging
         logger = logging.getLogger(__name__)
         
-        try:
-            logger.info(f"🧹 Cleaning up replication resources for config {self.id}")
-            logger.info(f"   Connector: {self.connector_name}")
-            logger.info(f"   Topic prefix: {self.kafka_topic_prefix}")
-            
-            # Only clean up if connector exists
-            if self.connector_name:
-                from client.replication import ReplicationOrchestrator
-                
-                orchestrator = ReplicationOrchestrator(self)
-                
-                # Delete connector, topics, and offsets
-                success, message = orchestrator.delete_replication(delete_topics=True)
-                
-                if success:
-                    logger.info(f"✅ Cleanup successful: {message}")
-                else:
-                    logger.warning(f"⚠️ Cleanup had issues: {message}")
-            else:
-                logger.info("   No connector configured - skipping cleanup")
-                
-        except Exception as e:
-            logger.error(f"❌ Error during cleanup: {e}", exc_info=True)
-            # Don't raise - allow deletion to proceed even if cleanup fails
+        logger.info(f"Deleting ReplicationConfig {self.id} (simple cascade)")
+        logger.info(f"  Connector: {self.connector_name}")
+        logger.info(f"  Note: Use ReplicationOrchestrator.delete_replication() for full cleanup")
         
-        # Call parent delete to actually remove from database
+        # Just delete the model - Django will cascade to TableMapping and ColumnMapping
         super().delete(*args, **kwargs)
+        
+        logger.info(f"✓ ReplicationConfig {self.id} deleted from database")
+
 
 
 class TableMapping(models.Model):

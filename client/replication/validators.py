@@ -40,6 +40,7 @@ class ReplicationValidator:
             self._validate_database_config(),
             self._validate_table_mappings(),
             self._validate_target_database(),
+            self._validate_no_topic_conflicts(),
         ]
 
         # Skip topic validation for Option A (Debezium creates topics automatically)
@@ -96,6 +97,110 @@ class ReplicationValidator:
 
         except Exception as e:
             return False, f"Table mapping validation error: {str(e)}"
+
+
+    def _validate_no_topic_conflicts(self) -> Tuple[bool, str]:
+        """
+        Validate that no other active replication is consuming from the same topics.
+        
+        This prevents the scenario where multiple ReplicationConfigs try to consume
+        from the same Kafka topics, which causes:
+        - Duplicate message processing
+        - Consumer group conflicts
+        - Unpredictable behavior
+        
+        Returns:
+            (is_valid, error_message)
+        """
+        try:
+            from client.models import ReplicationConfig
+            
+            # Build topic prefix for this config
+            # Format: client_{client_id}_db_{database_id}
+            client_id = self.config.client_database.client.id
+            database_id = self.config.client_database.id
+            this_topic_prefix = f"client_{client_id}_db_{database_id}"
+            
+            # Also check the saved kafka_topic_prefix (may be different if manually set)
+            saved_topic_prefix = self.config.kafka_topic_prefix
+            
+            logger.debug(
+                f"[{self.config.connector_name}] Checking for conflicts with "
+                f"topic prefix: {this_topic_prefix} or {saved_topic_prefix}"
+            )
+            
+            # Find other active replications using the same topic prefix
+            conflicting_configs = ReplicationConfig.objects.filter(
+                is_active=True,
+                status='active'
+            ).exclude(id=self.config.id)
+            
+            # Check each potential conflict
+            conflicts = []
+            for other_config in conflicting_configs:
+                # Check if they share the same database (which means same topics)
+                if other_config.client_database.id == self.config.client_database.id:
+                    conflicts.append({
+                        'id': other_config.id,
+                        'connector_name': other_config.connector_name,
+                        'topic_prefix': other_config.kafka_topic_prefix,
+                        'reason': 'Same source database'
+                    })
+                # Also check by topic prefix
+                elif other_config.kafka_topic_prefix == this_topic_prefix:
+                    conflicts.append({
+                        'id': other_config.id,
+                        'connector_name': other_config.connector_name,
+                        'topic_prefix': other_config.kafka_topic_prefix,
+                        'reason': 'Same topic prefix'
+                    })
+                elif other_config.kafka_topic_prefix == saved_topic_prefix:
+                    conflicts.append({
+                        'id': other_config.id,
+                        'connector_name': other_config.connector_name,
+                        'topic_prefix': other_config.kafka_topic_prefix,
+                        'reason': 'Same saved topic prefix'
+                    })
+            
+            if conflicts:
+                # Build detailed error message
+                conflict_details = []
+                for conflict in conflicts:
+                    conflict_details.append(
+                        f"  • ReplicationConfig ID {conflict['id']} "
+                        f"(Connector: {conflict['connector_name']}, "
+                        f"Reason: {conflict['reason']})"
+                    )
+                
+                error_msg = (
+                    f"Cannot start replication: {len(conflicts)} active replication(s) "
+                    f"already consuming from these topics:\n"
+                    + "\n".join(conflict_details) +
+                    f"\n\nTo fix this:\n"
+                    f"  1. Stop or delete the conflicting replication(s), OR\n"
+                    f"  2. Use a different source database for this replication\n\n"
+                    f"Note: Each topic can only be consumed by one replication at a time."
+                )
+                
+                logger.error(
+                    f"[{self.config.connector_name}] Topic conflict detected: "
+                    f"{len(conflicts)} conflicting replication(s)"
+                )
+                
+                return False, error_msg
+            
+            logger.debug(f"[{self.config.connector_name}] ✓ No topic conflicts detected")
+            return True, ""
+
+        except Exception as e:
+            logger.error(f"[{self.config.connector_name}] Error checking for topic conflicts: {e}")
+            # Don't fail validation if check fails - log warning and continue
+            logger.warning(
+                f"[{self.config.connector_name}] Could not verify topic conflicts, "
+                f"proceeding anyway. Error: {str(e)}"
+            )
+            return True, ""
+
 
     def _validate_kafka_topics(self) -> Tuple[bool, str]:
         """Validate all required Kafka topics exist."""
@@ -175,3 +280,5 @@ class ReplicationValidator:
 
         except Exception as e:
             return False, f"Connector status check failed: {str(e)}"
+        
+        

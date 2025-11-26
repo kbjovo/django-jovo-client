@@ -11,7 +11,7 @@ from confluent_kafka import KafkaError
 from confluent_kafka.avro import AvroConsumer
 from sqlalchemy import MetaData, Table, Column, inspect, text
 from sqlalchemy import Integer, String, Text, Float, Boolean, DateTime, Date, Time
-from sqlalchemy.dialects.mysql import DECIMAL, BIGINT, TINYINT
+from sqlalchemy.dialects.mysql import DECIMAL, BIGINT, TINYINT, insert
 from sqlalchemy.exc import SQLAlchemyError
 import re
 
@@ -28,6 +28,7 @@ class DebeziumCDCConsumer:
         consumer_group_id: str,
         topics: List[str] | str,
         target_engine,
+        replication_config,
         bootstrap_servers: str = "localhost:9092",
         auto_offset_reset: str = "earliest",
     ):
@@ -38,12 +39,14 @@ class DebeziumCDCConsumer:
             consumer_group_id: Kafka consumer group id
             topics: list or single topic to subscribe to
             target_engine: SQLAlchemy Engine connected to the centralized DB
+            replication_config: ReplicationConfig model instance
             bootstrap_servers: kafka bootstrap servers
             auto_offset_reset: 'earliest' or 'latest'
         """
         self.consumer_group_id = consumer_group_id
         self.requested_topics = (topics if isinstance(topics, (list, tuple)) else [topics])
         self.target_engine = target_engine
+        self.replication_config = replication_config
         self.bootstrap_servers = bootstrap_servers
         self.auto_offset_reset = auto_offset_reset
 
@@ -273,41 +276,107 @@ class DebeziumCDCConsumer:
         # fallback
         return None, parts[-1] if parts else None
 
-    def convert_debezium_timestamps(self, row: dict) -> dict:
+    def get_table_mapping(self, source_db: str, source_table: str) -> Optional[Any]:
         """
-        Convert Debezium timestamp/date fields to MySQL-safe strings.
+        Look up TableMapping for the given source table.
+
+        Args:
+            source_db: Source database name
+            source_table: Source table name
+
+        Returns:
+            TableMapping instance or None if not found
+        """
+        try:
+            from client.models import TableMapping
+
+            # Look up TableMapping by source_table in the current replication_config
+            table_mapping = TableMapping.objects.filter(
+                replication_config=self.replication_config,
+                source_table=source_table,
+                is_enabled=True
+            ).first()
+
+            if not table_mapping:
+                logger.warning(
+                    f"   ⚠️  No TableMapping found for {source_db}.{source_table} "
+                    f"in ReplicationConfig {self.replication_config.id}. Skipping."
+                )
+                return None
+
+            logger.debug(f"   ✓ Found TableMapping: {table_mapping}")
+            return table_mapping
+
+        except Exception as e:
+            logger.error(f"   ❌ Error looking up TableMapping: {e}")
+            return None
+
+    def convert_debezium_timestamps(self, row: dict, table: Table = None) -> dict:
+        """
+        Convert Debezium timestamp/date fields based on actual table schema.
+
+        Args:
+            row: Dictionary of column names to values
+            table: SQLAlchemy Table object to determine column types (optional)
+                   If None, uses heuristic-based detection for initial table creation
 
         Handles:
         - Unix timestamps (seconds or milliseconds)
         - ISO datetime strings
         - Weird integers like 20238
         - Mixed date/datetime fields
-        Returns: dict with all date fields converted to ISO strings or datetime objects
+
+        Returns: dict with date/datetime fields converted to proper Python objects
         """
         if not row:
             return row
 
+        # Determine which columns are date/time columns
+        # Strategy 1: Use table schema if available (most reliable)
+        # Strategy 2: Use heuristics if table is None (for initial table creation)
+        date_time_columns = {}  # col_name -> col_type
+
+        if table is not None:
+            # Schema-based: Get actual column types from table
+            for col in table.columns:
+                col_type = type(col.type).__name__
+                if col_type in ('Date', 'DateTime', 'DATETIME', 'TIMESTAMP', 'Time', 'DATE', 'TIME'):
+                    date_time_columns[col.name] = col_type
+
         converted = {}
 
         for key, value in row.items():
+            # Skip if value is None
             if value is None:
                 converted[key] = None
                 continue
 
-            is_timestamp_field = any([
-                key.endswith('_at'),
-                key.endswith('_time'),
-                key.endswith('_date'),
-                'date' in key.lower(),
-                'time' in key.lower(),
-                'timestamp' in key.lower(),
-                key in ['created', 'updated', 'modified', 'deleted']
-            ])
+            # Determine if this is a date/time column
+            if table is not None:
+                # Use schema-based detection
+                if key not in date_time_columns:
+                    converted[key] = value
+                    continue
+                col_type = date_time_columns[key]
+            else:
+                # Use heuristic-based detection for table creation
+                # Check common date/time column naming patterns
+                if not any([
+                    key.endswith('_at'),
+                    key.endswith('_time'),
+                    key.endswith('_date'),
+                    key.endswith('_from'),
+                    key.endswith('_to'),
+                    'date' in key.lower(),
+                    'time' in key.lower(),
+                    'timestamp' in key.lower(),
+                    key in ['created', 'updated', 'modified', 'deleted']
+                ]):
+                    converted[key] = value
+                    continue
+                col_type = None  # Unknown, will use smart default
 
-            if not is_timestamp_field:
-                converted[key] = value
-                continue
-
+            # Now we know this column needs date/time conversion
             try:
                 parsed = None
 
@@ -317,12 +386,12 @@ class DebeziumCDCConsumer:
 
                 # ---- Case 2: Integer timestamp or malformed numeric ----
                 elif isinstance(value, int):
-                    if value > 1000000000000:  # ms
+                    if value > 1000000000000:  # milliseconds
                         parsed = datetime.fromtimestamp(value / 1000.0)
                     elif value > 1000000000:  # seconds
                         parsed = datetime.fromtimestamp(value)
                     else:
-                        # Handle short numeric dates
+                        # Handle short numeric dates (YYYYMMDD, YYYYMM, etc.)
                         s = str(value)
                         try:
                             if len(s) == 8:  # YYYYMMDD
@@ -369,18 +438,37 @@ class DebeziumCDCConsumer:
 
                 # ---- Final Conversion ----
                 if parsed:
-                    # Convert to appropriate Python type
-                    # SQLAlchemy will handle the conversion to MySQL DATE/DATETIME
-                    if isinstance(parsed, datetime):
-                        # Check if it's a date-only field (no time component)
-                        if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
-                            # Return as date object for DATE columns
+                    # Convert based on column type (if known from schema) or use smart default (if heuristic)
+                    # col_type is already set from the detection logic above
+
+                    if col_type == 'Date' or col_type == 'DATE':
+                        # DATE column - return date object
+                        if isinstance(parsed, datetime):
                             converted[key] = parsed.date()
                         else:
-                            # Return as datetime for DATETIME/TIMESTAMP columns
                             converted[key] = parsed
-                    elif isinstance(parsed, date):
-                        converted[key] = parsed
+                    elif col_type in ('DateTime', 'DATETIME', 'TIMESTAMP'):
+                        # DATETIME/TIMESTAMP column - return datetime object
+                        if isinstance(parsed, date) and not isinstance(parsed, datetime):
+                            # Convert date to datetime (midnight)
+                            converted[key] = datetime.combine(parsed, datetime.min.time())
+                        else:
+                            converted[key] = parsed
+                    elif col_type in ('Time', 'TIME'):
+                        # TIME column - extract time
+                        if isinstance(parsed, datetime):
+                            converted[key] = parsed.time()
+                        else:
+                            converted[key] = parsed
+                    else:
+                        # Unknown type (heuristic mode), use smart default
+                        if isinstance(parsed, datetime):
+                            if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
+                                converted[key] = parsed.date()
+                            else:
+                                converted[key] = parsed
+                        else:
+                            converted[key] = parsed
                 else:
                     # Could not parse - set to None to avoid MySQL errors
                     logger.warning(f"Could not parse {key}={value}, setting to None")
@@ -397,96 +485,188 @@ class DebeziumCDCConsumer:
     # -------------------------
     # Apply operations
     # -------------------------
-    def apply_insert(self, prefixed_table: str, row: Dict[str, Any]):
+    def apply_insert(self, target_table, row_data, table_mapping):
+        """
+        Apply INSERT operation with column name mapping from ColumnMapping.
+
+        Args:
+            target_table: SQLAlchemy Table object
+            row_data: Dict with source column names
+            table_mapping: TableMapping model instance
+        """
         try:
-            logger.info(f"   🔹 Starting INSERT operation for table: {prefixed_table}")
-            logger.info(f"   🔹 Original row data: {json.dumps(row, default=str)[:300]}...")
+            logger.info(f"   🔹 Starting INSERT operation for table: {target_table.name}")
+            logger.info(f"   🔹 Original row data: {json.dumps(row_data, default=str)[:300]}...")
 
-            # CRITICAL: Convert timestamps BEFORE inserting
-            row = self.convert_debezium_timestamps(row)
-            logger.info(f"   🔹 After timestamp conversion: {json.dumps(row, default=str)[:300]}...")
+            # MAP SOURCE COLUMNS TO TARGET COLUMNS using ColumnMapping FIRST
+            # The mapping function includes fallback logic and filtering
+            mapped_data = self._map_columns_from_db(row_data, table_mapping, target_table)
 
-            with self.target_engine.connect() as conn:
-                table = self.table_cache.get(prefixed_table)
-                if table is None:
-                    raise Exception(f"Table object not found for {prefixed_table}")
+            logger.info(f"   🔹 Original data: {list(row_data.keys())}")
+            logger.info(f"   🔹 Mapped data (with fallback): {list(mapped_data.keys())}")
 
-                logger.info(f"   🔹 Using INSERT ... ON DUPLICATE KEY UPDATE strategy")
-                # Use INSERT ... ON DUPLICATE KEY UPDATE for MySQL to handle replays
-                from sqlalchemy.dialects.mysql import insert
-                stmt = insert(table).values(**row)
+            # CRITICAL: Convert timestamps AFTER mapping (so column names match target schema)
+            mapped_data = self.convert_debezium_timestamps(mapped_data, target_table)
+            logger.info(f"   🔹 After timestamp conversion: {json.dumps(mapped_data, default=str)[:300]}...")
 
-                # On duplicate key, update all columns except primary key
-                update_dict = {k: v for k, v in row.items() if k != 'id'}
-                if update_dict:
-                    stmt = stmt.on_duplicate_key_update(**update_dict)
+            # Use INSERT ... ON DUPLICATE KEY UPDATE
+            stmt = insert(target_table).values(**mapped_data)
 
+            # Add ON DUPLICATE KEY UPDATE for all non-PK columns
+            pk_columns = self._get_primary_keys(target_table)
+            update_dict = {
+                col: stmt.inserted[col]
+                for col in mapped_data.keys()
+                if col not in pk_columns
+            }
+            
+            if update_dict:
+                stmt = stmt.on_duplicate_key_update(**update_dict)
+            
+            # Execute
+            with self.target_engine.begin() as conn:
                 conn.execute(stmt)
-                conn.commit()
+
             self.stats["inserts"] += 1
-            logger.info(f"   ✅ Successfully inserted/updated row in {prefixed_table}")
+            logger.info(f"   ✅ INSERT successful for {target_table.name}")
+
         except Exception as e:
             self.stats["errors"] += 1
-            logger.error(f"   ❌ FAILED to insert into {prefixed_table}: {e}")
+            logger.error(f"   ❌ FAILED to insert into {target_table.name}: {e}")
             logger.exception(f"   ❌ Full exception:")
             raise
 
-    def apply_update(self, prefixed_table: str, before: Dict[str, Any], after: Dict[str, Any]):
+
+    def _map_columns_from_db(self, row_data, table_mapping, target_table):
+        """
+        Map source column names to target column names using ColumnMapping table.
+
+        Args:
+            row_data: Dict with source column names as keys
+            table_mapping: TableMapping instance
+            target_table: SQLAlchemy Table object for target table
+
+        Returns:
+            Dict with target column names as keys (validated against target table)
+        """
+        from client.models import ColumnMapping
+
+        # Get all column mappings for this table
+        column_mappings = ColumnMapping.objects.filter(
+            table_mapping=table_mapping,
+            is_enabled=True
+        ).values('source_column', 'target_column')
+
+        # Build mapping dict: {source_column: target_column}
+        column_map = {
+            cm['source_column']: cm['target_column']
+            for cm in column_mappings
+        }
+
+        # Get target table columns
+        target_columns = {col.name for col in target_table.columns}
+
+        # Map the data with fallback logic
+        mapped_data = {}
+        for source_col, value in row_data.items():
+            # Get mapped name from ColumnMapping
+            mapped_col = column_map.get(source_col, source_col)
+
+            # If mapped column exists in target table, use it
+            if mapped_col in target_columns:
+                mapped_data[mapped_col] = value
+            # Otherwise, fallback to source column name if it exists in target
+            elif source_col in target_columns:
+                logger.warning(
+                    f"   ⚠️  Mapped column '{mapped_col}' not found in target table, "
+                    f"falling back to source column '{source_col}'"
+                )
+                mapped_data[source_col] = value
+            else:
+                # Neither mapped nor source column exists in target
+                logger.debug(
+                    f"   ⚠️  Column '{source_col}' (mapped to '{mapped_col}') "
+                    f"not found in target table, skipping"
+                )
+
+        return mapped_data
+
+
+    def _get_primary_keys(self, table):
+        """Get primary key column names for a table."""
+        return {col.name for col in table.primary_key.columns}
+
+    
+    def apply_update(self, target_table, row_data, table_mapping):
         try:
-            logger.info(f"   🔹 Starting UPDATE operation for table: {prefixed_table}")
+            logger.info(f"   🔹 Starting UPDATE operation for table: {target_table.name}")
+            logger.info(f"   🔹 Original row data: {json.dumps(row_data, default=str)[:300]}...")
 
-            # CRITICAL: Convert timestamps in the 'after' data
-            after = self.convert_debezium_timestamps(after)
-            logger.info(f"   🔹 After timestamp conversion: {json.dumps(after, default=str)[:300]}...")
+            # MAP COLUMNS with fallback logic FIRST
+            mapped_data = self._map_columns_from_db(row_data, table_mapping, target_table)
 
-            with self.target_engine.connect() as conn:
-                table = self.table_cache.get(prefixed_table)
-                if table is None:
-                    raise Exception(f"Table object not found for {prefixed_table}")
+            # CRITICAL: Convert timestamps AFTER mapping (so column names match target schema)
+            mapped_data = self.convert_debezium_timestamps(mapped_data, target_table)
+            logger.info(f"   🔹 After timestamp conversion: {json.dumps(mapped_data, default=str)[:300]}...")
 
-                # prefer pk 'id' if available
-                pk_val = (after or {}).get("id") or (before or {}).get("id")
-                if pk_val is None:
-                    # if no id, try to use all primary key columns (not implemented) => skip
-                    logger.warning(f"   ⚠️  No PK for update on {prefixed_table}, skipping")
-                    return
-
-                logger.info(f"   🔹 Updating row with PK id={pk_val}")
-                stmt = table.update().where(table.c.id == pk_val).values(**after)
+            # Build UPDATE statement with primary key filter
+            pk_columns = self._get_primary_keys(target_table)
+            pk_values = {k: v for k, v in mapped_data.items() if k in pk_columns}
+            update_values = {k: v for k, v in mapped_data.items() if k not in pk_columns}
+            
+            if not pk_values:
+                raise ValueError("No primary key values found for UPDATE")
+            
+            stmt = target_table.update()
+            for pk_col, pk_val in pk_values.items():
+                stmt = stmt.where(target_table.c[pk_col] == pk_val)
+            stmt = stmt.values(**update_values)
+            
+            with self.target_engine.begin() as conn:
                 conn.execute(stmt)
-                conn.commit()
+
             self.stats["updates"] += 1
-            logger.info(f"   ✅ Successfully updated row in {prefixed_table}")
+            logger.info(f"   ✅ UPDATE successful for {target_table.name}")
+
         except Exception as e:
             self.stats["errors"] += 1
-            logger.error(f"   ❌ FAILED to update {prefixed_table}: {e}")
+            logger.error(f"   ❌ FAILED to update {target_table.name}: {e}")
             logger.exception(f"   ❌ Full exception:")
             raise
 
-    def apply_delete(self, prefixed_table: str, before: Dict[str, Any]):
+    def apply_delete(self, target_table, row_data, table_mapping):
+        """Apply DELETE operation with column mapping."""
         try:
-            logger.info(f"   🔹 Starting DELETE operation for table: {prefixed_table}")
+            logger.info(f"   🔹 Starting DELETE operation for table: {target_table.name}")
+            logger.info(f"   🔹 Original row data: {json.dumps(row_data, default=str)[:300]}...")
 
-            with self.target_engine.connect() as conn:
-                table = self.table_cache.get(prefixed_table)
-                if table is None:
-                    logger.warning(f"   ⚠️  Table {prefixed_table} not found for delete - skipping")
-                    return
+            # MAP COLUMNS for primary key with fallback logic FIRST
+            mapped_data = self._map_columns_from_db(row_data, table_mapping, target_table)
 
-                pk_val = (before or {}).get("id")
-                if pk_val is None:
-                    logger.warning(f"   ⚠️  No PK for delete on {prefixed_table}, skipping")
-                    return
-
-                logger.info(f"   🔹 Deleting row with PK id={pk_val}")
-                stmt = table.delete().where(table.c.id == pk_val)
+            # CRITICAL: Convert timestamps AFTER mapping (so column names match target schema)
+            mapped_data = self.convert_debezium_timestamps(mapped_data, target_table)
+            logger.info(f"   🔹 After timestamp conversion: {json.dumps(mapped_data, default=str)[:300]}...")
+            
+            # Get primary key columns and values
+            pk_columns = self._get_primary_keys(target_table)
+            pk_values = {k: v for k, v in mapped_data.items() if k in pk_columns}
+            
+            if not pk_values:
+                raise ValueError("No primary key values found for DELETE")
+            
+            stmt = target_table.delete()
+            for pk_col, pk_val in pk_values.items():
+                stmt = stmt.where(target_table.c[pk_col] == pk_val)
+            
+            with self.target_engine.begin() as conn:
                 conn.execute(stmt)
-                conn.commit()
+
             self.stats["deletes"] += 1
-            logger.info(f"   ✅ Successfully deleted row from {prefixed_table}")
+            logger.info(f"   ✅ DELETE successful for {target_table.name}")
+
         except Exception as e:
             self.stats["errors"] += 1
-            logger.error(f"   ❌ FAILED to delete from {prefixed_table}: {e}")
+            logger.error(f"   ❌ FAILED to delete from {target_table.name}: {e}")
             logger.exception(f"   ❌ Full exception:")
             raise
 
@@ -534,25 +714,37 @@ class DebeziumCDCConsumer:
             logger.info(f"   Source DB: {source_db}")
             logger.info(f"   Source Table: {table_name}")
 
-            # Create prefixed table name (source_db_table)
-            prefixed_table = self._prefixed_table_name(source_db, table_name)
-            logger.info(f"   Target Prefixed Table: {prefixed_table}")
+            # Look up TableMapping for this source table
+            table_mapping = self.get_table_mapping(source_db, table_name)
+            if not table_mapping:
+                logger.warning(f"   ⚠️  Skipping message - no TableMapping found for {source_db}.{table_name}")
+                return
+
+            # Get target table name from TableMapping
+            target_table_name = table_mapping.target_table
+            logger.info(f"   Target Table: {target_table_name}")
 
             # ensure table exists (use after|before to infer)
             # Convert timestamps in sample data for proper type inference
             sample = self.convert_debezium_timestamps(after or before or {})
-            if prefixed_table not in self.table_cache:
+            if target_table_name not in self.table_cache:
                 # attempt to load existing table or create from sample
                 try:
-                    self.ensure_table_exists(prefixed_table, sample)
+                    self.ensure_table_exists(target_table_name, sample)
                     # re-load Table instance into cache if created by ensure_table_exists
-                    if prefixed_table not in self.table_cache:
+                    if target_table_name not in self.table_cache:
                         # attempt autoload
-                        t = Table(prefixed_table, self.metadata, autoload_with=self.target_engine)
-                        self.table_cache[prefixed_table] = t
+                        t = Table(target_table_name, self.metadata, autoload_with=self.target_engine)
+                        self.table_cache[target_table_name] = t
                 except Exception as e:
-                    logger.exception(f"Failed to prepare table {prefixed_table}: {e}")
+                    logger.exception(f"Failed to prepare table {target_table_name}: {e}")
                     return  # skip this message
+
+            # Get SQLAlchemy Table object from cache
+            target_table_obj = self.table_cache.get(target_table_name)
+            if target_table_obj is None:
+                logger.error(f"   ❌ Table object not in cache for {target_table_name}")
+                return
 
             # handle operations
             logger.info(f"🔧 Processing Operation: {op}")
@@ -562,7 +754,7 @@ class DebeziumCDCConsumer:
                     logger.info(f"➕ INSERT operation detected")
                     logger.info(f"   Data to insert: {json.dumps(after, default=str)[:200]}...")
                     # Debezium 'after' is a dict of column->value
-                    self.apply_insert(prefixed_table, after)
+                    self.apply_insert(target_table_obj, after, table_mapping)
                 else:
                     logger.warning(f"⚠️  CREATE/READ operation but no 'after' data")
             elif op == "u":
@@ -570,18 +762,18 @@ class DebeziumCDCConsumer:
                 logger.info(f"   Before: {json.dumps(before, default=str)[:150] if before else 'None'}...")
                 logger.info(f"   After: {json.dumps(after, default=str)[:150] if after else 'None'}...")
                 # update
-                self.apply_update(prefixed_table, before or {}, after or {})
+                self.apply_update(target_table_obj, after or {}, table_mapping)
             elif op == "d":
                 logger.info(f"🗑️  DELETE operation detected")
                 logger.info(f"   Before: {json.dumps(before, default=str)[:200] if before else 'None'}...")
                 # delete
-                self.apply_delete(prefixed_table, before or {})
+                self.apply_delete(target_table_obj, before or {}, table_mapping)
             else:
                 logger.warning(f"⚠️  Unknown operation '{op}'")
                 # Unknown op: could still be message with payload structure; treat as insert if 'after' present
                 if after:
                     logger.info(f"   Treating as INSERT since 'after' data is present")
-                    self.apply_insert(prefixed_table, after)
+                    self.apply_insert(target_table_obj, after, table_mapping)
                 else:
                     logger.warning(f"   No 'after' data - skipping message")
 
@@ -612,9 +804,37 @@ class DebeziumCDCConsumer:
             messages_count = 0
             logger.info(f"Starting consumption from topics: {', '.join(self.topics)}")
 
+            # Track last check time to avoid DB queries on every message
+            import time
+            last_config_check = time.time()
+            config_check_interval = 2  # Check every 2 seconds
+
             while True:
                 if max_messages is not None and messages_count >= max_messages:
                     break
+
+                # Periodically check if config still exists and is active
+                current_time = time.time()
+                if current_time - last_config_check >= config_check_interval:
+                    try:
+                        from client.models import ReplicationConfig
+                        # Refresh config from DB
+                        config = ReplicationConfig.objects.filter(
+                            id=self.replication_config.id
+                        ).first()
+
+                        if not config:
+                            logger.warning(f"🛑 ReplicationConfig {self.replication_config.id} was deleted. Stopping consumer.")
+                            break
+                        elif not config.is_active:
+                            logger.warning(f"🛑 ReplicationConfig {self.replication_config.id} is no longer active. Stopping consumer.")
+                            break
+
+                        last_config_check = current_time
+                    except Exception as e:
+                        logger.error(f"Error checking config status: {e}")
+                        # Don't break on check error, continue consuming
+                        last_config_check = current_time
 
                 msg = self.consumer.poll(timeout=timeout)
                 if msg is None:

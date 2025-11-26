@@ -6,7 +6,7 @@ with settings from Django configuration
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from confluent_kafka.admin import AdminClient, NewTopic, ConfigResource, ResourceType
 from django.conf import settings
 
@@ -68,188 +68,42 @@ class KafkaTopicManager:
             logger.error(f"Failed to check topic existence: {e}")
             return False
 
-    def create_topic(
-        self,
-        topic_name: str,
-        partitions: Optional[int] = None,
-        replication_factor: Optional[int] = None,
-        config_overrides: Optional[Dict[str, str]] = None
-    ) -> bool:
-        """
-        Create a Kafka topic with configuration from settings
 
+    def delete_consumer_group(self, group_id: str) -> Tuple[bool, Optional[str]]:
+        """
+        Delete a Kafka consumer group.
+        
         Args:
-            topic_name: Name of the topic to create
-            partitions: Number of partitions (defaults to settings)
-            replication_factor: Replication factor (defaults to settings)
-            config_overrides: Optional config overrides
-
-        Returns:
-            True if created successfully, False otherwise
-        """
-        try:
-            # Check if topic already exists
-            if self.topic_exists(topic_name):
-                logger.warning(f"Topic '{topic_name}' already exists")
-                return False
-
-            # Get configuration from settings or use defaults
-            num_partitions = partitions or self.config['PARTITIONS']
-            replica_factor = replication_factor or self.config['REPLICATION_FACTOR']
-
-            # Build topic configuration
-            topic_config = {
-                'retention.ms': str(self.config['RETENTION_MS']),
-                'retention.bytes': str(self.config['RETENTION_BYTES']),
-                'cleanup.policy': self.config['CLEANUP_POLICY'],
-                'compression.type': self.config['COMPRESSION_TYPE'],
-                'min.insync.replicas': str(self.config['MIN_INSYNC_REPLICAS']),
-                'segment.bytes': str(self.config['SEGMENT_BYTES']),
-                'segment.ms': str(self.config['SEGMENT_MS']),
-            }
-
-            # Apply any overrides
-            if config_overrides:
-                topic_config.update(config_overrides)
-
-            # Create NewTopic object
-            new_topic = NewTopic(
-                topic=topic_name,
-                num_partitions=num_partitions,
-                replication_factor=replica_factor,
-                config=topic_config
-            )
+            group_id: Consumer group ID to delete
             
-            # Create topic
-            futures = self.admin_client.create_topics([new_topic])
-
-            # Wait for operation to complete
-            for topic, future in futures.items():
-                try:
-                    future.result()  # Block until topic is created
-                    logger.info(f"✅ Created topic '{topic}' with {num_partitions} partition(s), "
-                              f"replication factor {replica_factor}")
-                    logger.debug(f"Topic config: {topic_config}")
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to create topic '{topic}': {e}")
-                    return False
-
-        except Exception as e:
-            logger.error(f"Error creating topic '{topic_name}': {e}")
-            return False
-
-    def create_topics_bulk(
-        self,
-        topic_names: List[str],
-        partitions: Optional[int] = None,
-        replication_factor: Optional[int] = None
-    ) -> Dict[str, bool]:
-        """
-        Create multiple topics at once
-
-        Args:
-            topic_names: List of topic names to create
-            partitions: Number of partitions (defaults to settings)
-            replication_factor: Replication factor (defaults to settings)
-
         Returns:
-            Dict mapping topic name to success status
-        """
-        results = {}
-
-        for topic_name in topic_names:
-            success = self.create_topic(topic_name, partitions, replication_factor)
-            results[topic_name] = success
-
-        successful = sum(1 for v in results.values() if v)
-        logger.info(f"Created {successful}/{len(topic_names)} topics successfully")
-
-        return results
-
-    def delete_topic(self, topic_name: str) -> bool:
-        """
-        Delete a Kafka topic
-
-        Args:
-            topic_name: Name of the topic to delete
-
-        Returns:
-            True if deleted successfully, False otherwise
+            Tuple[bool, Optional[str]]: (success, error_message)
         """
         try:
-            # Check if topic exists
-            if not self.topic_exists(topic_name):
-                logger.warning(f"Topic '{topic_name}' does not exist")
-                return False
-
-            # Delete topic
-            futures = self.admin_client.delete_topics([topic_name])
-
-            # Wait for operation to complete
-            for topic, future in futures.items():
+            from confluent_kafka.admin import AdminClient
+            
+            admin_client = AdminClient({
+                "bootstrap.servers": self.bootstrap_servers
+            })
+            
+            # Delete consumer group
+            fs = admin_client.delete_consumer_groups([group_id], request_timeout=30)
+            
+            # Wait for deletion to complete
+            for group_id, future in fs.items():
                 try:
-                    future.result()  # Block until topic is deleted
-                    logger.info(f"🗑️  Deleted topic '{topic}'")
-                    return True
+                    future.result()  # Wait for operation to complete
+                    logger.info(f"✅ Deleted consumer group: {group_id}")
+                    return True, None
                 except Exception as e:
-                    logger.error(f"Failed to delete topic '{topic}': {e}")
-                    return False
-
+                    error_msg = f"Failed to delete consumer group {group_id}: {str(e)}"
+                    logger.error(error_msg)
+                    return False, error_msg
+                    
         except Exception as e:
-            logger.error(f"Error deleting topic '{topic_name}': {e}")
-            return False
-
-    def delete_topics_by_prefix(self, prefix: str, exclude_internal: bool = True) -> Dict[str, bool]:
-        """
-        Delete all topics matching a prefix (used when deleting a connector)
-
-        Args:
-            prefix: Topic prefix to match (e.g., 'client_2_db_5')
-            exclude_internal: Skip internal topics (starting with '_' or 'schema-changes')
-
-        Returns:
-            Dict mapping topic name to deletion success status
-        """
-        try:
-            # List all topics with the prefix
-            topics_to_delete = self.list_topics(prefix=prefix)
-
-            if exclude_internal:
-                # Exclude internal Kafka topics and schema history topics
-                topics_to_delete = [
-                    t for t in topics_to_delete
-                    if not t.startswith('_') and not t.startswith('schema-changes')
-                ]
-
-            if not topics_to_delete:
-                logger.info(f"No topics found with prefix '{prefix}'")
-                return {}
-
-            logger.info(f"Deleting {len(topics_to_delete)} topics with prefix '{prefix}': {topics_to_delete}")
-
-            # Delete topics
-            results = {}
-            futures = self.admin_client.delete_topics(topics_to_delete, operation_timeout=30)
-
-            # Wait for all deletions to complete
-            for topic, future in futures.items():
-                try:
-                    future.result()
-                    logger.info(f"✅ Deleted topic '{topic}'")
-                    results[topic] = True
-                except Exception as e:
-                    logger.error(f"❌ Failed to delete topic '{topic}': {e}")
-                    results[topic] = False
-
-            successful = sum(1 for v in results.values() if v)
-            logger.info(f"Deleted {successful}/{len(topics_to_delete)} topics successfully")
-
-            return results
-
-        except Exception as e:
-            logger.error(f"Error deleting topics with prefix '{prefix}': {e}")
-            return {}
+            error_msg = f"Error deleting consumer group: {str(e)}"
+            logger.error(error_msg)
+            return False, error_msg
 
     def get_topic_config(self, topic_name: str) -> Optional[Dict[str, str]]:
         """
