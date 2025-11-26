@@ -229,159 +229,422 @@ class ReplicationOrchestrator:
 
         return True, "Replication restarted successfully"
 
+    # def delete_replication(self, delete_topics: bool = False) -> Tuple[bool, str]:
+    #     """
+    #     Delete replication resources and configuration.
+
+    #     This method performs complete cleanup:
+    #     1. Stops replication (consumer)
+    #     2. Deletes Debezium connector (without deleting topics by default)
+    #     3. Clears connector offsets (mandatory)
+    #     4. Deletes ReplicationConfig from database (cascades to table/column mappings)
+
+    #     Args:
+    #         delete_topics: Whether to delete Kafka topics (default: False for safety)
+
+    #     Returns:
+    #         (success, message)
+    #     """
+    #     self._log_info("=" * 60)
+    #     self._log_info("DELETING REPLICATION")
+    #     self._log_info("=" * 60)
+
+    #     # Store config details before deletion
+    #     config_id = self.config.id
+    #     connector_name = self.config.connector_name
+    #     client_id = self.config.client_database.client.id
+    
+    #     # Build consumer group ID (same pattern as used in _start_consumer_with_fresh_group)
+    #     consumer_group_id = f"cdc_consumer_{client_id}_{config_id}"
+        
+    #     try:
+    #         # STEP 1: Stop consumer (CRITICAL - must stop before deleting group)
+    #         self._log_info("STEP 1/5: Stopping consumer...")
+    #         try:
+    #             # Mark as inactive to stop consumer loop
+    #             self.config.is_active = False
+    #             self.config.status = 'stopping'
+    #             self.config.save()
+                
+    #             # Revoke Celery task if it exists
+    #             if self.config.consumer_task_id:
+    #                 try:
+    #                     from jovoclient.celery import app as celery_app
+    #                     celery_app.control.revoke(
+    #                         self.config.consumer_task_id,
+    #                         terminate=True,
+    #                         signal='SIGTERM'
+    #                     )
+    #                     self._log_info(f"✓ Revoked Celery task: {self.config.consumer_task_id}")
+    #                 except Exception as e:
+    #                     self._log_warning(f"Could not revoke Celery task: {e}")
+                
+    #             # Pause connector to stop new messages
+    #             if connector_name:
+    #                 try:
+    #                     self.connector_manager.pause_connector(connector_name)
+    #                     self._log_info(f"✓ Connector paused: {connector_name}")
+    #                 except Exception as e:
+    #                     self._log_warning(f"Could not pause connector: {e}")
+                
+    #             # CRITICAL: Wait for consumer to actually disconnect
+    #             # The consumer checks is_active every 2 seconds in _consume_with_heartbeat
+    #             import time
+    #             self._log_info("⏳ Waiting 5 seconds for consumer to disconnect...")
+    #             time.sleep(5)
+                
+    #             self._log_info("✓ Consumer stop signal sent")
+    #         except Exception as e:
+    #             self._log_warning(f"Error while stopping consumer: {e}")
+
+    #         # STEP 2: Delete Debezium connector (do NOT delete topics by default)
+    #         self._log_info("STEP 2/4: Deleting Debezium connector...")
+    #         try:
+    #             if connector_name:
+    #                 self.connector_manager.delete_connector(
+    #                     connector_name,
+    #                     delete_topics=bool(delete_topics)
+    #                 )
+    #                 self._log_info(f"✓ Connector deleted: {connector_name}")
+    #             else:
+    #                 self._log_info("No connector to delete")
+    #         except Exception as e:
+    #             self._log_warning(f"Could not delete connector: {e}")
+
+    #         # STEP 3: Clear connector offsets (mandatory)
+    #         self._log_info("STEP 3/4: Clearing connector offsets...")
+    #         try:
+    #             if connector_name:
+    #                 # Try with connector_name first
+    #                 success = self.offset_manager.delete_connector_offsets(connector_name)
+                    
+    #                 if not success:
+    #                     # Fallback: try server-name variant
+    #                     server_name_guess = connector_name.replace('_connector', '')
+    #                     success = self.offset_manager.delete_connector_offsets(server_name_guess)
+
+    #                 if success:
+    #                     self._log_info(f"✓ Offsets cleared for connector: {connector_name}")
+    #                 else:
+    #                     error_msg = f"Failed to clear offsets for: {connector_name}"
+    #                     self._log_error(error_msg)
+    #                     return False, error_msg
+    #             else:
+    #                 self._log_info("No offsets to clear")
+    #         except Exception as e:
+    #             error_msg = f"Failed to clear offsets: {str(e)}"
+    #             self._log_error(error_msg)
+    #             return False, error_msg
+            
+    #         # STEP 4: Delete consumer group (NEW)
+    #         self._log_info("STEP 4/5: Deleting consumer group...")
+    #         try:
+    #             topic_manager = KafkaTopicManager()
+    #             success, error = topic_manager.delete_consumer_group(consumer_group_id)
+                
+    #             if success:
+    #                 self._log_info(f"✓ Consumer group deleted: {consumer_group_id}")
+    #             else:
+    #                 # Don't fail the operation if consumer group deletion fails
+    #                 # It might not exist or might be auto-cleaned by Kafka
+    #                 self._log_warning(f"Could not delete consumer group: {error}")
+    #         except Exception as e:
+    #             self._log_warning(f"Error deleting consumer group: {e}")
+
+    #         # STEP 5: Delete ReplicationConfig from database (cascades to table/column mappings)
+    #         self._log_info("STEP 5/5: Deleting configuration from database...")
+    #         try:
+    #             # Use Django's queryset delete to bypass model's delete() method
+    #             # This ensures no signals or custom logic interferes
+    #             from client.models import ReplicationConfig
+    #             ReplicationConfig.objects.filter(pk=config_id).delete()
+                
+    #             self._log_info(f"✓ Deleted ReplicationConfig (id={config_id})")
+    #             self._log_info("  → TableMapping records deleted (cascade)")
+    #             self._log_info("  → ColumnMapping records deleted (cascade)")
+    #         except Exception as e:
+    #             error_msg = f"Failed to delete configuration from database: {str(e)}"
+    #             self._log_error(error_msg)
+    #             return False, error_msg
+
+    #         self._log_info("=" * 60)
+    #         self._log_info("✓ REPLICATION DELETED SUCCESSFULLY")
+    #         self._log_info("=" * 60)
+    #         self._log_info(f"Connector: {connector_name}")
+    #         self._log_info(f"Config ID: {config_id}")
+    #         self._log_info("All database records removed")
+    #         self._log_info("=" * 60)
+
+    #         return True, "Replication deleted successfully"
+
+    #     except Exception as e:
+    #         error_msg = f"Failed to delete replication: {str(e)}"
+    #         self._log_error(error_msg)
+    #         return False, error_msg
+    
+
     def delete_replication(self, delete_topics: bool = False) -> Tuple[bool, str]:
         """
-        Delete replication resources and configuration.
-
-        This method performs complete cleanup:
-        1. Stops replication (consumer)
-        2. Deletes Debezium connector (without deleting topics by default)
-        3. Clears connector offsets (mandatory)
-        4. Deletes ReplicationConfig from database (cascades to table/column mappings)
-
+        Delete replication with simplified consumer group cleanup.
+        
+        SIMPLIFIED APPROACH:
+        1. Stop consumer (Celery task + mark inactive)
+        2. Pause connector (stop producing)
+        3. Wait fixed time for consumer to disconnect
+        4. Try to delete consumer group (ignore failures - Kafka auto-cleans)
+        5. Delete connector
+        6. Clear offsets
+        7. Optionally delete topics
+        8. Delete config
+        
         Args:
-            delete_topics: Whether to delete Kafka topics (default: False for safety)
-
+            delete_topics: If True, permanently delete Kafka topics
+            
         Returns:
             (success, message)
         """
-        self._log_info("=" * 60)
+        self._log_info("=" * 80)
         self._log_info("DELETING REPLICATION")
-        self._log_info("=" * 60)
+        self._log_info("=" * 80)
 
-        # Store config details before deletion
         config_id = self.config.id
         connector_name = self.config.connector_name
         client_id = self.config.client_database.client.id
-    
-        # Build consumer group ID (same pattern as used in _start_consumer_with_fresh_group)
         consumer_group_id = f"cdc_consumer_{client_id}_{config_id}"
         
         try:
-            # STEP 1: Stop consumer (CRITICAL - must stop before deleting group)
-            self._log_info("STEP 1/5: Stopping consumer...")
-            try:
-                # Mark as inactive to stop consumer loop
-                self.config.is_active = False
-                self.config.status = 'stopping'
-                self.config.save()
-                
-                # Revoke Celery task if it exists
-                if self.config.consumer_task_id:
-                    try:
-                        from jovoclient.celery import app as celery_app
-                        celery_app.control.revoke(
-                            self.config.consumer_task_id,
-                            terminate=True,
-                            signal='SIGTERM'
-                        )
-                        self._log_info(f"✓ Revoked Celery task: {self.config.consumer_task_id}")
-                    except Exception as e:
-                        self._log_warning(f"Could not revoke Celery task: {e}")
-                
-                # Pause connector to stop new messages
-                if connector_name:
-                    try:
-                        self.connector_manager.pause_connector(connector_name)
-                        self._log_info(f"✓ Connector paused: {connector_name}")
-                    except Exception as e:
-                        self._log_warning(f"Could not pause connector: {e}")
-                
-                # CRITICAL: Wait for consumer to actually disconnect
-                # The consumer checks is_active every 2 seconds in _consume_with_heartbeat
-                import time
-                self._log_info("⏳ Waiting 5 seconds for consumer to disconnect...")
-                time.sleep(5)
-                
-                self._log_info("✓ Consumer stop signal sent")
-            except Exception as e:
-                self._log_warning(f"Error while stopping consumer: {e}")
+            # ========================================
+            # STEP 1: Force Stop Consumer
+            # ========================================
+            self._log_info("STEP 1/7: Force stopping consumer...")
+            
+            # Mark as inactive
+            self.config.is_active = False
+            self.config.status = 'stopping'
+            self.config.consumer_state = 'STOPPING'
+            self.config.save()
+            self._log_info("  ✓ Marked as inactive")
+            
+            # Revoke Celery task
+            if self.config.consumer_task_id:
+                try:
+                    from jovoclient.celery import app as celery_app
+                    
+                    # First try graceful termination
+                    celery_app.control.revoke(
+                        self.config.consumer_task_id,
+                        terminate=True,
+                        signal='SIGTERM'
+                    )
+                    self._log_info(f"  → Sent SIGTERM to: {self.config.consumer_task_id}")
+                    
+                    # Wait 2 seconds then force kill
+                    import time
+                    time.sleep(2)
+                    
+                    celery_app.control.revoke(
+                        self.config.consumer_task_id,
+                        terminate=True,
+                        signal='SIGKILL'
+                    )
+                    self._log_info(f"  ✓ Force killed task: {self.config.consumer_task_id}")
+                    
+                except Exception as e:
+                    self._log_warning(f"  ⚠ Could not revoke task: {e}")
+            
+            self._log_info("")
 
-            # STEP 2: Delete Debezium connector (do NOT delete topics by default)
-            self._log_info("STEP 2/4: Deleting Debezium connector...")
+            # ========================================
+            # STEP 2: Pause Connector
+            # ========================================
+            self._log_info("STEP 2/7: Pausing connector...")
+            
+            if connector_name:
+                try:
+                    self.connector_manager.pause_connector(connector_name)
+                    self._log_info(f"  ✓ Paused: {connector_name}")
+                except Exception as e:
+                    self._log_warning(f"  ⚠ Could not pause: {e}")
+            
+            self._log_info("")
+
+            # ========================================
+            # STEP 3: Wait for Consumer to Disconnect
+            # ========================================
+            self._log_info("STEP 3/7: Waiting for consumer to disconnect...")
+            
+            import time
+            
+            # Progressive waiting with retries
+            max_attempts = 4
+            wait_intervals = [5, 10, 15, 20]  # Total: 50 seconds max
+            
+            for attempt in range(max_attempts):
+                wait_time = wait_intervals[attempt]
+                self._log_info(f"  → Attempt {attempt + 1}/{max_attempts}: Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                
+                # Try to delete group after each wait
+                try:
+                    success, error = self.topic_manager.delete_consumer_group(consumer_group_id)
+                    
+                    if success:
+                        self._log_info(f"  ✓ Consumer disconnected and group deleted after {sum(wait_intervals[:attempt+1])}s")
+                        break
+                    else:
+                        # Check if it's the NON_EMPTY error
+                        if error and ("NON_EMPTY_GROUP" in error or "not empty" in error.lower()):
+                            if attempt < max_attempts - 1:
+                                self._log_info(f"  ⏳ Consumer still connected, will retry...")
+                            else:
+                                self._log_warning(f"  ⚠ Consumer still connected after {sum(wait_intervals)}s")
+                                self._log_info(f"  → Skipping group deletion (Kafka will auto-clean)")
+                        else:
+                            # Different error - log and break
+                            if "NOT_FOUND" in error or "does not exist" in error.lower():
+                                self._log_info(f"  ✓ Group doesn't exist (already cleaned)")
+                            else:
+                                self._log_warning(f"  ⚠ Unexpected error: {error}")
+                            break
+                except Exception as e:
+                    self._log_warning(f"  ⚠ Error checking group: {e}")
+                    if attempt < max_attempts - 1:
+                        self._log_info(f"  → Will retry...")
+                    else:
+                        self._log_info(f"  → Continuing anyway")
+            
+            self._log_info("")
+
+            # STEP 4 is now merged into STEP 3
+
+            # ========================================
+            # STEP 4: Delete Debezium Connector
+            # ========================================
+            self._log_info("STEP 4/7: Deleting connector...")
+            
             try:
                 if connector_name:
                     self.connector_manager.delete_connector(
                         connector_name,
-                        delete_topics=bool(delete_topics)
+                        delete_topics=False  # We handle topic deletion separately
                     )
-                    self._log_info(f"✓ Connector deleted: {connector_name}")
+                    self._log_info(f"  ✓ Deleted: {connector_name}")
                 else:
-                    self._log_info("No connector to delete")
+                    self._log_info("  → No connector to delete")
             except Exception as e:
-                self._log_warning(f"Could not delete connector: {e}")
+                self._log_warning(f"  ⚠ Could not delete: {e}")
+            
+            self._log_info("")
 
-            # STEP 3: Clear connector offsets (mandatory)
-            self._log_info("STEP 3/4: Clearing connector offsets...")
+            # ========================================
+            # STEP 5: Clear Connector Offsets
+            # ========================================
+            self._log_info("STEP 5/7: Clearing connector offsets...")
+            
             try:
                 if connector_name:
-                    # Try with connector_name first
                     success = self.offset_manager.delete_connector_offsets(connector_name)
                     
                     if not success:
-                        # Fallback: try server-name variant
-                        server_name_guess = connector_name.replace('_connector', '')
-                        success = self.offset_manager.delete_connector_offsets(server_name_guess)
+                        server_name = connector_name.replace('_connector', '')
+                        success = self.offset_manager.delete_connector_offsets(server_name)
 
                     if success:
-                        self._log_info(f"✓ Offsets cleared for connector: {connector_name}")
+                        self._log_info(f"  ✓ Cleared offsets: {connector_name}")
                     else:
-                        error_msg = f"Failed to clear offsets for: {connector_name}"
-                        self._log_error(error_msg)
-                        return False, error_msg
+                        self._log_warning(f"  ⚠ Could not clear offsets")
                 else:
-                    self._log_info("No offsets to clear")
+                    self._log_info("  → No offsets to clear")
             except Exception as e:
-                error_msg = f"Failed to clear offsets: {str(e)}"
-                self._log_error(error_msg)
-                return False, error_msg
+                self._log_warning(f"  ⚠ Error: {e}")
             
-            # STEP 4: Delete consumer group (NEW)
-            self._log_info("STEP 4/5: Deleting consumer group...")
-            try:
-                topic_manager = KafkaTopicManager()
-                success, error = topic_manager.delete_consumer_group(consumer_group_id)
-                
-                if success:
-                    self._log_info(f"✓ Consumer group deleted: {consumer_group_id}")
-                else:
-                    # Don't fail the operation if consumer group deletion fails
-                    # It might not exist or might be auto-cleaned by Kafka
-                    self._log_warning(f"Could not delete consumer group: {error}")
-            except Exception as e:
-                self._log_warning(f"Error deleting consumer group: {e}")
+            self._log_info("")
 
-            # STEP 5: Delete ReplicationConfig from database (cascades to table/column mappings)
-            self._log_info("STEP 5/5: Deleting configuration from database...")
-            try:
-                # Use Django's queryset delete to bypass model's delete() method
-                # This ensures no signals or custom logic interferes
-                from client.models import ReplicationConfig
-                ReplicationConfig.objects.filter(pk=config_id).delete()
+            # ========================================
+            # STEP 6: Optionally Delete Topics
+            # ========================================
+            if delete_topics:
+                self._log_info("STEP 6/7: Deleting Kafka topics (DESTRUCTIVE)...")
                 
-                self._log_info(f"✓ Deleted ReplicationConfig (id={config_id})")
-                self._log_info("  → TableMapping records deleted (cascade)")
-                self._log_info("  → ColumnMapping records deleted (cascade)")
+                try:
+                    topic_prefix = self.config.kafka_topic_prefix
+                    topics_to_delete = self.topic_manager.list_topics(prefix=topic_prefix)
+                    
+                    if topics_to_delete:
+                        self._log_info(f"  → Found {len(topics_to_delete)} topics")
+                        
+                        deleted = 0
+                        for topic in topics_to_delete:
+                            try:
+                                success, error = self.topic_manager.delete_topic(topic)
+                                if success:
+                                    self._log_info(f"    ✓ {topic}")
+                                    deleted += 1
+                                else:
+                                    self._log_warning(f"    ✗ {topic}: {error}")
+                            except Exception as e:
+                                self._log_warning(f"    ✗ {topic}: {e}")
+                        
+                        self._log_info(f"  ✓ Deleted {deleted}/{len(topics_to_delete)} topics")
+                        self._log_info("  ⚠ ALL MESSAGES PERMANENTLY DELETED")
+                    else:
+                        self._log_info("  → No topics found")
+                except Exception as e:
+                    self._log_warning(f"  ⚠ Error: {e}")
+            else:
+                self._log_info("STEP 6/7: Skipping topic deletion")
+                self._log_info(f"  → Topics preserved: {self.config.kafka_topic_prefix}.*")
+            
+            self._log_info("")
+
+            # ========================================
+            # STEP 7: Delete ReplicationConfig
+            # ========================================
+            self._log_info("STEP 7/7: Deleting configuration...")
+            
+            try:
+                from client.models import ReplicationConfig
+                
+                deleted_count, details = ReplicationConfig.objects.filter(pk=config_id).delete()
+                
+                self._log_info(f"  ✓ Deleted ReplicationConfig (id={config_id})")
+                
+                for model, count in details.items():
+                    if count > 0 and 'ReplicationConfig' not in model:
+                        self._log_info(f"    → {model}: {count} deleted (cascade)")
+                        
             except Exception as e:
-                error_msg = f"Failed to delete configuration from database: {str(e)}"
-                self._log_error(error_msg)
+                error_msg = f"Failed to delete config: {str(e)}"
+                self._log_error(f"  ✗ {error_msg}")
                 return False, error_msg
 
-            self._log_info("=" * 60)
-            self._log_info("✓ REPLICATION DELETED SUCCESSFULLY")
-            self._log_info("=" * 60)
-            self._log_info(f"Connector: {connector_name}")
-            self._log_info(f"Config ID: {config_id}")
-            self._log_info("All database records removed")
-            self._log_info("=" * 60)
+            # ========================================
+            # Success
+            # ========================================
+            self._log_info("")
+            self._log_info("=" * 80)
+            self._log_info("✓ REPLICATION DELETED")
+            self._log_info("=" * 80)
+            self._log_info(f"Connector:      {connector_name}")
+            self._log_info(f"Consumer Group: {consumer_group_id}")
+            self._log_info(f"Topics:         {self.config.kafka_topic_prefix}.* ({'DELETED' if delete_topics else 'PRESERVED'})")
+            self._log_info(f"Config:         {config_id}")
+            
+            if not delete_topics:
+                self._log_info("")
+                self._log_info("💡 Topics preserved - can be replayed later")
+            
+            self._log_info("=" * 80)
 
             return True, "Replication deleted successfully"
 
         except Exception as e:
-            error_msg = f"Failed to delete replication: {str(e)}"
+            import traceback
+            error_msg = f"Failed to delete: {str(e)}"
             self._log_error(error_msg)
+            self._log_error(traceback.format_exc())
             return False, error_msg
-    
+
     # ==========================================
     # Status and Health
     # ==========================================
