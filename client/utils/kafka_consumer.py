@@ -6,7 +6,7 @@ Kafka Consumer for Debezium CDC Events (multi-topic + table prefixing)
 import json
 import logging
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from confluent_kafka import KafkaError
 from confluent_kafka.avro import AvroConsumer
 from sqlalchemy import MetaData, Table, Column, inspect, text
@@ -311,20 +311,24 @@ class DebeziumCDCConsumer:
             logger.error(f"   ❌ Error looking up TableMapping: {e}")
             return None
 
+    """
+    Fix for convert_debezium_timestamps in kafka_consumer.py
+    Replace the integer handling section (around line 370-400)
+    """
+
+    from datetime import datetime, date, timedelta
+
     def convert_debezium_timestamps(self, row: dict, table: Table = None) -> dict:
         """
         Convert Debezium timestamp/date fields based on actual table schema.
-
+        
+        Debezium encoding for dates:
+        - DATE: Integer (days since Unix epoch 1970-01-01)
+        - DATETIME/TIMESTAMP: Long integer (milliseconds since Unix epoch)
+        
         Args:
             row: Dictionary of column names to values
             table: SQLAlchemy Table object to determine column types (optional)
-                   If None, uses heuristic-based detection for initial table creation
-
-        Handles:
-        - Unix timestamps (seconds or milliseconds)
-        - ISO datetime strings
-        - Weird integers like 20238
-        - Mixed date/datetime fields
 
         Returns: dict with date/datetime fields converted to proper Python objects
         """
@@ -332,8 +336,6 @@ class DebeziumCDCConsumer:
             return row
 
         # Determine which columns are date/time columns
-        # Strategy 1: Use table schema if available (most reliable)
-        # Strategy 2: Use heuristics if table is None (for initial table creation)
         date_time_columns = {}  # col_name -> col_type
 
         if table is not None:
@@ -360,7 +362,6 @@ class DebeziumCDCConsumer:
                 col_type = date_time_columns[key]
             else:
                 # Use heuristic-based detection for table creation
-                # Check common date/time column naming patterns
                 if not any([
                     key.endswith('_at'),
                     key.endswith('_time'),
@@ -384,37 +385,44 @@ class DebeziumCDCConsumer:
                 if isinstance(value, (datetime, date)):
                     parsed = value
 
-                # ---- Case 2: Integer timestamp or malformed numeric ----
+                # ---- Case 2: Integer timestamp ----
                 elif isinstance(value, int):
-                    if value > 1000000000000:  # milliseconds
+                    # Debezium date encoding logic:
+                    # - Small integers (< 100000) = days since Unix epoch (for DATE fields)
+                    # - Large integers (> 1000000000) = milliseconds since Unix epoch (for DATETIME/TIMESTAMP)
+                    
+                    if value > 1000000000000:  # milliseconds (DATETIME/TIMESTAMP)
                         parsed = datetime.fromtimestamp(value / 1000.0)
-                    elif value > 1000000000:  # seconds
+                        logger.debug(f"Converted {key}={value} from milliseconds to {parsed}")
+                    
+                    elif value > 1000000000:  # seconds (older DATETIME/TIMESTAMP encoding)
                         parsed = datetime.fromtimestamp(value)
+                        logger.debug(f"Converted {key}={value} from seconds to {parsed}")
+                    
+                    elif value >= -719162 and value <= 2932896:  
+                        # Debezium DATE encoding: days since Unix epoch (1970-01-01)
+                        # Valid range: ~0001-01-01 to ~9999-12-31
+                        # Example: 20238 days = 2025-05-30
+                        unix_epoch = date(1970, 1, 1)
+                        parsed = unix_epoch + timedelta(days=value)
+                        logger.debug(f"Converted {key}={value} (days since epoch) to {parsed}")
+                    
                     else:
-                        # Handle short numeric dates (YYYYMMDD, YYYYMM, etc.)
+                        # Fallback: Try parsing as YYYYMMDD, YYYYMM, etc.
                         s = str(value)
                         try:
                             if len(s) == 8:  # YYYYMMDD
                                 parsed = datetime.strptime(s, "%Y%m%d")
-                            elif len(s) == 6:  # YYYYMM - treat as first day of month
+                            elif len(s) == 6:  # YYYYMM
                                 parsed = datetime.strptime(s + "01", "%Y%m%d")
-                            elif len(s) == 5:  # 20238 -> 2023-08-01
-                                year = int(s[:4])
-                                month = int(s[4:])
-                                if 1 <= month <= 12:
-                                    parsed = datetime(year, month, 1)
-                                else:
-                                    logger.warning(f"Invalid month in {key}={value}, defaulting to None")
-                                    converted[key] = None
-                                    continue
-                            elif len(s) == 4:  # just a year - first day of year
+                            elif len(s) == 4:  # YYYY
                                 parsed = datetime(int(s), 1, 1)
                             else:
-                                logger.warning(f"Cannot parse short numeric date {key}={value}, setting to None")
+                                logger.warning(f"Cannot parse numeric date {key}={value}, setting to None")
                                 converted[key] = None
                                 continue
                         except (ValueError, OverflowError) as e:
-                            logger.warning(f"Failed to interpret numeric date {key}={value}: {e}, setting to None")
+                            logger.warning(f"Failed to parse {key}={value}: {e}, setting to None")
                             converted[key] = None
                             continue
 
@@ -438,9 +446,7 @@ class DebeziumCDCConsumer:
 
                 # ---- Final Conversion ----
                 if parsed:
-                    # Convert based on column type (if known from schema) or use smart default (if heuristic)
-                    # col_type is already set from the detection logic above
-
+                    # Convert based on column type
                     if col_type == 'Date' or col_type == 'DATE':
                         # DATE column - return date object
                         if isinstance(parsed, datetime):
@@ -470,7 +476,7 @@ class DebeziumCDCConsumer:
                         else:
                             converted[key] = parsed
                 else:
-                    # Could not parse - set to None to avoid MySQL errors
+                    # Could not parse - set to None
                     logger.warning(f"Could not parse {key}={value}, setting to None")
                     converted[key] = None
 
@@ -479,8 +485,6 @@ class DebeziumCDCConsumer:
                 converted[key] = None
 
         return converted
-
-
 
     # -------------------------
     # Apply operations
