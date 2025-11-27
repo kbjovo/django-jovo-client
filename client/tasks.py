@@ -177,8 +177,11 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
             consumer_group = consumer_group_override
             logger.info(f"✓ Using custom consumer group: {consumer_group}")
         else:
-            consumer_group = f"cdc_consumer_{client.id}_{config.id}"
-            logger.info(f"✓ Using default consumer group: {consumer_group}")
+            # Use database-based consumer group (same as orchestrator)
+            # Format: cdc_consumer_{client_id}_{database_name}
+            database_name = config.client_database.database_name
+            consumer_group = f"cdc_consumer_{client.id}_{database_name}"
+            logger.info(f"✓ Using database-based consumer group: {consumer_group}")
 
         # Update config with task ID
         config.consumer_task_id = self.request.id

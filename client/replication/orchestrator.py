@@ -144,7 +144,7 @@ class ReplicationOrchestrator:
             self._log_info("Status: ACTIVE")
             self._log_info(f"Connector: {self.config.connector_name}")
             self._log_info(f"Topics: {self.config.kafka_topic_prefix}.*")
-            self._log_info(f"Consumer Group: cdc_consumer_{self.config.client_database.client.id}_{self.config.id}")
+            self._log_info(f"Consumer Group: cdc_consumer_{self.config.client_database.client.id}_{self.config.client_database.database_name}")
             self._log_info("")
             self._log_info("Next steps:")
             self._log_info("  1. Monitor initial snapshot progress in Debezium logs")
@@ -229,177 +229,27 @@ class ReplicationOrchestrator:
 
         return True, "Replication restarted successfully"
 
-    # def delete_replication(self, delete_topics: bool = False) -> Tuple[bool, str]:
-    #     """
-    #     Delete replication resources and configuration.
-
-    #     This method performs complete cleanup:
-    #     1. Stops replication (consumer)
-    #     2. Deletes Debezium connector (without deleting topics by default)
-    #     3. Clears connector offsets (mandatory)
-    #     4. Deletes ReplicationConfig from database (cascades to table/column mappings)
-
-    #     Args:
-    #         delete_topics: Whether to delete Kafka topics (default: False for safety)
-
-    #     Returns:
-    #         (success, message)
-    #     """
-    #     self._log_info("=" * 60)
-    #     self._log_info("DELETING REPLICATION")
-    #     self._log_info("=" * 60)
-
-    #     # Store config details before deletion
-    #     config_id = self.config.id
-    #     connector_name = self.config.connector_name
-    #     client_id = self.config.client_database.client.id
-    
-    #     # Build consumer group ID (same pattern as used in _start_consumer_with_fresh_group)
-    #     consumer_group_id = f"cdc_consumer_{client_id}_{config_id}"
-        
-    #     try:
-    #         # STEP 1: Stop consumer (CRITICAL - must stop before deleting group)
-    #         self._log_info("STEP 1/5: Stopping consumer...")
-    #         try:
-    #             # Mark as inactive to stop consumer loop
-    #             self.config.is_active = False
-    #             self.config.status = 'stopping'
-    #             self.config.save()
-                
-    #             # Revoke Celery task if it exists
-    #             if self.config.consumer_task_id:
-    #                 try:
-    #                     from jovoclient.celery import app as celery_app
-    #                     celery_app.control.revoke(
-    #                         self.config.consumer_task_id,
-    #                         terminate=True,
-    #                         signal='SIGTERM'
-    #                     )
-    #                     self._log_info(f"✓ Revoked Celery task: {self.config.consumer_task_id}")
-    #                 except Exception as e:
-    #                     self._log_warning(f"Could not revoke Celery task: {e}")
-                
-    #             # Pause connector to stop new messages
-    #             if connector_name:
-    #                 try:
-    #                     self.connector_manager.pause_connector(connector_name)
-    #                     self._log_info(f"✓ Connector paused: {connector_name}")
-    #                 except Exception as e:
-    #                     self._log_warning(f"Could not pause connector: {e}")
-                
-    #             # CRITICAL: Wait for consumer to actually disconnect
-    #             # The consumer checks is_active every 2 seconds in _consume_with_heartbeat
-    #             import time
-    #             self._log_info("⏳ Waiting 5 seconds for consumer to disconnect...")
-    #             time.sleep(5)
-                
-    #             self._log_info("✓ Consumer stop signal sent")
-    #         except Exception as e:
-    #             self._log_warning(f"Error while stopping consumer: {e}")
-
-    #         # STEP 2: Delete Debezium connector (do NOT delete topics by default)
-    #         self._log_info("STEP 2/4: Deleting Debezium connector...")
-    #         try:
-    #             if connector_name:
-    #                 self.connector_manager.delete_connector(
-    #                     connector_name,
-    #                     delete_topics=bool(delete_topics)
-    #                 )
-    #                 self._log_info(f"✓ Connector deleted: {connector_name}")
-    #             else:
-    #                 self._log_info("No connector to delete")
-    #         except Exception as e:
-    #             self._log_warning(f"Could not delete connector: {e}")
-
-    #         # STEP 3: Clear connector offsets (mandatory)
-    #         self._log_info("STEP 3/4: Clearing connector offsets...")
-    #         try:
-    #             if connector_name:
-    #                 # Try with connector_name first
-    #                 success = self.offset_manager.delete_connector_offsets(connector_name)
-                    
-    #                 if not success:
-    #                     # Fallback: try server-name variant
-    #                     server_name_guess = connector_name.replace('_connector', '')
-    #                     success = self.offset_manager.delete_connector_offsets(server_name_guess)
-
-    #                 if success:
-    #                     self._log_info(f"✓ Offsets cleared for connector: {connector_name}")
-    #                 else:
-    #                     error_msg = f"Failed to clear offsets for: {connector_name}"
-    #                     self._log_error(error_msg)
-    #                     return False, error_msg
-    #             else:
-    #                 self._log_info("No offsets to clear")
-    #         except Exception as e:
-    #             error_msg = f"Failed to clear offsets: {str(e)}"
-    #             self._log_error(error_msg)
-    #             return False, error_msg
-            
-    #         # STEP 4: Delete consumer group (NEW)
-    #         self._log_info("STEP 4/5: Deleting consumer group...")
-    #         try:
-    #             topic_manager = KafkaTopicManager()
-    #             success, error = topic_manager.delete_consumer_group(consumer_group_id)
-                
-    #             if success:
-    #                 self._log_info(f"✓ Consumer group deleted: {consumer_group_id}")
-    #             else:
-    #                 # Don't fail the operation if consumer group deletion fails
-    #                 # It might not exist or might be auto-cleaned by Kafka
-    #                 self._log_warning(f"Could not delete consumer group: {error}")
-    #         except Exception as e:
-    #             self._log_warning(f"Error deleting consumer group: {e}")
-
-    #         # STEP 5: Delete ReplicationConfig from database (cascades to table/column mappings)
-    #         self._log_info("STEP 5/5: Deleting configuration from database...")
-    #         try:
-    #             # Use Django's queryset delete to bypass model's delete() method
-    #             # This ensures no signals or custom logic interferes
-    #             from client.models import ReplicationConfig
-    #             ReplicationConfig.objects.filter(pk=config_id).delete()
-                
-    #             self._log_info(f"✓ Deleted ReplicationConfig (id={config_id})")
-    #             self._log_info("  → TableMapping records deleted (cascade)")
-    #             self._log_info("  → ColumnMapping records deleted (cascade)")
-    #         except Exception as e:
-    #             error_msg = f"Failed to delete configuration from database: {str(e)}"
-    #             self._log_error(error_msg)
-    #             return False, error_msg
-
-    #         self._log_info("=" * 60)
-    #         self._log_info("✓ REPLICATION DELETED SUCCESSFULLY")
-    #         self._log_info("=" * 60)
-    #         self._log_info(f"Connector: {connector_name}")
-    #         self._log_info(f"Config ID: {config_id}")
-    #         self._log_info("All database records removed")
-    #         self._log_info("=" * 60)
-
-    #         return True, "Replication deleted successfully"
-
-    #     except Exception as e:
-    #         error_msg = f"Failed to delete replication: {str(e)}"
-    #         self._log_error(error_msg)
-    #         return False, error_msg
-    
-
     def delete_replication(self, delete_topics: bool = False) -> Tuple[bool, str]:
         """
-        Delete replication with simplified consumer group cleanup.
-        
-        SIMPLIFIED APPROACH:
+        Delete replication completely.
+
+        FLOW:
         1. Stop consumer (Celery task + mark inactive)
         2. Pause connector (stop producing)
-        3. Wait fixed time for consumer to disconnect
-        4. Try to delete consumer group (ignore failures - Kafka auto-cleans)
-        5. Delete connector
-        6. Clear offsets
-        7. Optionally delete topics
-        8. Delete config
-        
+        3. Skip consumer group deletion (database-based groups are reused)
+        4. Delete connector
+        5. Clear offsets
+        6. Optionally delete topics
+        7. Delete config
+
+        NOTE: Consumer groups are NOT deleted because:
+        - Database-based naming allows reuse for new connectors
+        - Kafka auto-cleans inactive groups after retention period
+        - Deletion attempts often fail if consumer hasn't fully disconnected
+
         Args:
             delete_topics: If True, permanently delete Kafka topics
-            
+
         Returns:
             (success, message)
         """
@@ -410,7 +260,9 @@ class ReplicationOrchestrator:
         config_id = self.config.id
         connector_name = self.config.connector_name
         client_id = self.config.client_database.client.id
-        consumer_group_id = f"cdc_consumer_{client_id}_{config_id}"
+        database_name = self.config.client_database.database_name
+        # Use database-based consumer group ID (same as in _start_consumer_with_fresh_group)
+        consumer_group_id = f"cdc_consumer_{client_id}_{database_name}"
         
         try:
             # ========================================
@@ -429,7 +281,7 @@ class ReplicationOrchestrator:
             if self.config.consumer_task_id:
                 try:
                     from jovoclient.celery import app as celery_app
-                    
+
                     # First try graceful termination
                     celery_app.control.revoke(
                         self.config.consumer_task_id,
@@ -437,21 +289,51 @@ class ReplicationOrchestrator:
                         signal='SIGTERM'
                     )
                     self._log_info(f"  → Sent SIGTERM to: {self.config.consumer_task_id}")
-                    
+
                     # Wait 2 seconds then force kill
                     import time
                     time.sleep(2)
-                    
+
                     celery_app.control.revoke(
                         self.config.consumer_task_id,
                         terminate=True,
                         signal='SIGKILL'
                     )
                     self._log_info(f"  ✓ Force killed task: {self.config.consumer_task_id}")
-                    
+
                 except Exception as e:
                     self._log_warning(f"  ⚠ Could not revoke task: {e}")
-            
+
+            # Check for any other orphaned tasks for this config and kill them too
+            self._log_info("  → Checking for orphaned consumer tasks...")
+            try:
+                from jovoclient.celery import app as celery_app
+                inspect = celery_app.control.inspect()
+                active_tasks = inspect.active()
+
+                orphaned_count = 0
+                if active_tasks:
+                    for worker, tasks in active_tasks.items():
+                        for task in tasks:
+                            if (task['name'] == 'client.tasks.start_kafka_consumer' and
+                                str(config_id) in str(task.get('args', []))):
+
+                                celery_app.control.revoke(
+                                    task['id'],
+                                    terminate=True,
+                                    signal='SIGKILL'
+                                )
+                                self._log_info(f"    ✓ Killed orphaned task: {task['id']}")
+                                orphaned_count += 1
+
+                if orphaned_count == 0:
+                    self._log_info(f"    ✓ No orphaned tasks found")
+                else:
+                    self._log_info(f"    ✓ Killed {orphaned_count} orphaned task(s)")
+
+            except Exception as e:
+                self._log_warning(f"  ⚠ Error checking for orphaned tasks: {e}")
+
             self._log_info("")
 
             # ========================================
@@ -469,53 +351,13 @@ class ReplicationOrchestrator:
             self._log_info("")
 
             # ========================================
-            # STEP 3: Wait for Consumer to Disconnect
+            # STEP 3: Skip Consumer Group Deletion (Now using database-based groups)
             # ========================================
-            self._log_info("STEP 3/7: Waiting for consumer to disconnect...")
-            
-            import time
-            
-            # Progressive waiting with retries
-            max_attempts = 4
-            wait_intervals = [5, 10, 15, 20]  # Total: 50 seconds max
-            
-            for attempt in range(max_attempts):
-                wait_time = wait_intervals[attempt]
-                self._log_info(f"  → Attempt {attempt + 1}/{max_attempts}: Waiting {wait_time}s...")
-                time.sleep(wait_time)
-                
-                # Try to delete group after each wait
-                try:
-                    success, error = self.topic_manager.delete_consumer_group(consumer_group_id)
-                    
-                    if success:
-                        self._log_info(f"  ✓ Consumer disconnected and group deleted after {sum(wait_intervals[:attempt+1])}s")
-                        break
-                    else:
-                        # Check if it's the NON_EMPTY error
-                        if error and ("NON_EMPTY_GROUP" in error or "not empty" in error.lower()):
-                            if attempt < max_attempts - 1:
-                                self._log_info(f"  ⏳ Consumer still connected, will retry...")
-                            else:
-                                self._log_warning(f"  ⚠ Consumer still connected after {sum(wait_intervals)}s")
-                                self._log_info(f"  → Skipping group deletion (Kafka will auto-clean)")
-                        else:
-                            # Different error - log and break
-                            if "NOT_FOUND" in error or "does not exist" in error.lower():
-                                self._log_info(f"  ✓ Group doesn't exist (already cleaned)")
-                            else:
-                                self._log_warning(f"  ⚠ Unexpected error: {error}")
-                            break
-                except Exception as e:
-                    self._log_warning(f"  ⚠ Error checking group: {e}")
-                    if attempt < max_attempts - 1:
-                        self._log_info(f"  → Will retry...")
-                    else:
-                        self._log_info(f"  → Continuing anyway")
-            
+            self._log_info("STEP 3/7: Skipping consumer group deletion...")
+            self._log_info(f"  → Consumer group: {consumer_group_id}")
+            self._log_info(f"  → Database-based naming allows group reuse for new connectors")
+            self._log_info(f"  → Kafka will auto-clean inactive groups after retention period")
             self._log_info("")
-
-            # STEP 4 is now merged into STEP 3
 
             # ========================================
             # STEP 4: Delete Debezium Connector
@@ -924,20 +766,26 @@ class ReplicationOrchestrator:
 
     def _start_consumer_with_fresh_group(self) -> Tuple[bool, str]:
         """
-        Start consumer with timestamp-based group ID.
-        This ensures no offset conflicts - always starts fresh.
+        Start consumer with database-based group ID.
+
+        IMPORTANT: Consumer group is based on client_id + database_name, NOT config_id.
+        This ensures that the same topic always uses the same consumer group,
+        preventing duplicate message consumption when recreating connectors.
+
+        Example: cdc_consumer_1_mydb (client 1, database mydb)
         """
         try:
             import time
             from client.tasks import start_kafka_consumer
 
-            # Generate fresh consumer group ID
-            # timestamp = int(time.time())
+            # Generate database-based consumer group ID
+            # Format: cdc_consumer_{client_id}_{database_name}
             client_id = self.config.client_database.client.id
-            config_id = self.config.id
-            consumer_group = f"cdc_consumer_{client_id}_{config_id}"
+            database_name = self.config.client_database.database_name
+            consumer_group = f"cdc_consumer_{client_id}_{database_name}"
 
             self._log_info(f"Starting consumer with group: {consumer_group}")
+            self._log_info(f"  (database-based naming ensures no duplicates on connector recreation)")
 
             # Queue consumer task with custom group ID
             result = start_kafka_consumer.apply_async(

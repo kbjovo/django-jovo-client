@@ -457,10 +457,7 @@ def cdc_create_connector(request, config_pk):
                         f'{len(tables_list)} tables are now being replicated in real-time.'
                     )
                 else:
-                    messages.warning(
-                        request,
-                        f'⚠️ Configuration saved, but failed to start: {message}'
-                    )
+                    messages.warning(request, f'⚠️ Configuration saved, but failed to start: {message}')
             else:
                 # Just save configuration
                 messages.success(
@@ -1110,41 +1107,44 @@ def cdc_edit_config(request, config_pk):
 def cdc_delete_config(request, config_pk):
     """
     Delete replication configuration (for incomplete setups or when no longer needed)
+
+    Now uses ReplicationOrchestrator for proper cleanup:
+    - Stops consumer tasks
+    - Pauses and deletes connector
+    - Clears offsets
+    - Optionally deletes Kafka topics
+    - Deletes database configuration
     """
     try:
         replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
 
         logger.info(f"Deleting replication config {config_pk} (connector: {replication_config.connector_name})")
 
-        # If connector exists, delete it first (along with its topics)
-        if replication_config.connector_name:
-            try:
-                manager = DebeziumConnectorManager()
-                success, error = manager.delete_connector(
-                    replication_config.connector_name,
-                    notify=True,
-                    delete_topics=True  # Explicitly delete associated Kafka topics
-                )
-                if not success:
-                    logger.warning(f"Failed to delete connector: {error}")
-                    # Continue anyway to delete the config from database
-                else:
-                    logger.info(f"Successfully deleted connector and topics for {replication_config.connector_name}")
-            except Exception as e:
-                logger.error(f"Error deleting connector: {e}")
-                # Continue anyway to delete the config from database
+        # Check if user wants to delete topics (from query parameter)
+        delete_topics = request.GET.get('delete_topics', 'false').lower() == 'true'
 
-        # Delete the replication config (cascade will delete table/column mappings)
-        replication_config.delete()
-        logger.info(f"Successfully deleted replication config {config_pk}")
+        # Use orchestrator for proper cleanup
+        orchestrator = ReplicationOrchestrator(replication_config)
+        success, message = orchestrator.delete_replication(delete_topics=delete_topics)
 
-        return JsonResponse({
-            'success': True,
-            'message': 'Configuration deleted successfully'
-        })
+        if success:
+            logger.info(f"✅ Successfully deleted replication config {config_pk}")
+
+            from django.urls import reverse
+            return JsonResponse({
+                'success': True,
+                'message': message,
+                'redirect_url': reverse('replications_list')
+            })
+        else:
+            logger.error(f"❌ Failed to delete replication config: {message}")
+            return JsonResponse({
+                'success': False,
+                'error': message
+            }, status=500)
 
     except Exception as e:
-        logger.error(f"Failed to delete configuration: {e}", exc_info=True)
+        logger.error(f"❌ Failed to delete configuration: {e}", exc_info=True)
         return JsonResponse({
             'success': False,
             'error': str(e)

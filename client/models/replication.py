@@ -168,30 +168,157 @@ class ReplicationConfig(models.Model):
             total += table_mapping.column_mappings.filter(is_enabled=True).count()
         return total
     
-        # --- PATCH: ReplicationConfig.delete (client/models/replication.py) ---
-    def delete(self, *args, **kwargs):
+    def delete(self, using=None, keep_parents=False, *args, **kwargs):
         """
-        Override delete to perform simple cascade deletion.
-        
-        NOTE: This does NOT clean up Debezium connector or offsets.
-        For proper cleanup with connector/offset removal, use:
+        Override delete to ensure proper cleanup of all CDC resources.
+
+        This method automatically:
+        1. Stops and revokes consumer Celery tasks
+        2. Pauses the Debezium connector
+        3. Deletes the connector from Kafka Connect
+        4. Clears connector offsets
+        5. Deletes the model from database (cascades to TableMapping/ColumnMapping)
+
+        For deletion with topic removal, use:
             orchestrator = ReplicationOrchestrator(config)
-            orchestrator.delete_replication()
-        
-        This method only handles direct model deletion (e.g., via admin panel).
-        The orchestrator handles the complete cleanup workflow.
+            orchestrator.delete_replication(delete_topics=True)
         """
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        logger.info(f"Deleting ReplicationConfig {self.id} (simple cascade)")
-        logger.info(f"  Connector: {self.connector_name}")
-        logger.info(f"  Note: Use ReplicationOrchestrator.delete_replication() for full cleanup")
-        
-        # Just delete the model - Django will cascade to TableMapping and ColumnMapping
-        super().delete(*args, **kwargs)
-        
-        logger.info(f"✓ ReplicationConfig {self.id} deleted from database")
+        logger.info(f"🗑️ Deleting ReplicationConfig {self.id}")
+        logger.info(f"   Connector: {self.connector_name}")
+        logger.info(f"   Using orchestrated cleanup for proper resource management")
+
+        # Store config details before deletion
+        config_id = self.id
+        connector_name = self.connector_name
+        client_id = self.client_database.client.id
+        database_name = self.client_database.database_name
+        consumer_group_id = f"cdc_consumer_{client_id}_{database_name}"
+
+        try:
+            # ========================================
+            # STEP 1: Stop Consumer Tasks
+            # ========================================
+            logger.info("  → Stopping consumer tasks...")
+
+            # Mark as inactive first
+            self.is_active = False
+            self.status = 'stopping'
+            self.consumer_state = 'STOPPING'
+            self.save(using=using)
+
+            # Revoke Celery task if exists
+            if self.consumer_task_id:
+                try:
+                    from jovoclient.celery import app as celery_app
+
+                    # Try graceful termination
+                    celery_app.control.revoke(
+                        self.consumer_task_id,
+                        terminate=True,
+                        signal='SIGTERM'
+                    )
+                    logger.info(f"    ✓ Sent SIGTERM to task: {self.consumer_task_id}")
+
+                    # Wait briefly, then force kill
+                    import time
+                    time.sleep(1)
+
+                    celery_app.control.revoke(
+                        self.consumer_task_id,
+                        terminate=True,
+                        signal='SIGKILL'
+                    )
+                    logger.info(f"    ✓ Force killed task: {self.consumer_task_id}")
+
+                except Exception as e:
+                    logger.warning(f"    ⚠ Could not revoke task: {e}")
+
+            # Check for any other tasks for this config and kill them too
+            try:
+                from jovoclient.celery import app as celery_app
+                inspect = celery_app.control.inspect()
+                active_tasks = inspect.active()
+
+                if active_tasks:
+                    for worker, tasks in active_tasks.items():
+                        for task in tasks:
+                            if (task['name'] == 'client.tasks.start_kafka_consumer' and
+                                str(config_id) in str(task.get('args', []))):
+
+                                celery_app.control.revoke(
+                                    task['id'],
+                                    terminate=True,
+                                    signal='SIGKILL'
+                                )
+                                logger.info(f"    ✓ Killed orphaned task: {task['id']}")
+            except Exception as e:
+                logger.warning(f"    ⚠ Error checking for orphaned tasks: {e}")
+
+            # ========================================
+            # STEP 2: Clean up Debezium Connector
+            # ========================================
+            if connector_name:
+                logger.info(f"  → Cleaning up connector: {connector_name}")
+
+                try:
+                    from client.utils.debezium_manager import DebeziumConnectorManager
+                    manager = DebeziumConnectorManager()
+
+                    # Pause connector first
+                    try:
+                        manager.pause_connector(connector_name)
+                        logger.info(f"    ✓ Paused connector")
+                    except Exception as e:
+                        logger.warning(f"    ⚠ Could not pause: {e}")
+
+                    # Delete connector
+                    try:
+                        manager.delete_connector(connector_name, delete_topics=False)
+                        logger.info(f"    ✓ Deleted connector")
+                    except Exception as e:
+                        logger.warning(f"    ⚠ Could not delete: {e}")
+
+                    # Clear offsets
+                    try:
+                        from client.utils.offset_manager import DebeziumOffsetManager
+                        offset_manager = DebeziumOffsetManager()
+
+                        success = offset_manager.delete_connector_offsets(connector_name)
+                        if not success:
+                            # Try with server name (without _connector suffix)
+                            server_name = connector_name.replace('_connector', '')
+                            success = offset_manager.delete_connector_offsets(server_name)
+
+                        if success:
+                            logger.info(f"    ✓ Cleared offsets")
+                        else:
+                            logger.warning(f"    ⚠ Could not clear offsets")
+                    except Exception as e:
+                        logger.warning(f"    ⚠ Error clearing offsets: {e}")
+
+                except Exception as e:
+                    logger.error(f"    ❌ Error during connector cleanup: {e}")
+
+            # ========================================
+            # STEP 3: Delete Model
+            # ========================================
+            logger.info(f"  → Deleting model from database...")
+            super().delete(using=using, keep_parents=keep_parents)
+
+            logger.info(f"✅ Successfully deleted ReplicationConfig {config_id}")
+            logger.info(f"   Connector: {connector_name}")
+            logger.info(f"   Consumer Group: {consumer_group_id} (preserved)")
+            logger.info(f"   Topics: preserved (use orchestrator.delete_replication(delete_topics=True) to delete)")
+
+        except Exception as e:
+            logger.error(f"❌ Error during ReplicationConfig deletion: {e}", exc_info=True)
+            # Still try to delete the model even if cleanup failed
+            try:
+                super().delete(using=using, keep_parents=keep_parents)
+                logger.warning(f"⚠️ Model deleted but cleanup may be incomplete")
+            except Exception as e2:
+                logger.error(f"❌ Failed to delete model: {e2}")
+                raise
 
 
 
