@@ -27,7 +27,6 @@ from .views import (
     cdc_edit_config,
     cdc_delete_config,
     cdc_config_details,
-    cdc_config_update,
     ajax_get_table_schema,
     ajax_get_table_schemas_batch,
     start_replication,
@@ -125,7 +124,6 @@ urlpatterns = [
          name='ajax_get_table_schema'),
 
     path('cdc/config/<int:config_pk>/details/', cdc_config_details, name='cdc_config_details'),
-    path('cdc/config/<int:config_pk>/update/', cdc_config_update, name='cdc_config_update'),
     path('database/<int:database_pk>/table-schemas/', ajax_get_table_schemas_batch, name='ajax_get_table_schemas_batch'),
 ]
 

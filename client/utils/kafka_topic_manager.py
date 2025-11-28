@@ -261,6 +261,97 @@ class KafkaTopicManager:
 
         return self.create_topics_bulk(topic_names)
 
+    def create_signal_topic(self, topic_prefix: str) -> Tuple[bool, Optional[str]]:
+        """
+        Create Debezium signal topic for Kafka-based signaling
+
+        Args:
+            topic_prefix: Topic prefix (e.g., 'client_1_db_2')
+
+        Returns:
+            Tuple[bool, Optional[str]]: (success, error_message)
+        """
+        signal_topic = f"{topic_prefix}.signals"
+
+        logger.info(f"Creating Debezium signal topic: {signal_topic}")
+
+        result = self.create_topics_bulk([signal_topic])
+        success = result.get(signal_topic, False)
+
+        if success:
+            return True, None
+        else:
+            return False, f"Failed to create signal topic: {signal_topic}"
+
+    def create_topics_bulk(self, topic_names: List[str]) -> Dict[str, bool]:
+        """
+        Create multiple Kafka topics at once
+
+        Args:
+            topic_names: List of topic names to create
+
+        Returns:
+            Dict mapping topic name to success status
+        """
+        from confluent_kafka.admin import NewTopic
+
+        results = {}
+
+        try:
+            # Check which topics already exist
+            existing_topics = set(self.list_topics())
+
+            # Filter out topics that already exist
+            topics_to_create = []
+            for topic_name in topic_names:
+                if topic_name in existing_topics:
+                    logger.info(f"Topic already exists: {topic_name}")
+                    results[topic_name] = True  # Already exists = success
+                else:
+                    topics_to_create.append(topic_name)
+
+            # Create new topics
+            if topics_to_create:
+                new_topics = [
+                    NewTopic(
+                        topic=topic,
+                        num_partitions=self.config['PARTITIONS'],
+                        replication_factor=self.config['REPLICATION_FACTOR'],
+                        config={
+                            'retention.ms': str(self.config['RETENTION_MS']),
+                            'retention.bytes': str(self.config['RETENTION_BYTES']),
+                            'cleanup.policy': self.config['CLEANUP_POLICY'],
+                            'compression.type': self.config['COMPRESSION_TYPE'],
+                            'min.insync.replicas': str(self.config['MIN_INSYNC_REPLICAS']),
+                        }
+                    )
+                    for topic in topics_to_create
+                ]
+
+                # Create topics asynchronously
+                fs = self.admin_client.create_topics(new_topics, request_timeout=30)
+
+                # Wait for creation to complete
+                for topic, future in fs.items():
+                    try:
+                        future.result()  # Wait for operation to complete
+                        logger.info(f"✅ Created topic: {topic}")
+                        results[topic] = True
+                    except Exception as e:
+                        error_msg = f"Failed to create topic {topic}: {str(e)}"
+                        logger.error(error_msg)
+                        results[topic] = False
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in bulk topic creation: {e}")
+            # Mark all as failed if there was a general error
+            for topic in topic_names:
+                if topic not in results:
+                    results[topic] = False
+            return results
+
     def get_summary(self) -> Dict:
         """
         Get summary of Kafka topic configuration

@@ -107,6 +107,7 @@ def get_mysql_connector_config(
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
+        "incremental.snapshot.allowed": "true",
         "snapshot.mode": snapshot_mode,
 
         # Include schema changes
@@ -117,7 +118,12 @@ def get_mysql_connector_config(
         # Incremental snapshot configuration (for adding new tables after creation)
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
-        
+
+        # Kafka-based signals (no source DB modification required)
+        "signal.enabled.channels": "kafka",
+        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+
         # Decimal handling
         "decimal.handling.mode": "precise",  # Options: precise, double, string
         
@@ -234,13 +240,18 @@ def get_postgresql_connector_config(
         # Incremental snapshot configuration (for adding new tables after creation)
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
-        
+
+        # Kafka-based signals (no source DB modification required)
+        "signal.enabled.channels": "kafka",
+        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+
         # Decimal handling
         "decimal.handling.mode": "precise",
-        
+
         # Time precision
         "time.precision.mode": "adaptive_time_microseconds",
-        
+
         # Schema whitelist
         "schema.include.list": schema_name,
     }
@@ -321,7 +332,12 @@ def get_oracle_connector_config(
         # Incremental snapshot configuration (for adding new tables after creation)
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
-        
+
+        # Kafka-based signals (no source DB modification required)
+        "signal.enabled.channels": "kafka",
+        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+
         "database.allowPublicKeyRetrieval": "true",
 
         # Log mining settings

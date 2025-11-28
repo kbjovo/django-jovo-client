@@ -41,6 +41,10 @@ from .kafka_consumer import (
     KafkaConsumerException,
 )
 
+from .kafka_signal_sender import (
+    KafkaSignalSender,
+)
+
 __all__ = [
     # Database utilities
     'test_database_connection',
@@ -75,4 +79,7 @@ __all__ = [
     # Kafka Consumer
     'DebeziumCDCConsumer',
     'KafkaConsumerException',
+
+    # Kafka Signal Sender
+    'KafkaSignalSender',
 ]

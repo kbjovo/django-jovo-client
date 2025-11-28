@@ -14,9 +14,13 @@ from client.utils.database_utils import get_database_engine, get_table_schema
 logger = logging.getLogger(__name__)
 
 
-def create_target_tables(replication_config):
+def create_target_tables(replication_config, specific_tables=None):
     """
     Auto-create tables in target database based on configuration
+    
+    Args:
+        replication_config: ReplicationConfig instance
+        specific_tables: List of source table names to create (if None, creates all enabled tables)
     
     CRITICAL: Must use DIFFERENT database than source!
     """
@@ -91,9 +95,18 @@ def create_target_tables(replication_config):
     skipped_count = 0
     
     try:
-        # Get table mappings
+        # Get table mappings - filter by specific_tables if provided
         table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-        logger.info(f"📋 Processing {table_mappings.count()} table mappings...")
+        
+        if specific_tables:
+            table_mappings = table_mappings.filter(source_table__in=specific_tables)
+            logger.info(f"📋 Processing {table_mappings.count()} specific table mappings: {specific_tables}")
+        else:
+            logger.info(f"📋 Processing ALL {table_mappings.count()} table mappings...")
+        
+        if table_mappings.count() == 0:
+            logger.warning(f"⚠️ No table mappings found to process!")
+            return
         
         # VERIFY we're connected to the right database
         with target_engine.connect() as conn:
@@ -158,13 +171,21 @@ def create_target_tables(replication_config):
                                 skipped_count += 1
                                 continue
                             else:
-                                logger.info(f"   ✔️ VERIFIED: Table '{target_table}' no longer exists")
+                                logger.info(f"   ☑️ VERIFIED: Table '{target_table}' no longer exists")
                                 dropped_count += 1
                         
                         # Table is now dropped, continue to create it
                         table_exists = False
+                    elif specific_tables:
+                        # IMPORTANT: When creating specific tables (e.g., during edit),
+                        # we want to CREATE them even if they exist (unless drop_before_sync=False)
+                        # In this case, we skip to avoid accidental data loss
+                        logger.info(f"   ℹ️ Table {target_table} already exists, skipping (drop_before_sync=False)")
+                        logger.info(f"   💡 TIP: Enable 'Drop before sync' to recreate existing tables")
+                        skipped_count += 1
+                        continue
                     else:
-                        # Table exists but drop_before_sync is False, skip
+                        # Table exists and we're doing full creation (not specific tables)
                         logger.info(f"   ℹ️ Table {target_table} already exists, skipping creation (drop_before_sync=False)")
                         skipped_count += 1
                         
@@ -172,12 +193,12 @@ def create_target_tables(replication_config):
                         with target_engine.connect() as conn:
                             result = conn.execute(text(f"SHOW TABLES LIKE '{target_table}'"))
                             if result.fetchone():
-                                logger.info(f"   ✔️ VERIFIED: Table {target_table} exists in database")
+                                logger.info(f"   ☑️ VERIFIED: Table {target_table} exists in database")
                                 
                                 # Check column count
                                 result = conn.execute(text(f"DESCRIBE `{target_table}`"))
                                 col_count = len(result.fetchall())
-                                logger.info(f"   ✔️ VERIFIED: Table has {col_count} columns")
+                                logger.info(f"   ☑️ VERIFIED: Table has {col_count} columns")
                         continue
                 
                 # Create a mapping of source column names to their positions
@@ -253,21 +274,133 @@ def create_target_tables(replication_config):
                         skipped_count += 1
                 
             except Exception as e:
-                logger.error(f"   ❌ Error processing table {target_table}: {e}")
+                logger.error(f"   ❌ Error processing table {target_table}: {e}", exc_info=True)
                 skipped_count += 1
         
         # Summary
         logger.info(f"{'='*80}")
         logger.info(f"📊 TABLE CREATION SUMMARY:")
+        if specific_tables:
+            logger.info(f"   🎯 Mode: Specific tables only ({len(specific_tables)} requested)")
+        else:
+            logger.info(f"   🎯 Mode: All enabled tables")
         logger.info(f"   ✅ Successfully created: {created_count} tables")
         if dropped_count > 0:
             logger.info(f"   🗑️ Dropped & recreated: {dropped_count} tables")
-        logger.info(f"   ⏭️ Skipped (already exist): {skipped_count} tables")
+        if skipped_count > 0:
+            logger.info(f"   ⭐ Skipped (already exist): {skipped_count} tables")
         logger.info(f"   🎯 Target Database: {target_db.database_name} on {target_db.host}")
         logger.info(f"{'='*80}")
         
     finally:
         source_engine.dispose()
+        target_engine.dispose()
+
+
+def drop_target_tables(replication_config, table_names):
+    """
+    Drop specific tables from target database
+    
+    Args:
+        replication_config: ReplicationConfig instance
+        table_names: List of SOURCE table names to drop (will be mapped to target names)
+    
+    ONLY drops tables if drop_before_sync is enabled for safety!
+    """
+    if not table_names:
+        logger.info("ℹ️ No tables to drop")
+        return
+    
+    # Safety check: Only drop if drop_before_sync is enabled
+    if not replication_config.drop_before_sync:
+        logger.warning(f"⚠️ SKIP: drop_before_sync is disabled. Tables NOT dropped: {table_names}")
+        logger.info(f"   💡 TIP: Enable 'Drop before sync' in config to allow table deletion")
+        return
+    
+    logger.info(f"🗑️ Starting table deletion for {len(table_names)} tables...")
+    
+    # Get target database
+    source_db = replication_config.client_database
+    client = source_db.client
+    target_db = client.get_target_database()
+    
+    if not target_db:
+        error_msg = f"❌ No target database found for client '{client.name}'"
+        logger.error(error_msg)
+        raise Exception(error_msg)
+    
+    logger.info(f"Target Database: {target_db.database_name} on {target_db.host}")
+    
+    # Get target table names from mappings
+    table_mappings = replication_config.table_mappings.filter(source_table__in=table_names)
+    target_table_names = [tm.target_table for tm in table_mappings]
+    
+    if not target_table_names:
+        logger.warning(f"⚠️ No table mappings found for: {table_names}")
+        return
+    
+    logger.info(f"Target tables to drop: {target_table_names}")
+    
+    # Create engine
+    try:
+        target_engine = get_database_engine(target_db)
+    except Exception as e:
+        logger.error(f"❌ Failed to create database engine: {e}")
+        raise
+    
+    dropped_count = 0
+    failed_count = 0
+    
+    try:
+        # Verify connection
+        with target_engine.connect() as conn:
+            result = conn.execute(text("SELECT DATABASE()"))
+            connected_db = result.scalar()
+            logger.info(f"🔍 Connected to database: '{connected_db}'")
+            
+            if connected_db != target_db.database_name:
+                raise Exception(f"Connected to wrong database: {connected_db}")
+        
+        # Drop each table
+        for target_table in target_table_names:
+            try:
+                logger.info(f"   🗑️ Dropping table: {target_table}...")
+                
+                with target_engine.begin() as conn:
+                    # Verify database
+                    result = conn.execute(text("SELECT DATABASE()"))
+                    current_db = result.scalar()
+                    
+                    if current_db != target_db.database_name:
+                        raise Exception(f"Wrong database! Expected {target_db.database_name}, got {current_db}")
+                    
+                    # Drop table with CASCADE
+                    drop_sql = f"DROP TABLE IF EXISTS `{target_table}` CASCADE"
+                    conn.execute(text(drop_sql))
+                    
+                    # Verify drop
+                    result = conn.execute(text(f"SHOW TABLES LIKE '{target_table}'"))
+                    if result.fetchone():
+                        logger.error(f"   ❌ Table {target_table} still exists after drop!")
+                        failed_count += 1
+                    else:
+                        logger.info(f"   ✅ Successfully dropped table: {target_table}")
+                        dropped_count += 1
+                        
+            except Exception as e:
+                logger.error(f"   ❌ Error dropping table {target_table}: {e}", exc_info=True)
+                failed_count += 1
+        
+        # Summary
+        logger.info(f"{'='*80}")
+        logger.info(f"📊 TABLE DELETION SUMMARY:")
+        logger.info(f"   ✅ Successfully dropped: {dropped_count} tables")
+        if failed_count > 0:
+            logger.info(f"   ❌ Failed to drop: {failed_count} tables")
+        logger.info(f"   🎯 Target Database: {target_db.database_name} on {target_db.host}")
+        logger.info(f"{'='*80}")
+        
+    finally:
         target_engine.dispose()
 
 
@@ -307,5 +440,3 @@ def map_type_to_sqlalchemy(type_str: str):
         return Time
     else:
         return String(255)
-
-
