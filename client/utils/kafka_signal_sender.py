@@ -94,7 +94,10 @@ class KafkaSignalSender:
             data_collections = [f"{database_name}.{table}" for table in table_names]
 
             # Build signal payload
+            # IMPORTANT: The 'id' field must be in BOTH the key AND the value
+            # Debezium will ignore signals that don't have 'id' in the value
             signal_payload = {
+                "id": signal_id,
                 "type": "execute-snapshot",
                 "data": {
                     "data-collections": data_collections,
@@ -112,6 +115,7 @@ class KafkaSignalSender:
             logger.info(f"   Topic: {signal_topic}")
             logger.info(f"   Tables: {table_names}")
             logger.info(f"   Data collections: {data_collections}")
+            logger.info(f"   Signal payload: {json.dumps(signal_payload, indent=2)}")
 
             # Send signal to Kafka
             self.producer.produce(
@@ -158,7 +162,9 @@ class KafkaSignalSender:
 
             signal_topic = f"{topic_prefix}.signals"
 
+            # IMPORTANT: The 'id' field must be in BOTH the key AND the value
             signal_payload = {
+                "id": signal_id,
                 "type": "stop-snapshot",
                 "data": {}
             }
@@ -206,7 +212,9 @@ class KafkaSignalSender:
 
             signal_topic = f"{topic_prefix}.signals"
 
+            # IMPORTANT: The 'id' field must be in BOTH the key AND the value
             signal_payload = {
+                "id": signal_id,
                 "type": "pause-snapshot",
                 "data": {}
             }
@@ -254,7 +262,9 @@ class KafkaSignalSender:
 
             signal_topic = f"{topic_prefix}.signals"
 
+            # IMPORTANT: The 'id' field must be in BOTH the key AND the value
             signal_payload = {
+                "id": signal_id,
                 "type": "resume-snapshot",
                 "data": {}
             }

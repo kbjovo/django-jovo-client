@@ -45,6 +45,7 @@ from client.utils.database_utils import (
     get_database_engine,
     check_binary_logging
 )
+from client.utils.offset_manager import delete_connector_offsets
 from client.tasks import (
     create_debezium_connector,
     start_kafka_consumer,
@@ -1112,151 +1113,205 @@ def cdc_edit_config(request, config_pk):
                                 replication_config.is_active = False
                                 replication_config.save()
                             else:
-                                # CRITICAL: When adding/removing tables, DELETE and RECREATE the connector
+                                # ========================================================================
+                                # IMPROVED APPROACH: Update connector config instead of delete+recreate
+                                # Benefits:
+                                # - Non-disruptive (existing tables keep replicating)
+                                # - Preserves offsets (no data loss/duplication)
+                                # - Faster (no connector restart delay)
+                                # - Simpler (fewer failure points)
+                                # ========================================================================
                                 if newly_added_tables or removed_table_names:
-                                    logger.info(f"⚠️ Table list changed (added: {len(newly_added_tables)}, removed: {len(removed_table_names)})")
-                                    logger.info(f"   Deleting and recreating connector for reliable operation...")
+                                    import time
+                                    logger.info(f"📝 Updating connector config (added: {len(newly_added_tables)}, removed: {len(removed_table_names)})")
+                                    logger.info(f"   Added tables: {newly_added_tables}")
+                                    logger.info(f"   Removed tables: {removed_table_names}")
 
-                                    # ========================================================================
-                                    # NEW APPROACH: Use Kafka signals for incremental snapshot (no SQL copy)
-                                    # This will be triggered AFTER connector recreation
-                                    # ========================================================================
+                                    try:
+                                        # Get current connector configuration
+                                        current_config = manager.get_connector_config(replication_config.connector_name)
 
-                                    # Delete old connector
-                                    delete_success, delete_error = manager.delete_connector(
-                                        replication_config.connector_name,
-                                        delete_topics=False  # Keep topics, just recreate connector
-                                    )
+                                        if not current_config:
+                                            raise Exception("Failed to retrieve current connector configuration")
 
-                                    
+                                        # Update table.include.list with new table list
+                                        tables_full = [f"{db_config.database_name}.{table}" for table in tables_list]
+                                        current_config['table.include.list'] = ','.join(tables_full)
 
-                                    if delete_success:
-                                        logger.info(f"✅ Old connector deleted")
+                                        # CRITICAL: Ensure snapshot mode supports incremental snapshots
+                                        # 'initial' mode only snapshots on first start, then ignores signals
+                                        # 'when_needed' mode allows both automatic and incremental snapshots
+                                        if newly_added_tables and current_config.get('snapshot.mode') == 'initial':
+                                            logger.info(f"⚙️  Changing snapshot.mode from 'initial' to 'when_needed' to support incremental snapshots")
+                                            current_config['snapshot.mode'] = 'when_needed'
 
-                                        # Generate fresh connector configuration
-                                        from client.utils.connector_templates import generate_connector_name
-                                        # Increment connector version for new connector
-                                        replication_config.connector_version += 1
-                                        new_connector_name = generate_connector_name(
-                                            client,
-                                            db_config,
-                                            version=replication_config.connector_version
+                                        logger.info(f"📋 Updated table.include.list: {current_config['table.include.list']}")
+                                        logger.info(f"📋 Snapshot mode: {current_config.get('snapshot.mode', 'not set')}")
+
+                                        # Update connector configuration (live update, no restart needed!)
+                                        update_success, update_error = manager.update_connector_config(
+                                            replication_config.connector_name,
+                                            current_config
                                         )
 
-                                        # CRITICAL: Use 'never' snapshot mode for connector
-                                        # We'll use Kafka signals to trigger incremental snapshot for new tables only
-                                        updated_config = get_connector_config_for_database(
-                                            db_config=db_config,
-                                            replication_config=replication_config,
-                                            tables_whitelist=tables_list,
-                                            kafka_bootstrap_servers='kafka:29092',
-                                           
-                                            schema_registry_url='http://schema-registry:8081',
-                                            snapshot_mode='never'  # No automatic snapshot, use incremental snapshot via signals
-                                        )
+                                        if not update_success:
+                                            raise Exception(f"Failed to update connector config: {update_error}")
 
-                                        # Update connector name
-                                        replication_config.connector_name = new_connector_name
-                                        replication_config.save()
+                                        logger.info(f"✅ Connector config updated successfully")
 
-                                        # Create new connector
-                                        create_success, create_error = manager.create_connector(
-                                            new_connector_name,
-                                            updated_config
-                                        )
+                                        # ========================================================================
+                                        # CRITICAL: Restart connector tasks to pick up new table list
+                                        # Config updates are not applied to tasks until they restart
+                                        # ========================================================================
+                                        logger.info(f"🔄 Restarting connector tasks to apply new table list...")
+                                        restart_success, restart_error = manager.restart_connector(replication_config.connector_name)
 
-                                        if create_success:
-                                            logger.info(f"✅ New connector created: {new_connector_name}")
-                                            logger.info(f"   Connector will track changes for all {len(tables_list)} tables")
+                                        if not restart_success:
+                                            logger.warning(f"⚠️ Failed to restart connector: {restart_error}")
+                                            raise Exception(f"Failed to restart connector after config update: {restart_error}")
 
-                                            # ========================================================================
-                                            # CRITICAL: Send Kafka signal to trigger incremental snapshot for new tables
-                                            # ========================================================================
-                                            if newly_added_tables:
-                                                try:
-                                                    from client.utils.kafka_signal_sender import KafkaSignalSender
-                                                    from client.utils.kafka_topic_manager import KafkaTopicManager
-                                                    logger.info(f"📡 Triggering incremental snapshot for {len(newly_added_tables)} new table(s) via Kafka signal...")
-                                                    logger.info(f"   New tables: {newly_added_tables}")
+                                        logger.info(f"✅ Connector tasks restarted successfully")
 
-                                                    # Ensure signal topic exists before sending signal
-                                                    topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
-                                                    topic_manager = KafkaTopicManager()
-                                                    signal_topic_success, signal_topic_error = topic_manager.create_signal_topic(topic_prefix)
+                                        # ========================================================================
+                                        # For newly added tables: Send incremental snapshot signal
+                                        # ========================================================================
+                                        if newly_added_tables:
+                                            logger.info(f"📡 Preparing incremental snapshot for {len(newly_added_tables)} new table(s)...")
 
-                                                    if signal_topic_success:
-                                                        logger.info(f"✅ Signal topic ready: {topic_prefix}.signals")
-                                                    else:
-                                                        logger.warning(f"⚠️ Signal topic creation issue: {signal_topic_error}")
+                                            # Wait for connector tasks to fully restart and start monitoring new tables
+                                            # Tasks need time to:
+                                            # 1. Restart and reload configuration
+                                            # 2. Connect to database and start monitoring new tables
+                                            # 3. Enter STREAMING phase
+                                            # 4. Start consuming signal topic (happens AFTER streaming starts)
+                                            # IMPORTANT: Signal topic consumer initialization can take 10-20 seconds
+                                            logger.info(f"⏳ Waiting 15 seconds for connector to fully initialize signal consumer...")
+                                            time.sleep(15)
 
-                                                    signal_sender = KafkaSignalSender()
+                                            # Verify connector is still running
+                                            connector_status = manager.get_connector_status(replication_config.connector_name)
+                                            connector_running = isinstance(connector_status, tuple) and connector_status[0]
 
-                                                    # Send signal to Debezium to snapshot only the new tables
-                                                    success, message = signal_sender.send_incremental_snapshot_signal(
-                                                        topic_prefix=topic_prefix,
-                                                        database_name=db_config.database_name,
-                                                        table_names=newly_added_tables
+                                            if not connector_running:
+                                                raise Exception(f"Connector {replication_config.connector_name} is not running")
+
+                                            logger.info(f"✅ Connector verified as RUNNING")
+
+                                            try:
+                                                from client.utils.kafka_signal_sender import KafkaSignalSender
+                                                from client.utils.kafka_topic_manager import KafkaTopicManager
+
+                                                # Ensure signal topic exists
+                                                topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+                                                topic_manager = KafkaTopicManager()
+                                                signal_topic_success, signal_topic_error = topic_manager.create_signal_topic(topic_prefix)
+
+                                                if signal_topic_success:
+                                                    logger.info(f"✅ Signal topic ready: {topic_prefix}.signals")
+                                                else:
+                                                    logger.warning(f"⚠️ Signal topic issue: {signal_topic_error}")
+
+                                                # Send incremental snapshot signal for new tables ONLY
+                                                signal_sender = KafkaSignalSender()
+                                                logger.info(f"📡 Sending incremental snapshot signal for: {newly_added_tables}")
+
+                                                success, message = signal_sender.send_incremental_snapshot_signal(
+                                                    topic_prefix=topic_prefix,
+                                                    database_name=db_config.database_name,
+                                                    table_names=newly_added_tables
+                                                )
+
+                                                signal_sender.close()
+
+                                                if success:
+                                                    logger.info(f"✅ {message}")
+                                                    logger.info(f"⏳ Snapshot may take 1-5 minutes depending on table size")
+                                                    messages.success(
+                                                        request,
+                                                        f'✅ {len(newly_added_tables)} table(s) added! '
+                                                        f'Incremental snapshot in progress. Data will replicate within 1-5 minutes.'
+                                                    )
+                                                else:
+                                                    logger.error(f"❌ Failed to send snapshot signal: {message}")
+                                                    messages.warning(
+                                                        request,
+                                                        f'⚠️ Tables added but snapshot signal failed: {message}. '
+                                                        f'New tables will only capture future changes (no initial data).'
                                                     )
 
-                                                    if success:
-                                                        logger.info(f"✅ {message}")
-                                                        messages.success(request, f'📡 Incremental snapshot triggered for {len(newly_added_tables)} new table(s)!')
-                                                    else:
-                                                        logger.error(f"❌ Failed to send snapshot signal: {message}")
-                                                        messages.warning(request, f'⚠️ Failed to trigger snapshot: {message}. You may need to manually snapshot the new tables.')
-
-                                                    signal_sender.close()
-
-                                                except Exception as e:
-                                                    logger.error(f"❌ Error sending incremental snapshot signal: {e}", exc_info=True)
-                                                    messages.warning(request, f'⚠️ Failed to trigger incremental snapshot: {str(e)}. You may need to manually snapshot the new tables.')
+                                            except Exception as e:
+                                                logger.error(f"❌ Error sending incremental snapshot signal: {e}", exc_info=True)
+                                                messages.warning(
+                                                    request,
+                                                    f'⚠️ Tables added but snapshot failed: {str(e)}. '
+                                                    f'New tables will only capture future changes.'
+                                                )
 
                                             # ========================================================================
-                                            # CRITICAL: Restart consumer to subscribe to new table topics
+                                            # Restart consumer to subscribe to new table topics
                                             # ========================================================================
-                                            if newly_added_tables and replication_config.is_active:
+                                            if replication_config.is_active:
                                                 try:
                                                     logger.info(f"🔄 Restarting consumer to subscribe to {len(newly_added_tables)} new topic(s)...")
 
-                                                    # Stop the current consumer
+                                                    # Stop current consumer
                                                     stop_result = stop_kafka_consumer(replication_config.id)
                                                     if stop_result.get('success'):
-                                                        logger.info(f"✅ Consumer stopped successfully")
+                                                        logger.info(f"✅ Consumer stopped")
                                                     else:
                                                         logger.warning(f"⚠️ Consumer stop returned: {stop_result}")
 
                                                     # Wait for consumer to fully stop
-                                                    import time
                                                     time.sleep(2)
 
-                                                    # Re-activate the config (stop_kafka_consumer sets is_active=False)
+                                                    # Re-activate the config
                                                     replication_config.refresh_from_db()
                                                     replication_config.is_active = True
                                                     replication_config.status = 'active'
                                                     replication_config.save()
-                                                    logger.info(f"✅ Re-activated config for consumer restart")
+                                                    logger.info(f"✅ Config re-activated")
 
                                                     # Restart consumer with updated topic list
                                                     logger.info(f"🚀 Starting consumer with updated topic list...")
                                                     start_kafka_consumer.apply_async(
                                                         args=[replication_config.id],
-                                                        countdown=3  # Start after 3 seconds
+                                                        countdown=3
                                                     )
                                                     logger.info(f"✅ Consumer restart scheduled")
 
-                                                    messages.success(request, f'✅ Connector recreated and consumer restarted for {len(newly_added_tables)} new table(s)!')
-
                                                 except Exception as e:
                                                     logger.error(f"❌ Error restarting consumer: {e}", exc_info=True)
-                                                    messages.warning(request, f'⚠️ Connector recreated, but failed to restart consumer. Please restart replication manually.')
-                                            else:
-                                                messages.success(request, f'✅ Connector recreated successfully with {len(newly_added_tables)} new table(s)!')
-                                        else:
-                                            logger.error(f"❌ Failed to create new connector: {create_error}")
-                                            messages.warning(request, f'⚠️ Failed to create new connector: {create_error}')
-                                    else:
-                                        logger.error(f"❌ Failed to delete old connector: {delete_error}")
-                                        messages.warning(request, f'⚠️ Failed to delete old connector: {delete_error}')
+                                                    messages.warning(
+                                                        request,
+                                                        f'⚠️ Config updated but consumer restart failed. '
+                                                        f'Please restart replication manually.'
+                                                    )
+
+                                        # ========================================================================
+                                        # For removed tables: Just log (connector already stopped tracking them)
+                                        # ========================================================================
+                                        if removed_table_names:
+                                            logger.info(f"✅ Removed {len(removed_table_names)} table(s) from connector")
+                                            messages.success(
+                                                request,
+                                                f'✅ {len(removed_table_names)} table(s) removed from replication'
+                                            )
+
+                                        # Success message if both operations happened
+                                        if newly_added_tables and removed_table_names:
+                                            messages.success(
+                                                request,
+                                                f'✅ Connector updated: +{len(newly_added_tables)} table(s), '
+                                                f'-{len(removed_table_names)} table(s)'
+                                            )
+
+                                    except Exception as e:
+                                        logger.error(f"❌ Error updating connector: {e}", exc_info=True)
+                                        messages.error(
+                                            request,
+                                            f'❌ Failed to update connector: {str(e)}. '
+                                            f'Configuration saved in database but connector not updated.'
+                                        )
                                 elif restart_connector:
                                     # No table changes, just restart if requested
                                     logger.info(f"🔄 Restarting connector to apply changes...")
