@@ -27,6 +27,7 @@ from django.db.models import Q
 from sqlalchemy import text
 import logging
 import json
+import time 
 
 from client.models.client import Client
 from client.models.database import ClientDatabase
@@ -871,6 +872,21 @@ def replication_status(request, config_id):
         }, status=500)
 
 
+
+def wait_for_connector_running(manager, connector_name, timeout=30, interval=2):
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        status, details = manager.get_connector_status(connector_name)
+        if status:
+            if all(task['state'] == 'RUNNING' for task in details.get('tasks', [])):
+                logger.info("✅ All connector tasks are RUNNING.")
+                return True
+        time.sleep(interval)
+        logger.info(f"⏳ Waiting for connector tasks to stabilize. Current status: {status}")
+    logger.error(f"❌ Connector tasks did not stabilize within {timeout} seconds.")
+    return False
+
+
 @require_http_methods(["GET", "POST"])
 def cdc_edit_config(request, config_pk):
     """
@@ -1185,8 +1201,10 @@ def cdc_edit_config(request, config_pk):
                                             # 3. Enter STREAMING phase
                                             # 4. Start consuming signal topic (happens AFTER streaming starts)
                                             # IMPORTANT: Signal topic consumer initialization can take 10-20 seconds
-                                            logger.info(f"⏳ Waiting 15 seconds for connector to fully initialize signal consumer...")
-                                            time.sleep(15)
+                                            wait_success = wait_for_connector_running(manager, replication_config.connector_name)
+                                            if not wait_success:
+                                                raise Exception(f"Connector {replication_config.connector_name} did not become RUNNING after restart.")
+                                            logger.info(f"✅ Connector verified as RUNNING")
 
                                             # Verify connector is still running
                                             connector_status = manager.get_connector_status(replication_config.connector_name)

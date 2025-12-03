@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from client.models.client import Client
 from client.models.database import ClientDatabase
 from client.models.job import ReplicationConfig
-
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +95,8 @@ def get_mysql_connector_config(
         "database.include.list": db_config.database_name,
         
         # Server identification
-        "database.server.id": str(54000 + db_config.id),  # Unique server ID
-        "database.server.name": connector_name.replace('_connector', ''),
+        "database.server.id": str(random.randint(10000, 999999)), 
+        "database.server.name": f"client_{client.id}_db_{db_config.id}",
         
         # Topic prefix (this will be used in Kafka topic names)
         # Format: client_{client_id}_db_{db_id}.{source_db}.{table}
@@ -107,19 +107,25 @@ def get_mysql_connector_config(
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
-        "incremental.snapshot.allowed": "true",
         "snapshot.mode": snapshot_mode,
-
+        "snapshot.locking.mode": "none",
+        
         # Include schema changes
         "include.schema.changes": "true",
         
         "database.allowPublicKeyRetrieval": "true",
 
-        # Incremental snapshot configuration (for adding new tables after creation)
+        # Read-only mode - user has no write permissions to source database
+        # IMPORTANT: Requires GTID to be enabled on MySQL (gtid_mode=ON, enforce_gtid_consistency=ON)
+        # See: https://debezium.io/blog/2022/04/07/read-only-incremental-snapshots/
+        "read.only": "true",
+
+        # Incremental snapshots with Kafka signaling (compatible with read-only databases when GTIDs enabled)
+        "incremental.snapshot.allowed": "true",
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
 
-        # Kafka-based signals (no source DB modification required)
+        # Kafka-based signals (for connector control and incremental snapshots on read-only databases)
         "signal.enabled.channels": "kafka",
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,

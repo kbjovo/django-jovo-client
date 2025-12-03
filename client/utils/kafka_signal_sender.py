@@ -105,10 +105,9 @@ class KafkaSignalSender:
                 }
             }
 
-            # Signal key (used for partitioning)
-            signal_key = {
-                "id": signal_id
-            }
+            # Signal key must be the connector's topic prefix (server name)
+            # so Debezium can identify which connector should process this signal
+            signal_key = topic_prefix
 
             logger.info(f"📡 Sending incremental snapshot signal:")
             logger.info(f"   Signal ID: {signal_id}")
@@ -120,7 +119,7 @@ class KafkaSignalSender:
             # Send signal to Kafka
             self.producer.produce(
                 topic=signal_topic,
-                key=json.dumps(signal_key).encode('utf-8'),
+                key=signal_key.encode('utf-8'),
                 value=json.dumps(signal_payload).encode('utf-8'),
                 callback=self._delivery_callback
             )
@@ -169,15 +168,14 @@ class KafkaSignalSender:
                 "data": {}
             }
 
-            signal_key = {
-                "id": signal_id
-            }
+            # Signal key must be the topic prefix (connector's server name)
+            signal_key = topic_prefix
 
             logger.info(f"📡 Sending stop snapshot signal to {signal_topic}")
 
             self.producer.produce(
                 topic=signal_topic,
-                key=json.dumps(signal_key).encode('utf-8'),
+                key=signal_key.encode('utf-8'),
                 value=json.dumps(signal_payload).encode('utf-8'),
                 callback=self._delivery_callback
             )
@@ -219,15 +217,14 @@ class KafkaSignalSender:
                 "data": {}
             }
 
-            signal_key = {
-                "id": signal_id
-            }
+            # Signal key must be the topic prefix (connector's server name)
+            signal_key = topic_prefix
 
             logger.info(f"📡 Sending pause snapshot signal to {signal_topic}")
 
             self.producer.produce(
                 topic=signal_topic,
-                key=json.dumps(signal_key).encode('utf-8'),
+                key=signal_key.encode('utf-8'),
                 value=json.dumps(signal_payload).encode('utf-8'),
                 callback=self._delivery_callback
             )
@@ -269,15 +266,14 @@ class KafkaSignalSender:
                 "data": {}
             }
 
-            signal_key = {
-                "id": signal_id
-            }
+            # Signal key must be the topic prefix (connector's server name)
+            signal_key = topic_prefix
 
             logger.info(f"📡 Sending resume snapshot signal to {signal_topic}")
 
             self.producer.produce(
                 topic=signal_topic,
-                key=json.dumps(signal_key).encode('utf-8'),
+                key=signal_key.encode('utf-8'),
                 value=json.dumps(signal_payload).encode('utf-8'),
                 callback=self._delivery_callback
             )
