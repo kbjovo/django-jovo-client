@@ -261,12 +261,15 @@ def get_postgresql_connector_config(
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        "database.dbname": db_config.database_name,  # ✅ CORRECT for PostgreSQL
+        "database.dbname": db_config.database_name,  
 
         # ===================================================================
         # Server Identification
         # ===================================================================
         "database.server.name": connector_name.replace('_connector', ''),
+        # IMPORTANT: For PostgreSQL, Debezium creates topics as: {topic.prefix}.{schema}.{table}
+        # To match MySQL pattern and consumer expectations, we use: client_{id}_db_{id}
+        # This creates topics like: client_1_db_2.public.busy_items_greenera
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
 
         # ===================================================================

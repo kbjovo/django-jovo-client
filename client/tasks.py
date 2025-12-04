@@ -77,7 +77,9 @@ def create_debezium_connector(self, replication_config_id):
         if success:
             # Update replication config
             config.connector_name = connector_name
-            config.kafka_topic_prefix = f"client_{client.id}"
+            # IMPORTANT: kafka_topic_prefix must match the connector's topic.prefix
+            # Format: client_{client_id}_db_{db_id} (for both MySQL and PostgreSQL)
+            config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
             config.status = 'configured'  # Changed from 'active' to 'configured'
             config.is_active = False  # Changed from True to False
             config.save()
@@ -158,12 +160,24 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
 
         # Determine topics to subscribe to
         kafka_topic_prefix = config.kafka_topic_prefix
-        source_db_name = config.client_database.database_name
+
+        # IMPORTANT: Topic format differs by database type
+        # MySQL: {prefix}.{database}.{table}
+        # PostgreSQL: {prefix}.{schema}.{table}
+        db_type = config.client_database.db_type.lower()
+
+        if db_type == 'postgresql':
+            # For PostgreSQL, use schema name (default: public)
+            schema_name = getattr(config.client_database, 'schema_name', 'public')
+            middle_part = schema_name
+        else:
+            # For MySQL, Oracle, use database name
+            middle_part = config.client_database.database_name
 
         # Get all table topics
         enabled_tables = config.table_mappings.filter(is_enabled=True)
         topics = [
-            f"{kafka_topic_prefix}.{source_db_name}.{tm.source_table}"
+            f"{kafka_topic_prefix}.{middle_part}.{tm.source_table}"
             for tm in enabled_tables
         ]
         logger.info(f"✓ Subscribed to {[topics]}")
