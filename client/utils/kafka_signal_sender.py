@@ -1,8 +1,10 @@
 """
-Kafka Signal Sender for Debezium
+Kafka Signal Sender for Debezium - FIXED for PostgreSQL
 
 Sends signals to Debezium connectors via Kafka topics to trigger operations
 like incremental snapshots without modifying the source database.
+
+CRITICAL FIX: PostgreSQL uses schema.table format, MySQL uses database.table format
 
 Supports:
 - Incremental snapshots for new tables
@@ -62,6 +64,8 @@ class KafkaSignalSender:
         topic_prefix: str,
         database_name: str,
         table_names: List[str],
+        schema_name: str = 'public',
+        db_type: str = 'postgresql',
         signal_id: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
@@ -70,10 +74,14 @@ class KafkaSignalSender:
         This triggers Debezium to snapshot ONLY the specified tables
         without affecting ongoing CDC for existing tables.
 
+        CRITICAL FIX: PostgreSQL uses schema.table, MySQL uses database.table
+
         Args:
             topic_prefix: Connector topic prefix (e.g., 'client_1_db_2')
-            database_name: Source database name
-            table_names: List of table names to snapshot
+            database_name: Source database name (e.g., 'kbbio')
+            table_names: List of table names to snapshot (e.g., ['users', 'orders'])
+            schema_name: PostgreSQL schema name (default: 'public', ignored for MySQL)
+            db_type: Database type ('postgresql' or 'mysql')
             signal_id: Optional unique signal ID (auto-generated if not provided)
 
         Returns:
@@ -90,8 +98,17 @@ class KafkaSignalSender:
             # Signal topic follows pattern: {topic_prefix}.signals
             signal_topic = f"{topic_prefix}.signals"
 
-            # Format data collections as: database.table1,database.table2
-            data_collections = [f"{database_name}.{table}" for table in table_names]
+            # ================================================================
+            # CRITICAL FIX: Format data collections based on database type
+            # ================================================================
+            if db_type.lower() == 'postgresql':
+                # PostgreSQL: Use schema.table format
+                # Example: "public.users", "public.orders"
+                data_collections = [f"{schema_name}.{table}" for table in table_names]
+            else:
+                # MySQL: Use database.table format
+                # Example: "mydb.users", "mydb.orders"
+                data_collections = [f"{database_name}.{table}" for table in table_names]
 
             # Build signal payload
             # IMPORTANT: The 'id' field must be in BOTH the key AND the value
@@ -112,6 +129,8 @@ class KafkaSignalSender:
             logger.info(f"📡 Sending incremental snapshot signal:")
             logger.info(f"   Signal ID: {signal_id}")
             logger.info(f"   Topic: {signal_topic}")
+            logger.info(f"   Database Type: {db_type}")
+            logger.info(f"   Schema/Database: {schema_name if db_type.lower() == 'postgresql' else database_name}")
             logger.info(f"   Tables: {table_names}")
             logger.info(f"   Data collections: {data_collections}")
             logger.info(f"   Signal payload: {json.dumps(signal_payload, indent=2)}")

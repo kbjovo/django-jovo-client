@@ -166,7 +166,7 @@ NPM_BIN_PATH = os.getenv("NPM_BIN_PATH","/usr/local/bin/npm")
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000000
 # Database password encryption key (symmetric encryption)
 # TODO: Move this to environment variable in production
 DB_PASSWORD_ENCRYPTION_KEY = 'your-32-byte-encryption-key-change-this-in-production!!'

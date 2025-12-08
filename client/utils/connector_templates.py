@@ -188,248 +188,110 @@ def get_postgresql_connector_config(
     kafka_bootstrap_servers: str = 'localhost:9092',
     schema_registry_url: str = 'http://localhost:8081',
     schema_name: str = 'public',
-    snapshot_mode: str = 'initial',
+    snapshot_mode: str = 'when_needed',  # ✅ Changed from 'initial'
 ) -> Dict[str, Any]:
     """
-    Generate PostgreSQL Debezium connector configuration (PRODUCTION-READY)
-    
-    Key features:
-    1. ✅ Uses database.dbname (not database.include.list)
-    2. ✅ Auto-creates publication (no manual setup needed)
-    3. ✅ Proper slot naming (PostgreSQL 63-char limit)
-    4. ✅ No table locking during snapshot
-    5. ✅ Kafka-based heartbeat (no DB table needed)
-    6. ✅ Incremental snapshot support
-    7. ✅ Signal-based control
-    
-    Args:
-        client: Client instance
-        db_config: ClientDatabase instance
-        replication_config: ReplicationConfig instance (optional)
-        tables_whitelist: List of tables to replicate
-        kafka_bootstrap_servers: Kafka bootstrap servers
-        schema_registry_url: Schema registry URL
-        schema_name: PostgreSQL schema name (default: public)
-        snapshot_mode: 'initial', 'never', 'always', 'when_needed'
-
-    Returns:
-        Dict[str, Any]: Connector configuration
+    FIXED: PostgreSQL Debezium connector with working incremental snapshots
     """
-    # Generate connector name with version
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
     
-    # ===================================================================
-    # CRITICAL: Generate safe slot name
-    # PostgreSQL replication slot names have strict requirements:
-    # - Max 63 characters
-    # - Lowercase letters, numbers, underscores only
-    # - Must be unique across the database
-    # ===================================================================
     safe_slot_name = f"debezium_{client.id}_{db_config.id}".lower()
     safe_slot_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in safe_slot_name)
-    safe_slot_name = safe_slot_name[:63]  # PostgreSQL limit
+    safe_slot_name = safe_slot_name[:63]
     
-    # ===================================================================
-    # Generate unique publication name
-    # Publication defines which tables are replicated
-    # ===================================================================
     publication_name = f"debezium_pub_{client.id}_{db_config.id}".lower()
     publication_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in publication_name)
-    publication_name = publication_name[:63]  # PostgreSQL limit
+    publication_name = publication_name[:63]
+    
+    # ✅ CRITICAL FIX: Create signal table name
+    signal_table = f"{schema_name}.debezium_signal"
     
     logger.info(f"PostgreSQL connector configuration:")
     logger.info(f"  Connector name: {connector_name}")
     logger.info(f"  Replication slot: {safe_slot_name}")
     logger.info(f"  Publication: {publication_name}")
-    logger.info(f"  Database: {db_config.database_name}")
-    logger.info(f"  Schema: {schema_name}")
+    logger.info(f"  Signal table: {signal_table}")
     logger.info(f"  Snapshot mode: {snapshot_mode}")
     
     config = {
-        # ===================================================================
-        # Connector Class
-        # ===================================================================
         "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
         
-        # ===================================================================
-        # Database Connection (CRITICAL FIX)
-        # MySQL uses: database.include.list
-        # PostgreSQL uses: database.dbname (single database only)
-        # ===================================================================
         "database.hostname": db_config.host,
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        "database.dbname": db_config.database_name,  
-
-        # ===================================================================
-        # Server Identification
-        # ===================================================================
+        "database.dbname": db_config.database_name,
+        
         "database.server.name": connector_name.replace('_connector', ''),
-        # IMPORTANT: For PostgreSQL, Debezium creates topics as: {topic.prefix}.{schema}.{table}
-        # To match MySQL pattern and consumer expectations, we use: client_{id}_db_{id}
-        # This creates topics like: client_1_db_2.public.busy_items_greenera
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
-
-        # ===================================================================
-        # Logical Decoding Plugin
-        # pgoutput: Built-in plugin (PostgreSQL 10+), recommended
-        # decoderbufs: Requires installation
-        # wal2json: Requires installation
-        # ===================================================================
+        
         "plugin.name": "pgoutput",
         
-        # ===================================================================
-        # Replication Slot Configuration
-        # Slot stores CDC position (like MySQL binlog position)
-        # Persists across connector restarts
-        # ===================================================================
         "slot.name": safe_slot_name,
-        "slot.drop.on.stop": "false",  # Keep slot when connector stops
-        "slot.stream.params": "",  # Additional slot parameters (optional)
+        "slot.drop.on.stop": "false",
+        "slot.stream.params": "",
         
-        # ===================================================================
-        # Publication Configuration
-        # Publication = which tables are replicated (like MySQL table whitelist)
-        # autocreate.mode options:
-        # - filtered: Auto-create for selected tables only
-        # - all_tables: Replicate all tables in database
-        # - disabled: Don't auto-create (requires manual setup)
-        # ===================================================================
         "publication.name": publication_name,
-        "publication.autocreate.mode": "filtered",  # ✅ Auto-create for selected tables
+        "publication.autocreate.mode": "filtered",
         
-        # ===================================================================
-        # Schema History (Kafka-based)
-        # Tracks DDL changes (ALTER TABLE, etc.)
-        # ===================================================================
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
-
-        # ===================================================================
-        # Snapshot Configuration
-        # Modes:
-        # - initial: Snapshot on first start, then CDC (recommended)
-        # - never: CDC only, no snapshot
-        # - always: Always snapshot on start (slow, use for testing)
-        # - when_needed: Snapshot if no offset found
-        # - initial_only: Snapshot then stop
-        # ===================================================================
-        "snapshot.mode": snapshot_mode,
-        "snapshot.locking.mode": "none",  # ✅ Don't lock tables (read-only friendly)
         
-        # ===================================================================
-        # Incremental Snapshot
-        # Allows snapshotting new tables after connector is created
-        # Triggered via Kafka signals (no DB modification needed)
-        # ===================================================================
+        # ✅ CRITICAL: Change default snapshot mode to support incremental snapshots
+        "snapshot.mode": "when_needed",  # NOT "initial"
+        "snapshot.locking.mode": "none",
+        
+        # ✅ CRITICAL: Configure incremental snapshot support
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
-
-        # ===================================================================
-        # Kafka-based Signals
-        # Control connector via Kafka messages (pause, snapshot, etc.)
-        # No source DB modification required (read-only friendly)
-        # ===================================================================
-        "signal.enabled.channels": "kafka",
+        
+        # ✅ CRITICAL FIX: Add BOTH signal channels and signal data collection
+        "signal.enabled.channels": "source,kafka",  # ✅ Enable BOTH channels
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-
-        # ===================================================================
-        # Schema Change Events
-        # Include DDL changes (CREATE TABLE, ALTER TABLE, etc.)
-        # ===================================================================
+        
+        # ✅ THIS WAS MISSING - CRITICAL FOR INCREMENTAL SNAPSHOTS
+        "signal.data.collection": signal_table,
+        
         "include.schema.changes": "true",
-
-        # ===================================================================
-        # Data Type Handling
-        # ===================================================================
-        "decimal.handling.mode": "precise",  # Keep decimal precision
-        "time.precision.mode": "adaptive_time_microseconds",  # Microsecond precision
         
-        # ===================================================================
-        # HSTORE Support (PostgreSQL key-value type)
-        # ===================================================================
-        "hstore.handling.mode": "json",  # Convert HSTORE to JSON
+        "decimal.handling.mode": "precise",
+        "time.precision.mode": "adaptive_time_microseconds",
         
-        # ===================================================================
-        # Interval Handling (PostgreSQL time intervals)
-        # ===================================================================
-        "interval.handling.mode": "string",  # Convert intervals to strings
+        "hstore.handling.mode": "json",
+        "interval.handling.mode": "string",
         
-        # ===================================================================
-        # Schema Whitelist
-        # PostgreSQL organizes tables into schemas (like MySQL databases)
-        # Common schemas: public, information_schema, pg_catalog
-        # ===================================================================
         "schema.include.list": schema_name,
         
-        # ===================================================================
-        # Heartbeat Configuration
-        # Prevents connection timeout during idle periods
-        # FIXED: Use Kafka-based heartbeat (no DB table needed)
-        # ===================================================================
-        "heartbeat.interval.ms": "10000",  # 10 seconds
-        "heartbeat.action.query": "",  # Empty = Kafka heartbeat (no DB write)
+        "heartbeat.interval.ms": "10000",
+        "heartbeat.action.query": "",
         
-        # ===================================================================
-        # Tombstone Events
-        # Send null message after DELETE (for log compaction)
-        # ===================================================================
         "tombstones.on.delete": "true",
         
-        # ===================================================================
-        # Performance Tuning
-        # ===================================================================
         "max.queue.size": "8192",
         "max.batch.size": "2048",
         "poll.interval.ms": "1000",
         
-        # ===================================================================
-        # Connection Management
-        # ===================================================================
         "connect.timeout.ms": "30000",
         "connect.max.attempts": "3",
         "connect.backoff.initial.delay.ms": "1000",
         "connect.backoff.max.delay.ms": "10000",
-        
-        # ===================================================================
-        # Replica Identity (PostgreSQL-specific)
-        # Controls which columns are included in UPDATE/DELETE events
-        # DEFAULT: Only primary key columns
-        # FULL: All columns (requires ALTER TABLE ... REPLICA IDENTITY FULL)
-        # ===================================================================
-        # Note: This is set per-table in PostgreSQL, not in connector config
-        # See documentation for changing replica identity
     }
     
-    # ===================================================================
-    # Table Whitelist (CRITICAL FORMAT)
-    # PostgreSQL requires schema-qualified table names
-    # Format: schema.table1,schema.table2
-    # Example: public.users,public.orders
-    # ===================================================================
     if tables_whitelist:
         tables_full = [f"{schema_name}.{table}" for table in tables_whitelist]
         config["table.include.list"] = ",".join(tables_full)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
-        logger.debug(f"Tables: {', '.join(tables_full)}")
-
-    # ===================================================================
-    # Custom Configuration Override
-    # Allows per-replication customization
-    # ===================================================================
+    
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
-            logger.info(f"Overriding snapshot mode: {replication_config.snapshot_mode}")
-
+        
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
-            logger.info(f"Applied custom config overrides")
     
-    logger.info(f"✅ Generated PostgreSQL connector config for: {connector_name}")
+    logger.info(f"✅ Generated PostgreSQL connector config with incremental snapshot support")
     return config
 
 def get_oracle_connector_config(
