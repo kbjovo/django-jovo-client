@@ -3,7 +3,6 @@ from django.utils import timezone
 from sqlalchemy import create_engine, text
 from urllib.parse import quote_plus
 import socket
-
 from ..encryption import encrypt_password, decrypt_password
 from .client import Client
 
@@ -16,6 +15,7 @@ class ClientDatabase(models.Model):
         ("postgresql", "PostgreSQL"),
         ("sqlite", "SQLite"),
         ("oracle", "Oracle"),
+        ("mssql", "SQL Server"),
     ]
 
     STATUS_CHOICES = [
@@ -45,7 +45,7 @@ class ClientDatabase(models.Model):
 
     # Settings
     is_primary = models.BooleanField(
-        default=False,  # ✅ CHANGED: Don't auto-set as primary
+        default=False,
         help_text="Source database for CDC"
     )
     is_target = models.BooleanField(
@@ -70,7 +70,6 @@ class ClientDatabase(models.Model):
         verbose_name = "Client Database"
         verbose_name_plural = "Client Databases"
         ordering = ['-created_at']
-        # ✅ ADDED: Prevent duplicate target databases per client
         constraints = [
             models.UniqueConstraint(
                 fields=['client', 'is_target'],
@@ -102,14 +101,23 @@ class ClientDatabase(models.Model):
 
         if self.db_type == "mysql":
             return f"mysql+pymysql://{self.username}:{password}@{self.host}:{self.port}/{self.database_name}"
+
         elif self.db_type == "postgresql":
             return f"postgresql+psycopg2://{self.username}:{password}@{self.host}:{self.port}/{self.database_name}"
+
         elif self.db_type == "sqlite":
             return f"sqlite:///{self.database_name}"
+
         elif self.db_type == "oracle":
             return f"oracle+oracledb://{self.username}:{password}@{self.host}:{self.port}/?service_name={self.database_name}"
+
+        elif self.db_type == "mssql":
+            # Use pymssql instead of pyodbc (no ODBC driver required)
+            return f"mssql+pymssql://{self.username}:{password}@{self.host}:{self.port}/{self.database_name}"
+
         else:
             raise ValueError(f"Unsupported database type: {self.db_type}")
+
 
     def check_connection_status(self, save=True):
         try:

@@ -61,6 +61,7 @@ def cdc_discover_tables(request, database_pk):
     """
     Discover all tables from source database
     Returns list of tables with metadata including totals
+    Supports: MySQL, PostgreSQL, SQL Server, Oracle, SQLite
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
@@ -80,8 +81,11 @@ def cdc_discover_tables(request, database_pk):
     
     # GET: Discover tables
     try:
-        # Check if binary logging is enabled (for MySQL)
+        # ================================================================
+        # STEP 1: Check prerequisites based on database type
+        # ================================================================
         if db_config.db_type.lower() == 'mysql':
+            # Check if binary logging is enabled (required for MySQL CDC)
             is_enabled, log_format = check_binary_logging(db_config)
             if not is_enabled:
                 messages.warning(
@@ -89,22 +93,78 @@ def cdc_discover_tables(request, database_pk):
                     'Binary logging is not enabled on this MySQL database. CDC requires binary logging to be enabled.'
                 )
         
-        # Get list of tables
+        elif db_config.db_type.lower() == 'mssql':
+            # Check if SQL Server Agent is running (required for CDC)
+            engine = get_database_engine(db_config)
+            with engine.connect() as conn:
+                try:
+                    # Check if CDC is enabled at database level
+                    cdc_check = text("""
+                        SELECT is_cdc_enabled, name 
+                        FROM sys.databases 
+                        WHERE name = :db_name
+                    """)
+                    result = conn.execute(cdc_check, {"db_name": db_config.database_name})
+                    row = result.fetchone()
+                    
+                    if row and not row[0]:
+                        messages.warning(
+                            request,
+                            f'CDC is not enabled on database "{db_config.database_name}". '
+                            f'Run: EXEC sys.sp_cdc_enable_db to enable CDC.'
+                        )
+                    
+                    # Check if SQL Server Agent is running
+                    agent_check = text("""
+                        SELECT dss.[status], dss.[status_desc]
+                        FROM sys.dm_server_services dss
+                        WHERE dss.[servicename] LIKE N'SQL Server Agent (%';
+                    """)
+                    result = conn.execute(agent_check)
+                    agent_row = result.fetchone()
+                    
+                    if agent_row and agent_row[0] != 4:  # 4 = Running
+                        messages.warning(
+                            request,
+                            f'SQL Server Agent is not running (Status: {agent_row[1]}). '
+                            f'CDC requires SQL Server Agent to be running.'
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not check SQL Server CDC prerequisites: {e}")
+            
+            engine.dispose()
+        
+        # ================================================================
+        # STEP 2: Get list of tables
+        # ================================================================
         tables = get_table_list(db_config)
         logger.info(f"Found {len(tables)} tables in database")
         
-        # Get table details (row count, size estimates)
+        # ================================================================
+        # STEP 3: Get table details (row count, size, columns)
+        # ================================================================
         tables_with_info = []
         engine = get_database_engine(db_config)
         
         with engine.connect() as conn:
             for table_name in tables:
                 try:
-                    # Get row count - use proper text() wrapper
+                    # Get row count - database-specific queries
                     if db_config.db_type.lower() == 'mysql':
                         count_query = text(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+                    
                     elif db_config.db_type.lower() == 'postgresql':
                         count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
+                    
+                    elif db_config.db_type.lower() == 'mssql':
+                        # SQL Server: Use schema-qualified names
+                        # Default schema is 'dbo' if not specified
+                        schema_name = 'dbo'
+                        if '.' in table_name:
+                            schema_name, table_name = table_name.split('.', 1)
+                        
+                        count_query = text(f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{table_name}]")
+                    
                     else:
                         count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
                     
@@ -112,25 +172,31 @@ def cdc_discover_tables(request, database_pk):
                     row = result.fetchone()
                     row_count = row[0] if row else 0
                     
-                    # Get table schema
+                    # Get table schema (columns, types, primary keys)
                     schema = get_table_schema(db_config, table_name)
                     columns = schema.get('columns', [])
                     
-                    # Check if table has timestamp column
+                    # Check if table has timestamp column (for incremental sync)
                     has_timestamp = any(
                         'timestamp' in str(col.get('type', '')).lower() or 
                         'datetime' in str(col.get('type', '')).lower() or
-                        str(col.get('name', '')).endswith('_at')
+                        'date' in str(col.get('type', '')).lower() or
+                        str(col.get('name', '')).endswith('_at') or
+                        str(col.get('name', '')).endswith('_date')
                         for col in columns
                     )
                     
-                    # Generate prefixed target table name
+                    # Generate prefixed target table name to avoid collisions
                     source_db_name = db_config.database_name
                     target_table_name = f"{source_db_name}_{table_name}"
-
+                    
+                    # For SQL Server, remove schema prefix from display name
+                    display_table_name = table_name.split('.')[-1] if '.' in table_name else table_name
+                    
                     tables_with_info.append({
-                        'name': table_name,
-                        'target_name': target_table_name,
+                        'name': table_name,  # Keep full name (e.g., 'dbo.users')
+                        'display_name': display_table_name,  # Short name for display
+                        'target_name': f"{source_db_name}_{display_table_name}",
                         'row_count': row_count,
                         'column_count': len(columns),
                         'has_timestamp': has_timestamp,
@@ -141,11 +207,15 @@ def cdc_discover_tables(request, database_pk):
                     
                 except Exception as e:
                     logger.error(f"Error getting info for table {table_name}: {str(e)}", exc_info=True)
+                    
+                    # Still add table with zero stats if error occurs
                     source_db_name = db_config.database_name
-                    target_table_name = f"{source_db_name}_{table_name}"
+                    display_table_name = table_name.split('.')[-1] if '.' in table_name else table_name
+                    
                     tables_with_info.append({
                         'name': table_name,
-                        'target_name': target_table_name,
+                        'display_name': display_table_name,
+                        'target_name': f"{source_db_name}_{display_table_name}",
                         'row_count': 0,
                         'column_count': 0,
                         'has_timestamp': False,
@@ -155,11 +225,20 @@ def cdc_discover_tables(request, database_pk):
         
         engine.dispose()
         
-        # Calculate totals
+        # ================================================================
+        # STEP 4: Calculate totals and statistics
+        # ================================================================
         total_rows = sum(t['row_count'] for t in tables_with_info)
         total_cols = sum(t['column_count'] for t in tables_with_info)
-        logger.info(f"Discovery complete: {len(tables_with_info)} tables, {total_rows} total rows, {total_cols} total columns")
         
+        logger.info(
+            f"Discovery complete: {len(tables_with_info)} tables, "
+            f"{total_rows} total rows, {total_cols} total columns"
+        )
+        
+        # ================================================================
+        # STEP 5: Render template
+        # ================================================================
         context = {
             'db_config': db_config,
             'client': db_config.client,
@@ -175,7 +254,9 @@ def cdc_discover_tables(request, database_pk):
         logger.error(f'Failed to discover tables: {str(e)}', exc_info=True)
         messages.error(request, f'Failed to discover tables: {str(e)}')
         return redirect('client_detail', pk=db_config.client.pk)
+    
 
+    
 # ============================================
 # 3. Configure Tables - Step 2
 # ============================================

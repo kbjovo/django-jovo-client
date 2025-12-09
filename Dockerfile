@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y \
     g++ \
     default-libmysqlclient-dev \
     pkg-config \
+    # ADD FreeTDS Development package here:
+    freetds-dev \
+    # You might also need the runtime library if it's not pulled in automatically:
+    freetds-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 20.x for Tailwind
@@ -39,6 +43,7 @@ COPY pyproject.toml ./
 
 # Install Python dependencies using uv
 RUN uv pip install --system -r pyproject.toml
+RUN uv sync
 
 # ============================================
 # Stage 2: Build Tailwind CSS
