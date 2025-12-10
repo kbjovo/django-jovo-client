@@ -266,15 +266,52 @@ class DebeziumCDCConsumer:
         # fallback: sometimes message_value may include keys directly
         return op, before, after, source_db
 
+    # def extract_table_from_topic(self, topic: str) -> Tuple[Optional[str], Optional[str]]:
+    #     """
+    #     Given topic like 'client_3.new_project_db.users' -> return (new_project_db, users)
+    #     """
+    #     parts = topic.split(".")
+    #     if len(parts) >= 3:
+    #         return parts[1], parts[2]
+    #     # fallback
+    #     return None, parts[-1] if parts else None
+    
+    
     def extract_table_from_topic(self, topic: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        Given topic like 'client_3.new_project_db.users' -> return (new_project_db, users)
+        ✅ FIXED: Extract database and table from topic name
+        
+        Handles different database topic formats:
+        - MySQL:      'client_3.mydb.users' → (mydb, users)
+        - PostgreSQL: 'client_3.public.users' → (public, users)
+        - SQL Server: 'client_3.MyDatabase.dbo.Customers' → (MyDatabase, dbo.Customers)
+        
+        Args:
+            topic: Kafka topic name
+            
+        Returns:
+            Tuple[Optional[str], Optional[str]]: (database_or_schema, table)
         """
         parts = topic.split(".")
-        if len(parts) >= 3:
+        
+        # ✅ SQL Server: 4 parts (prefix, database, schema, table)
+        if len(parts) >= 4:
+            # Format: client_3_db_5.MyDatabase.dbo.Customers
+            database = parts[1]  # MyDatabase
+            schema = parts[2]    # dbo
+            table = parts[3]     # Customers
+            
+            # Return schema.table format for SQL Server
+            return database, f"{schema}.{table}"
+        
+        # PostgreSQL/MySQL: 3 parts (prefix, schema/database, table)
+        elif len(parts) >= 3:
             return parts[1], parts[2]
-        # fallback
+        
+        # Fallback
         return None, parts[-1] if parts else None
+
+
 
     def get_table_mapping(self, source_db: str, source_table: str) -> Optional[Any]:
         """

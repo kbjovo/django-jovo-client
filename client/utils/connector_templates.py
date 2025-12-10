@@ -288,6 +288,114 @@ def get_postgresql_connector_config(
     return config
 
 
+# def get_sqlserver_connector_config(
+#     client: Client,
+#     db_config: ClientDatabase,
+#     replication_config: Optional[ReplicationConfig] = None,
+#     tables_whitelist: Optional[List[str]] = None,
+#     kafka_bootstrap_servers: str = 'localhost:9092',
+#     schema_registry_url: str = 'http://localhost:8081',
+#     schema_name: str = 'dbo',
+#     snapshot_mode: str = 'initial',
+#     use_docker_internal_host: bool = True,
+# ) -> Dict[str, Any]:
+#     """
+#     CRITICAL FIX: SQL Server requires matching database.server.name and topic.prefix
+#     """
+#     version = replication_config.connector_version if replication_config else None
+#     connector_name = generate_connector_name(client, db_config, version=version)
+    
+#     db_host = db_config.host
+#     if use_docker_internal_host:
+#         if db_host in ['localhost', '127.0.0.1']:
+#             db_host = 'mssql2019'
+    
+#     # ✅ CRITICAL: Both must be the same for SQL Server
+#     server_name = f"client_{client.id}_db_{db_config.id}"
+    
+#     config = {
+#         "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
+        
+#         "database.hostname": db_host,
+#         "database.port": str(db_config.port),
+#         "database.user": db_config.username,
+#         "database.password": db_config.get_decrypted_password(),
+        
+#         # ✅ Use database.names (not database.include.list)
+#         "database.names": db_config.database_name,
+        
+#         # ✅ CRITICAL: These MUST match
+#         "database.server.name": server_name,
+#         "topic.prefix": server_name,
+        
+#         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+#         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
+        
+#         "snapshot.mode": snapshot_mode,
+#         "snapshot.isolation.mode": "read_committed",
+        
+#         "include.schema.changes": "true",
+        
+#         "incremental.snapshot.allow.schema.changes": "true",
+#         "incremental.snapshot.chunk.size": "1024",
+        
+#         "signal.enabled.channels": "kafka",
+#         "signal.kafka.topic": f"{server_name}.signals",
+#         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        
+#         "database.encrypt": "false",
+        
+#         "decimal.handling.mode": "precise",
+#         "binary.handling.mode": "bytes",
+#         "time.precision.mode": "adaptive_time_microseconds",
+        
+#         "tombstones.on.delete": "true",
+        
+#         "max.queue.size": "8192",
+#         "max.batch.size": "2048",
+#         "poll.interval.ms": "1000",
+        
+#         "database.connection.timeout.ms": "30000",
+#         "heartbeat.interval.ms": "10000",
+#     }
+    
+#     if tables_whitelist:
+#         tables_full = []
+#         for table in tables_whitelist:
+#             if '.' in table:
+#                 # Has schema: 'dbo.Customers'
+#                 tables_full.append(f"{db_config.database_name}.{table}")
+#             else:
+#                 # No schema: 'Customers'
+#                 tables_full.append(f"{db_config.database_name}.{schema_name}.{table}")
+        
+#         config["table.include.list"] = ",".join(tables_full)
+        
+#         logger.info(f"✅ SQL Server table whitelist:")
+#         logger.info(f"   Input: {tables_whitelist}")
+#         logger.info(f"   Formatted: {tables_full}")
+#         logger.info(f"   Expected topics:")
+#         for table in tables_whitelist:
+#             table_name = table.split('.')[-1] if '.' in table else table
+#             expected_topic = f"{server_name}.{db_config.database_name}.{schema_name}.{table_name}"
+#             logger.info(f"      {expected_topic}")
+    
+#     if replication_config:
+#         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
+#             config["snapshot.mode"] = replication_config.snapshot_mode
+        
+#         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
+#             config.update(replication_config.custom_config)
+    
+#     logger.info(f"✅ SQL Server connector config:")
+#     logger.info(f"   Connector: {connector_name}")
+#     logger.info(f"   Server name: {server_name}")
+#     logger.info(f"   Topic prefix: {server_name}")
+#     logger.info(f"   Database: {db_config.database_name}")
+    
+#     return config
+
+
 def get_sqlserver_connector_config(
     client: Client,
     db_config: ClientDatabase,
@@ -300,85 +408,111 @@ def get_sqlserver_connector_config(
     use_docker_internal_host: bool = True,
 ) -> Dict[str, Any]:
     """
-    CRITICAL FIX: SQL Server requires matching database.server.name and topic.prefix
+    ✅ FIXED: SQL Server connector with correct topic naming and case sensitivity
+
+    Key fixes:
+    - database.server.name and topic.prefix must be DIFFERENT
+    - database.server.name: Logical server identifier for Debezium internals
+    - topic.prefix: Kafka topic prefix for actual topic names
+    - SQL Server is CASE-SENSITIVE for table.include.list - must match exact database name case
     """
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
-    
+
     db_host = db_config.host
     if use_docker_internal_host:
         if db_host in ['localhost', '127.0.0.1']:
             db_host = 'mssql2019'
-    
-    # ✅ CRITICAL: Both must be the same for SQL Server
-    server_name = f"client_{client.id}_db_{db_config.id}"
-    
+
+    # ✅ CRITICAL FIX: Use different values for server name and topic prefix
+    # database.server.name: Used internally by Debezium for offset tracking
+    # Format: sqlserver_{connector_name} (must be unique per connector)
+    server_name = f"sqlserver_{client.id}_{db_config.id}"
+
+    # topic.prefix: Used for Kafka topic names
+    # Format: client_{client_id}_db_{db_id} (consistent with other DB types)
+    topic_prefix = f"client_{client.id}_db_{db_config.id}"
+
+    # ✅ CRITICAL: SQL Server is CASE-SENSITIVE for database.names
+    # Must use the EXACT case as stored in SQL Server for both database.names AND table.include.list
+    # Using lowercase causes "no changes will be captured" warning in CDC streaming
+
+    # ⚠️ WARNING: If the database name in Django config doesn't match the exact case in SQL Server,
+    # CDC will fail with "no changes will be captured" warning.
+    # Solution: Update database_name in Django to match SQL Server's exact case
+    # Or use Option 2: Query SQL Server to get the actual case (requires additional DB connection)
+
+    logger.info(f"🔧 SQL Server connector configuration:")
+    logger.info(f"   Connector name: {connector_name}")
+    logger.info(f"   Server name (internal): {server_name}")
+    logger.info(f"   Topic prefix (Kafka): {topic_prefix}")
+    logger.info(f"   Database name from config: {db_config.database_name}")
+    logger.warning(f"   ⚠️  IMPORTANT: Database name must match EXACT case in SQL Server!")
+    logger.warning(f"   ⚠️  If you entered 'appdb' but SQL Server has 'AppDB', CDC will NOT work!")
+    logger.info(f"   Expected topic format: {topic_prefix}.{db_config.database_name}.{schema_name}.{{table}}")
+
     config = {
         "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
-        
+
         "database.hostname": db_host,
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        
-        # ✅ Use database.names (not database.include.list)
+
         "database.names": db_config.database_name,
-        
-        # ✅ CRITICAL: These MUST match
-        "database.server.name": server_name,
-        "topic.prefix": server_name,
-        
+
+        # ✅ CRITICAL FIX: These MUST be different for SQL Server
+        "database.server.name": server_name,      # Internal identifier
+        "topic.prefix": topic_prefix,              # Kafka topic prefix
+
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
-        
+
         "snapshot.mode": snapshot_mode,
         "snapshot.isolation.mode": "read_committed",
-        
+
         "include.schema.changes": "true",
-        
+
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
-        
+
+        # ✅ Signal topic uses topic_prefix (not server_name)
         "signal.enabled.channels": "kafka",
-        "signal.kafka.topic": f"{server_name}.signals",
+        "signal.kafka.topic": f"{topic_prefix}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        
+
         "database.encrypt": "false",
-        
+
         "decimal.handling.mode": "precise",
         "binary.handling.mode": "bytes",
         "time.precision.mode": "adaptive_time_microseconds",
-        
+
         "tombstones.on.delete": "true",
-        
+
         "max.queue.size": "8192",
         "max.batch.size": "2048",
         "poll.interval.ms": "1000",
-        
+
         "database.connection.timeout.ms": "30000",
         "heartbeat.interval.ms": "10000",
     }
-    
+
+    # Format: "dbo.Customers,dbo.Orders" (NOT "AppDB.dbo.Customers")
     if tables_whitelist:
+        logger.warning(f"⚠️  SQL Server is CASE-SENSITIVE for table filters!")
+        logger.warning(f"⚠️  Ensure database name case matches SQL Server: {db_config.database_name}")
+
         tables_full = []
         for table in tables_whitelist:
+            # Preserve exact case provided by user for table names
             if '.' in table:
-                # Has schema: 'dbo.Customers'
-                tables_full.append(f"{db_config.database_name}.{table}")
+                # Already has schema: 'dbo.Customers' - use as-is
+                tables_full.append(table)
             else:
-                # No schema: 'Customers'
-                tables_full.append(f"{db_config.database_name}.{schema_name}.{table}")
-        
+                # No schema: 'Customers' - add schema prefix
+                tables_full.append(f"{schema_name}.{table}")
+
         config["table.include.list"] = ",".join(tables_full)
-        
-        logger.info(f"✅ SQL Server table whitelist:")
-        logger.info(f"   Input: {tables_whitelist}")
-        logger.info(f"   Formatted: {tables_full}")
-        logger.info(f"   Expected topics:")
-        for table in tables_whitelist:
-            table_name = table.split('.')[-1] if '.' in table else table
-            expected_topic = f"{server_name}.{db_config.database_name}.{schema_name}.{table_name}"
-            logger.info(f"      {expected_topic}")
     
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
@@ -390,10 +524,11 @@ def get_sqlserver_connector_config(
     logger.info(f"✅ SQL Server connector config:")
     logger.info(f"   Connector: {connector_name}")
     logger.info(f"   Server name: {server_name}")
-    logger.info(f"   Topic prefix: {server_name}")
+    logger.info(f"   Topic prefix: {topic_prefix}")
     logger.info(f"   Database: {db_config.database_name}")
     
     return config
+
 
  
 def get_oracle_connector_config(
