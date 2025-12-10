@@ -1,5 +1,6 @@
 """
-Celery tasks for CDC replication
+Celery tasks for CDC replication - FIXED for SQL Server
+Complete tasks.py file with proper topic naming for all database types
 """
 import logging
 from celery import shared_task
@@ -15,6 +16,110 @@ from client.utils.notification_utils import send_error_notification
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================================================
+# HELPER FUNCTIONS - Add these at the top after imports
+# ============================================================================
+
+def get_kafka_topics_for_replication(replication_config):
+    """
+    Generate correct Kafka topic names based on database type
+    
+    Returns:
+        list: List of Kafka topic names to subscribe to
+    """
+    config = replication_config
+    db_config = config.client_database
+    db_type = db_config.db_type.lower()
+    
+    # Get topic prefix
+    kafka_topic_prefix = config.kafka_topic_prefix
+    if not kafka_topic_prefix:
+        client = db_config.client
+        kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
+    
+    # Get enabled tables
+    enabled_tables = config.table_mappings.filter(is_enabled=True)
+    
+    topics = []
+    
+    logger.info(f"🔍 Generating Kafka topics for {db_type.upper()}")
+    logger.info(f"   Topic prefix: {kafka_topic_prefix}")
+    logger.info(f"   Database: {db_config.database_name}")
+    logger.info(f"   Tables: {enabled_tables.count()}")
+    
+    for tm in enabled_tables:
+        source_table = tm.source_table
+        
+        if db_type == 'mssql':
+            # ✅ SQL Server: {prefix}.{database}.{schema}.{table}
+            if '.' in source_table:
+                schema, table = source_table.rsplit('.', 1)
+            else:
+                schema = 'dbo'
+                table = source_table
+            
+            topic_name = f"{kafka_topic_prefix}.{db_config.database_name}.{schema}.{table}"
+            logger.info(f"   ✓ SQL Server: {source_table} → {topic_name}")
+            
+        elif db_type == 'postgresql':
+            # ✅ PostgreSQL: {prefix}.{schema}.{table}
+            if '.' in source_table:
+                schema, table = source_table.rsplit('.', 1)
+            else:
+                schema = 'public'
+                table = source_table
+            
+            topic_name = f"{kafka_topic_prefix}.{schema}.{table}"
+            logger.info(f"   ✓ PostgreSQL: {source_table} → {topic_name}")
+            
+        elif db_type == 'mysql':
+            # ✅ MySQL: {prefix}.{database}.{table}
+            table = source_table.split('.')[-1] if '.' in source_table else source_table
+            topic_name = f"{kafka_topic_prefix}.{db_config.database_name}.{table}"
+            logger.info(f"   ✓ MySQL: {source_table} → {topic_name}")
+            
+        elif db_type == 'oracle':
+            # ✅ Oracle: {prefix}.{schema}.{table}
+            if '.' in source_table:
+                schema, table = source_table.rsplit('.', 1)
+            else:
+                schema = db_config.username.upper()
+                table = source_table
+            
+            topic_name = f"{kafka_topic_prefix}.{schema}.{table}"
+            logger.info(f"   ✓ Oracle: {source_table} → {topic_name}")
+            
+        else:
+            # Generic fallback
+            topic_name = f"{kafka_topic_prefix}.{db_config.database_name}.{source_table}"
+            logger.warning(f"   ⚠️ Unknown DB type, using generic: {topic_name}")
+        
+        topics.append(topic_name)
+    
+    logger.info(f"✅ Generated {len(topics)} Kafka topics")
+    return topics
+
+
+def generate_consumer_group_id(replication_config):
+    """
+    Generate consumer group ID
+    Format: cdc_consumer_{config_id}_{database_name}
+    """
+    db_name = replication_config.client_database.database_name
+    safe_db_name = ''.join(c if c.isalnum() or c in '._-' else '_' for c in db_name)
+    
+    if len(safe_db_name) > 50:
+        safe_db_name = safe_db_name[:50]
+    
+    group_id = f"cdc_consumer_{replication_config.id}_{safe_db_name}"
+    logger.info(f"✅ Consumer group ID: {group_id}")
+    return group_id
+
+
+# ============================================================================
+# TASKS
+# ============================================================================
 
 @shared_task(bind=True, max_retries=3)
 def create_debezium_connector(self, replication_config_id):
@@ -77,18 +182,13 @@ def create_debezium_connector(self, replication_config_id):
         if success:
             # Update replication config
             config.connector_name = connector_name
-            # IMPORTANT: kafka_topic_prefix must match the connector's topic.prefix
-            # Format: client_{client_id}_db_{db_id} (for both MySQL and PostgreSQL)
             config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
-            config.status = 'configured'  # Changed from 'active' to 'configured'
-            config.is_active = False  # Changed from True to False
+            config.status = 'configured'
+            config.is_active = False
             config.save()
             
             logger.info(f"✅ Successfully created connector: {connector_name}")
             logger.info(f"ℹ️ Connector is ready. User can now start replication manually.")
-            
-            # REMOVED: Auto-start consumer
-            # User will manually start it from the monitor page
             
             return {
                 'success': True,
@@ -119,16 +219,16 @@ def create_debezium_connector(self, replication_config_id):
         return {'success': False, 'error': str(e)}
 
 
-
 @shared_task(bind=True)
 def start_kafka_consumer(self, replication_config_id, consumer_group_override=None):
     """
-    Task: Start Kafka consumer for a replication config (NEW VERSION)
-    Uses ResilientKafkaConsumer with auto-restart and health monitoring
-
-    Args:
-        replication_config_id: ID of ReplicationConfig
-        consumer_group_override: Optional consumer group ID (for fresh start)
+    ✅ FIXED: Start Kafka consumer with correct topic names for ALL database types
+    
+    Key fixes:
+    1. SQL Server: {prefix}.{database}.{schema}.{table}
+    2. PostgreSQL: {prefix}.{schema}.{table}
+    3. MySQL: {prefix}.{database}.{table}
+    4. Oracle: {prefix}.{schema}.{table}
     """
     try:
         logger.info("=" * 80)
@@ -138,12 +238,11 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
         logger.info("=" * 80)
 
         config = ReplicationConfig.objects.get(id=replication_config_id)
-
         logger.info(f"✓ Loaded config: {config.connector_name}")
 
-        if not config.is_active or not config.connector_name:
-            logger.warning(f"⚠️ Config {replication_config_id} is not active or has no connector")
-            return {'success': False, 'error': 'Config not ready'}
+        if not config.connector_name:
+            logger.warning(f"⚠️ Config {replication_config_id} has no connector")
+            return {'success': False, 'error': 'No connector configured'}
 
         # Get target database
         client = config.client_database.client
@@ -158,57 +257,34 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
         target_engine = get_database_engine(target_db)
         logger.info(f"✓ Target database engine created")
 
-        # Determine topics to subscribe to
-        kafka_topic_prefix = config.kafka_topic_prefix
-
-        # IMPORTANT: Topic format differs by database type
-        # MySQL: {prefix}.{database}.{table}
-        # PostgreSQL: {prefix}.{schema}.{table}
-        db_type = config.client_database.db_type.lower()
-
-        if db_type == 'postgresql':
-            # For PostgreSQL, use schema name (default: public)
-            schema_name = getattr(config.client_database, 'schema_name', 'public')
-            middle_part = schema_name
-        else:
-            # For MySQL, Oracle, use database name
-            middle_part = config.client_database.database_name
-
-        # Get all table topics
-        enabled_tables = config.table_mappings.filter(is_enabled=True)
-        topics = [
-            f"{kafka_topic_prefix}.{middle_part}.{tm.source_table}"
-            for tm in enabled_tables
-        ]
-        logger.info(f"✓ Subscribed to {[topics]}")
-
+        # ✅ CRITICAL FIX: Use helper function to get correct topics
+        topics = get_kafka_topics_for_replication(config)
+        
+        if not topics:
+            raise Exception("No topics generated - check table mappings")
+        
         logger.info(f"✓ Subscribing to {len(topics)} topics:")
         for topic in topics:
-            logger.info(f" - {topic}")
+            logger.info(f"   - {topic}")
 
-        # Determine consumer group ID
+        # ✅ Generate consumer group ID
         if consumer_group_override:
             consumer_group = consumer_group_override
             logger.info(f"✓ Using custom consumer group: {consumer_group}")
         else:
-            # Use database-based consumer group (same as orchestrator)
-            # Format: cdc_consumer_{client_id}_{database_name}
-            database_name = config.client_database.database_name
-            consumer_group = f"cdc_consumer_{client.id}_{database_name}"
-            logger.info(f"✓ Using database-based consumer group: {consumer_group}")
+            consumer_group = generate_consumer_group_id(config)
+            logger.info(f"✓ Using generated consumer group: {consumer_group}")
 
         # Update config with task ID
         config.consumer_task_id = self.request.id
         config.consumer_state = 'STARTING'
         config.save()
-
         logger.info(f"✓ Updated config state to STARTING")
 
-        # Create and start ResilientKafkaConsumer (NEW)
+        # Create ResilientKafkaConsumer
         from client.replication import ResilientKafkaConsumer
         from django.conf import settings
 
-        # Use Docker internal Kafka address for container-to-container communication
         bootstrap_servers = settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'kafka:29092')
         logger.info(f"🔄 Creating ResilientKafkaConsumer with bootstrap_servers={bootstrap_servers}...")
 
@@ -228,7 +304,7 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
         logger.info(f"✓ CONSUMER READY - Starting message consumption loop")
         logger.info("=" * 80)
 
-        # Start consumption with auto-restart (blocks until stopped)
+        # Start consumption (blocks until stopped)
         logger.info(f"🔄 Starting resilient message consumption...")
         consumer.start()
 
@@ -319,12 +395,6 @@ def stop_kafka_consumer(replication_config_id):
 def delete_debezium_connector(connector_name, replication_config_id=None, delete_topics=True, clear_offsets=True):
     """
     Task: Delete a Debezium connector and optionally its topics and offsets
-
-    Args:
-        connector_name: Name of the connector to delete
-        replication_config_id: Optional replication config ID to update
-        delete_topics: Whether to delete associated Kafka topics (default: True)
-        clear_offsets: Whether to clear connector offsets (default: True, RECOMMENDED)
     """
     try:
         logger.info(f"🗑️ Deleting connector: {connector_name} (delete_topics={delete_topics}, clear_offsets={clear_offsets})")
@@ -333,14 +403,14 @@ def delete_debezium_connector(connector_name, replication_config_id=None, delete
         if replication_config_id:
             stop_kafka_consumer(replication_config_id)
 
-        # Delete connector (and optionally topics)
+        # Delete connector
         manager = DebeziumConnectorManager()
         success, error = manager.delete_connector(connector_name, notify=True, delete_topics=delete_topics)
 
         if success:
             logger.info(f"✅ Successfully deleted connector: {connector_name}")
 
-            # Clear connector offsets from Kafka (IMPORTANT: Allows fresh snapshot on recreation)
+            # Clear connector offsets
             if clear_offsets:
                 try:
                     from client.utils.offset_manager import delete_connector_offsets
@@ -352,7 +422,6 @@ def delete_debezium_connector(connector_name, replication_config_id=None, delete
                         logger.warning(f"⚠️ Failed to clear offsets for: {connector_name}")
                 except Exception as e:
                     logger.error(f"❌ Error clearing offsets: {e}", exc_info=True)
-                    # Continue anyway - connector is deleted
 
             # Update config
             if replication_config_id:
@@ -418,24 +487,6 @@ def restart_replication(replication_config_id):
 def force_resnapshot(replication_config_id):
     """
     Task: Force a fresh snapshot by clearing offsets and restarting connector
-
-    Use cases:
-    - When existing data was not captured in initial snapshot
-    - When source database had issues during initial snapshot
-    - When you want to re-sync all data from source
-
-    Process:
-    1. Stop consumer
-    2. Delete connector
-    3. Clear offsets (ensures fresh snapshot)
-    4. Recreate connector (will perform initial snapshot)
-    5. Start consumer
-
-    Args:
-        replication_config_id: ReplicationConfig ID
-
-    Returns:
-        dict: {'success': bool, 'message': str}
     """
     try:
         logger.info(f"🔄 Forcing resnapshot for config {replication_config_id}")
@@ -458,7 +509,7 @@ def force_resnapshot(replication_config_id):
         if not success:
             raise Exception(f"Failed to delete connector: {error}")
 
-        # Step 3: Clear offsets (CRITICAL - allows fresh snapshot)
+        # Step 3: Clear offsets
         logger.info(f"Step 3/5: Clearing offsets...")
         from client.utils.offset_manager import delete_connector_offsets
         offset_deleted = delete_connector_offsets(connector_name)
@@ -470,7 +521,6 @@ def force_resnapshot(replication_config_id):
         from client.replication.orchestrator import ReplicationOrchestrator
         orchestrator = ReplicationOrchestrator(config)
 
-        # Create connector with snapshot.mode='initial' (default)
         result = orchestrator.create_debezium_connector()
         if not result['success']:
             raise Exception(f"Failed to recreate connector: {result.get('error')}")
@@ -479,7 +529,7 @@ def force_resnapshot(replication_config_id):
         logger.info(f"Step 5/5: Starting consumer...")
         start_kafka_consumer.apply_async(
             args=[replication_config_id],
-            countdown=10  # Give connector time to start snapshot
+            countdown=10
         )
 
         config.status = 'active'
@@ -502,7 +552,6 @@ def force_resnapshot(replication_config_id):
 def monitor_connectors():
     """
     Periodic task: Monitor all Debezium connectors
-    Runs every 5 minutes via Celery Beat
     """
     try:
         logger.info("🔍 Monitoring Debezium connectors...")
@@ -580,7 +629,6 @@ def monitor_connectors():
 def check_replication_health():
     """
     Periodic task: Check overall replication health
-    Runs every 10 minutes via Celery Beat
     """
     try:
         logger.info("🏥 Checking replication health...")
@@ -595,13 +643,11 @@ def check_replication_health():
         }
         
         for config in active_configs:
-            # Check last replication
             last_sync = config.last_sync_at
             
             if last_sync:
                 time_since_sync = timezone.now() - last_sync
                 
-                # If no sync in last 30 minutes, mark as unhealthy
                 if time_since_sync > timedelta(minutes=30):
                     health_report['unhealthy'] += 1
                     health_report['issues'].append({
@@ -612,7 +658,6 @@ def check_replication_health():
                 else:
                     health_report['healthy'] += 1
             else:
-                # Never synced
                 health_report['unhealthy'] += 1
                 health_report['issues'].append({
                     'config_id': config.id,

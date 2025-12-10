@@ -287,6 +287,7 @@ def get_postgresql_connector_config(
     logger.info(f"✅ Generated PostgreSQL connector config with incremental snapshot support")
     return config
 
+
 def get_sqlserver_connector_config(
     client: Client,
     db_config: ClientDatabase,
@@ -299,156 +300,102 @@ def get_sqlserver_connector_config(
     use_docker_internal_host: bool = True,
 ) -> Dict[str, Any]:
     """
-    Generate SQL Server Debezium connector configuration
-    
-    Prerequisites for SQL Server CDC:
-    1. SQL Server Agent must be running
-    2. CDC must be enabled at database level: EXEC sys.sp_cdc_enable_db
-    3. CDC must be enabled on each table: EXEC sys.sp_cdc_enable_table
-    
-    Args:
-        client: Client instance
-        db_config: ClientDatabase instance
-        replication_config: ReplicationConfig instance (optional)
-        tables_whitelist: List of tables to replicate (e.g., ['dbo.users', 'dbo.orders'])
-        kafka_bootstrap_servers: Kafka bootstrap servers
-        schema_registry_url: Schema registry URL
-        schema_name: Default schema name (default: 'dbo')
-        snapshot_mode: Snapshot mode (default: 'initial')
-        use_docker_internal_host: Use Docker internal hostname (default: True)
-        
-    Returns:
-        Dict[str, Any]: Connector configuration
+    CRITICAL FIX: SQL Server requires matching database.server.name and topic.prefix
     """
-    # Generate connector name with version if replication_config is provided
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
     
-    # Convert localhost/127.0.0.1 to Docker internal hostname for Debezium
     db_host = db_config.host
     if use_docker_internal_host:
         if db_host in ['localhost', '127.0.0.1']:
-            db_host = 'mssql2019'  # Docker service name
-            logger.info(f"Converting {db_config.host} to 'mssql2019' for Docker internal connection")
+            db_host = 'mssql2019'
     
-    # Base configuration
+    # ✅ CRITICAL: Both must be the same for SQL Server
+    server_name = f"client_{client.id}_db_{db_config.id}"
+    
     config = {
-        # Connector class
         "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
         
-        # Database connection - use Docker internal hostname
         "database.hostname": db_host,
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        "database.names": db_config.database_name,  # Note: SQL Server uses 'names' (plural)
         
-        # Server identification
-        "database.server.name": f"client_{client.id}_db_{db_config.id}",
+        # ✅ Use database.names (not database.include.list)
+        "database.names": db_config.database_name,
         
-        # Topic prefix
-        # Format: client_{client_id}_db_{db_id}.{schema}.{table}
-        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
+        # ✅ CRITICAL: These MUST match
+        "database.server.name": server_name,
+        "topic.prefix": server_name,
         
-        # Use Kafka-based schema history
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
         
-        # Snapshot mode
-        # Options: initial, initial_only, schema_only, schema_only_recovery, never, when_needed
         "snapshot.mode": snapshot_mode,
-        "snapshot.isolation.mode": "read_committed",  # or "snapshot" if supported
+        "snapshot.isolation.mode": "read_committed",
         
-        # Include schema changes
         "include.schema.changes": "true",
         
-        # Incremental snapshots (for adding new tables dynamically)
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
         
-        # Kafka-based signals (for connector control and incremental snapshots)
         "signal.enabled.channels": "kafka",
-        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        "signal.kafka.topic": f"{server_name}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         
-        # ========================================================================
-        # SSL/TLS CONFIGURATION - CRITICAL FIX
-        # ========================================================================
-        # Option 1: Disable encryption (for development/testing environments)
         "database.encrypt": "false",
         
-        # Option 2: Enable encryption but trust server certificate (less secure)
-        # Uncomment these if you want encryption but SQL Server has self-signed cert:
-        # "database.encrypt": "true",
-        # "database.trustServerCertificate": "true",
-        
-        # Option 3: Full SSL with proper certificate validation (production)
-        # Uncomment these if SQL Server has a valid SSL certificate:
-        # "database.encrypt": "true",
-        # "database.trustServerCertificate": "false",
-        # "database.hostNameInCertificate": "your-sql-server-hostname",
-        # ========================================================================
-        
-        # Decimal handling
-        "decimal.handling.mode": "precise",  # Options: precise, double, string
-        
-        # Binary handling
-        "binary.handling.mode": "bytes",  # Options: bytes, base64, hex
-        
-        # Time precision
+        "decimal.handling.mode": "precise",
+        "binary.handling.mode": "bytes",
         "time.precision.mode": "adaptive_time_microseconds",
         
-        # Tombstones on delete
         "tombstones.on.delete": "true",
         
-        # Max queue size
         "max.queue.size": "8192",
         "max.batch.size": "2048",
         "poll.interval.ms": "1000",
         
-        # Connection timeouts
         "database.connection.timeout.ms": "30000",
-        
-        # Heartbeat (keeps connection alive)
         "heartbeat.interval.ms": "10000",
     }
     
-    # Add table whitelist if specified
     if tables_whitelist:
-        # SQL Server table format: schema.table or dbo.table
-        # Debezium expects: database.schema.table format
         tables_full = []
         for table in tables_whitelist:
-            # Handle both 'schema.table' and 'table' formats
             if '.' in table:
-                # Already has schema prefix (e.g., 'dbo.users')
+                # Has schema: 'dbo.Customers'
                 tables_full.append(f"{db_config.database_name}.{table}")
             else:
-                # Add default schema (e.g., 'users' -> 'testdb.dbo.users')
+                # No schema: 'Customers'
                 tables_full.append(f"{db_config.database_name}.{schema_name}.{table}")
         
         config["table.include.list"] = ",".join(tables_full)
-        logger.info(f"Adding SQL Server table whitelist: {len(tables_whitelist)} tables")
-        logger.info(f"Formatted tables: {tables_full}")
+        
+        logger.info(f"✅ SQL Server table whitelist:")
+        logger.info(f"   Input: {tables_whitelist}")
+        logger.info(f"   Formatted: {tables_full}")
+        logger.info(f"   Expected topics:")
+        for table in tables_whitelist:
+            table_name = table.split('.')[-1] if '.' in table else table
+            expected_topic = f"{server_name}.{db_config.database_name}.{schema_name}.{table_name}"
+            logger.info(f"      {expected_topic}")
     
-    # Add configuration from ReplicationConfig if provided
     if replication_config:
-        # Snapshot mode from config
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
         
-        # Custom configuration (JSON field in ReplicationConfig)
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
     
-    logger.info(f"Generated SQL Server connector config for: {connector_name}")
-    logger.info(f"  Database: {db_config.database_name}")
-    logger.info(f"  Schema: {schema_name}")
-    logger.info(f"  Snapshot mode: {snapshot_mode}")
-    logger.info(f"  SSL Encryption: {config.get('database.encrypt', 'not set')}")
+    logger.info(f"✅ SQL Server connector config:")
+    logger.info(f"   Connector: {connector_name}")
+    logger.info(f"   Server name: {server_name}")
+    logger.info(f"   Topic prefix: {server_name}")
+    logger.info(f"   Database: {db_config.database_name}")
     
     return config
-    
+
+ 
 def get_oracle_connector_config(
     client: Client,
     db_config: ClientDatabase,
