@@ -93,7 +93,9 @@ def cdc_configure_tables(request, database_pk):
                     if not target_table_name:
                         # Auto-prefix with source database name to avoid collisions
                         source_db_name = db_config.database_name
-                        target_table_name = f"{source_db_name}_{table_name}"
+                        # Sanitize table_name: replace dots with underscores for MSSQL (e.g., dbo.Orders -> dbo_Orders)
+                        sanitized_table = table_name.replace('.', '_')
+                        target_table_name = f"{source_db_name}_{sanitized_table}"
                     
                     # Create TableMapping
                     table_mapping = TableMapping.objects.create(
@@ -585,18 +587,23 @@ def cdc_edit_config(request, config_pk):
                         target_table_name = request.POST.get(f'target_table_new_{table_name}', '')
                         if not target_table_name:
                             source_db_name = db_config.database_name
-                            target_table_name = f"{source_db_name}_{table_name}"
+                            # Sanitize table_name: replace dots with underscores for MSSQL
+                            sanitized_table = table_name.replace('.', '_')
+                            target_table_name = f"{source_db_name}_{sanitized_table}"
 
                         # Get table settings
                         sync_type = request.POST.get(f'sync_type_table_new_{table_name}', '')
                         incremental_col = request.POST.get(f'incremental_col_table_new_{table_name}', '')
                         conflict_resolution = request.POST.get(f'conflict_resolution_table_new_{table_name}', 'source_wins')
 
+                        # Sanitize target table name: replace dots with underscores for MSSQL
+                        sanitized_target = target_table_name.replace('.', '_')
+
                         # Create table mapping
                         table_mapping = TableMapping.objects.create(
                             replication_config=replication_config,
                             source_table=table_name,
-                            target_table=target_table_name,
+                            target_table=sanitized_target,
                             is_enabled=True,
                             sync_type=sync_type if sync_type else 'realtime',
                             incremental_column=incremental_col if incremental_col else None,

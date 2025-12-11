@@ -627,8 +627,10 @@ def cdc_configure_tables(request, database_pk):
                     if not target_table_name:
                         # Auto-prefix with source database name to avoid collisions
                         source_db_name = db_config.database_name
-                        target_table_name = f"{source_db_name}_{table_name}"
-                    
+                        # Sanitize table_name: replace dots with underscores for MSSQL
+                        sanitized_table = table_name.replace('.', '_')
+                        target_table_name = f"{source_db_name}_{sanitized_table}"
+
                     # Create TableMapping
                     table_mapping = TableMapping.objects.create(
                         replication_config=replication_config,
@@ -1831,7 +1833,9 @@ def cdc_edit_config(request, config_pk):
                         target_table_name = request.POST.get(f'target_table_new_{table_name}', '')
                         if not target_table_name:
                             source_db_name = db_config.database_name
-                            target_table_name = f"{source_db_name}_{table_name}"
+                            # Sanitize table_name: replace dots with underscores for MSSQL
+                            sanitized_table = table_name.replace('.', '_')
+                            target_table_name = f"{source_db_name}_{sanitized_table}"
 
                         # Get table settings
                         sync_type = request.POST.get(f'sync_type_table_new_{table_name}', '')
@@ -2150,7 +2154,9 @@ def cdc_edit_config(request, config_pk):
                                                 logger.info(f"   Tables: {newly_added_tables}")
 
                                                 # Pass db_type and schema_name for correct formatting
-                                                if db_config.db_type.lower() == 'postgresql':
+                                                db_type = db_config.db_type.lower()
+
+                                                if db_type == 'postgresql':
                                                     success, message = signal_sender.send_incremental_snapshot_signal(
                                                         topic_prefix=topic_prefix,
                                                         database_name=db_config.database_name,
@@ -2158,7 +2164,28 @@ def cdc_edit_config(request, config_pk):
                                                         schema_name='public',
                                                         db_type='postgresql'
                                                     )
+                                                elif db_type == 'mssql':
+                                                    # MSSQL: table_names are in 'schema.table' format (e.g., 'dbo.Orders')
+                                                    # Extract schema and table names
+                                                    table_names_only = []
+                                                    schema_name = 'dbo'  # default
+
+                                                    for table in newly_added_tables:
+                                                        if '.' in table:
+                                                            schema_name, table_only = table.split('.', 1)
+                                                            table_names_only.append(table_only)
+                                                        else:
+                                                            table_names_only.append(table)
+
+                                                    success, message = signal_sender.send_incremental_snapshot_signal(
+                                                        topic_prefix=topic_prefix,
+                                                        database_name=db_config.database_name,
+                                                        table_names=table_names_only,
+                                                        schema_name=schema_name,
+                                                        db_type='mssql'
+                                                    )
                                                 else:
+                                                    # MySQL
                                                     success, message = signal_sender.send_incremental_snapshot_signal(
                                                         topic_prefix=topic_prefix,
                                                         database_name=db_config.database_name,

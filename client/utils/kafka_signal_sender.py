@@ -105,6 +105,10 @@ class KafkaSignalSender:
                 # PostgreSQL: Use schema.table format
                 # Example: "public.users", "public.orders"
                 data_collections = [f"{schema_name}.{table}" for table in table_names]
+            elif db_type.lower() == 'mssql':
+                # SQL Server: Use database.schema.table format
+                # Example: "AppDB.dbo.Orders", "AppDB.dbo.Customers"
+                data_collections = [f"{database_name}.{schema_name}.{table}" for table in table_names]
             else:
                 # MySQL: Use database.table format
                 # Example: "mydb.users", "mydb.orders"

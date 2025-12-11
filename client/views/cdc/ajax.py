@@ -154,7 +154,9 @@ def ajax_add_tables(request, config_pk):
 
                 # Create new table mapping
                 source_db_name = db_config.database_name
-                target_table_name = f"{source_db_name}_{table_name}"
+                # Sanitize table_name: replace dots with underscores for MSSQL
+                sanitized_table = table_name.replace('.', '_')
+                target_table_name = f"{source_db_name}_{sanitized_table}"
 
                 table_mapping = TableMapping.objects.create(
                     replication_config=replication_config,

@@ -319,7 +319,7 @@ class DebeziumCDCConsumer:
 
         Args:
             source_db: Source database name
-            source_table: Source table name
+            source_table: Source table name (e.g., 'Orders' for MySQL or 'dbo.Orders' for MSSQL)
 
         Returns:
             TableMapping instance or None if not found
@@ -327,22 +327,22 @@ class DebeziumCDCConsumer:
         try:
             from client.models import TableMapping
 
-            # Look up TableMapping by source_table in the current replication_config
+            # Direct lookup by source_table (should match exactly as stored)
             table_mapping = TableMapping.objects.filter(
                 replication_config=self.replication_config,
                 source_table=source_table,
                 is_enabled=True
             ).first()
 
-            if not table_mapping:
-                logger.warning(
-                    f"   ⚠️  No TableMapping found for {source_db}.{source_table} "
-                    f"in ReplicationConfig {self.replication_config.id}. Skipping."
-                )
-                return None
+            if table_mapping:
+                logger.debug(f"   ✓ Found TableMapping: {table_mapping}")
+                return table_mapping
 
-            logger.debug(f"   ✓ Found TableMapping: {table_mapping}")
-            return table_mapping
+            logger.warning(
+                f"   ⚠️  No TableMapping found for {source_db}.{source_table} "
+                f"in ReplicationConfig {self.replication_config.id}. Skipping."
+            )
+            return None
 
         except Exception as e:
             logger.error(f"   ❌ Error looking up TableMapping: {e}")
@@ -426,12 +426,18 @@ class DebeziumCDCConsumer:
                 elif isinstance(value, int):
                     # Debezium date encoding logic:
                     # - Small integers (< 100000) = days since Unix epoch (for DATE fields)
-                    # - Large integers (> 1000000000) = milliseconds since Unix epoch (for DATETIME/TIMESTAMP)
-                    
-                    if value > 1000000000000:  # milliseconds (DATETIME/TIMESTAMP)
+                    # - SQL Server datetime2: microseconds since Unix epoch (very large numbers)
+                    # - MySQL/PostgreSQL: milliseconds since Unix epoch (large numbers)
+                    # - Legacy: seconds since Unix epoch
+
+                    if value > 1000000000000000:  # microseconds (SQL Server datetime2)
+                        parsed = datetime.fromtimestamp(value / 1000000.0)
+                        logger.debug(f"Converted {key}={value} from microseconds to {parsed}")
+
+                    elif value > 1000000000000:  # milliseconds (MySQL/PostgreSQL DATETIME/TIMESTAMP)
                         parsed = datetime.fromtimestamp(value / 1000.0)
                         logger.debug(f"Converted {key}={value} from milliseconds to {parsed}")
-                    
+
                     elif value > 1000000000:  # seconds (older DATETIME/TIMESTAMP encoding)
                         parsed = datetime.fromtimestamp(value)
                         logger.debug(f"Converted {key}={value} from seconds to {parsed}")
