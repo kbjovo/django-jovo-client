@@ -313,7 +313,7 @@ class DebeziumCDCConsumer:
 
 
 
-    def get_table_mapping(self, source_db: str, source_table: str) -> Optional[Any]:
+    def get_table_mapping(self, source_table: str) -> Optional[Any]:
         """
         Look up TableMapping for the given source table.
 
@@ -326,11 +326,15 @@ class DebeziumCDCConsumer:
         """
         try:
             from client.models import TableMapping
-
-            # Direct lookup by source_table (should match exactly as stored)
+            lookup_value = ''
+            if '.' in source_table:
+                lookup_value = source_table.split('.')[-1]
+            else: 
+                lookup_value = source_table
+                        
             table_mapping = TableMapping.objects.filter(
                 replication_config=self.replication_config,
-                source_table=source_table,
+                source_table=lookup_value,
                 is_enabled=True
             ).first()
 
@@ -339,7 +343,6 @@ class DebeziumCDCConsumer:
                 return table_mapping
 
             logger.warning(
-                f"   ⚠️  No TableMapping found for {source_db}.{source_table} "
                 f"in ReplicationConfig {self.replication_config.id}. Skipping."
             )
             return None
@@ -348,12 +351,7 @@ class DebeziumCDCConsumer:
             logger.error(f"   ❌ Error looking up TableMapping: {e}")
             return None
 
-    """
-    Fix for convert_debezium_timestamps in kafka_consumer.py
-    Replace the integer handling section (around line 370-400)
-    """
 
-    from datetime import datetime, date, timedelta
 
     def convert_debezium_timestamps(self, row: dict, table: Table = None) -> dict:
         """
@@ -762,9 +760,9 @@ class DebeziumCDCConsumer:
             logger.info(f"   Source Table: {table_name}")
 
             # Look up TableMapping for this source table
-            table_mapping = self.get_table_mapping(source_db, table_name)
+            table_mapping = self.get_table_mapping(table_name)
             if not table_mapping:
-                logger.warning(f"   ⚠️  Skipping message - no TableMapping found for {source_db}.{table_name}")
+                logger.warning(f"   ⚠️  Skipping message - no TableMapping found for {table_name}")
                 return
 
             # Get target table name from TableMapping

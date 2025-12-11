@@ -22,7 +22,8 @@ from client.models.replication import ReplicationConfig, TableMapping, ColumnMap
 from client.utils.database_utils import (
     get_table_schema,
     get_table_list,
-    get_database_engine
+    get_database_engine,
+    get_table_cdc_status
 )
 from client.utils.debezium_manager import DebeziumConnectorManager
 from client.replication.orchestrator import ReplicationOrchestrator
@@ -577,9 +578,49 @@ def cdc_edit_config(request, config_pk):
                 if removed_table_names:
                     logger.info(f"🗑️ Tables to remove: {removed_table_names}")
 
+                # ✅ Validate CDC status for MS SQL Server before adding tables
+                if db_config.db_type.lower() == 'mssql':
+                    try:
+                        # Check CDC status for newly selected tables
+                        tables_to_check = [t for t in selected_table_names if t not in existing_mappings]
+                        if tables_to_check:
+                            cdc_status = get_table_cdc_status(db_config, tables_to_check)
+
+                            # Find tables without CDC
+                            non_cdc_tables = [t for t in tables_to_check if not cdc_status.get(t, False)]
+
+                            if non_cdc_tables:
+                                error_msg = (
+                                    f"Cannot add {len(non_cdc_tables)} table(s) without CDC enabled: "
+                                    f"{', '.join(non_cdc_tables)}. Please enable CDC on these tables first."
+                                )
+                                logger.error(f"❌ {error_msg}")
+                                messages.error(request, error_msg)
+                                return redirect('cdc_edit_config', config_pk=replication_config.pk)
+                    except Exception as e:
+                        logger.error(f"❌ Failed to validate CDC status: {e}")
+                        messages.warning(
+                            request,
+                            "Could not verify CDC status. Proceeding with caution - "
+                            "ensure CDC is enabled on all new tables."
+                        )
+
                 # Process newly added tables
                 for table_name in selected_table_names:
-                    if table_name not in existing_mappings:
+                    is_new_table = table_name not in existing_mappings
+
+                    # ✅ FIX: For MS SQL Server, also check legacy format (without schema)
+                    if is_new_table and db_config.db_type.lower() == 'mssql' and '.' in table_name:
+                        # Check if exists with old format (without schema prefix)
+                        table_name_without_schema = table_name.split('.', 1)[1]
+                        if table_name_without_schema in existing_mappings:
+                            is_new_table = False
+                            logger.warning(
+                                f"⚠️  Table '{table_name}' already exists with legacy format "
+                                f"'{table_name_without_schema}' - skipping as new table"
+                            )
+
+                    if is_new_table:
                         newly_added_tables.append(table_name)
                         logger.info(f"➕ New table to add: {table_name}")
                         
@@ -800,31 +841,31 @@ def cdc_edit_config(request, config_pk):
                                         # ================================================================
                                         if db_config.db_type.lower() == 'postgresql':
                                             logger.info(f"🔧 PostgreSQL READ-ONLY MODE: Managing publication...")
-                                            
+
                                             # Update PostgreSQL publication with new table list
                                             pub_success, pub_message = manage_postgresql_publication(
-                                                db_config, 
-                                                replication_config, 
+                                                db_config,
+                                                replication_config,
                                                 tables_list
                                             )
-                                            
+
                                             if not pub_success:
                                                 raise Exception(f"Publication management failed: {pub_message}")
-                                            
+
                                             logger.info(f"✅ {pub_message}")
-                                            
+
                                             # Clear replication slot connections before restart
                                             client_id = db_config.client.id
                                             db_id = db_config.id
                                             slot_name = f"debezium_{client_id}_{db_id}"
-                                            
+
                                             logger.info(f"🔍 Clearing replication slot: {slot_name}")
                                             slot_status = get_replication_slot_status(db_config, slot_name)
-                                            
+
                                             if slot_status and slot_status['active'] and slot_status['active_pid']:
                                                 logger.warning(f"⚠️  Terminating active slot connection (PID: {slot_status['active_pid']})")
                                                 term_success, term_msg = terminate_active_slot_connections(db_config, slot_name)
-                                                
+
                                                 if term_success:
                                                     logger.info(f"✅ {term_msg}")
                                                     time.sleep(2)  # Wait for cleanup
@@ -832,17 +873,13 @@ def cdc_edit_config(request, config_pk):
                                                     logger.warning(f"⚠️  {term_msg}")
 
                                         # ================================================================
-                                        # STEP 3: RESTART CONNECTOR (Required for read-only mode)
+                                        # STEP 3: Wait for Kafka Connect auto-restart
+                                        # ⚠️ NOTE: Kafka Connect automatically restarts the connector when
+                                        # config changes (config.action.reload = restart).
+                                        # Manual restart is NOT needed and causes HTTP 409 conflict.
                                         # ================================================================
-                                        logger.info(f"🔄 Restarting connector to apply table changes...")
-                                        restart_success, restart_error = manager.restart_connector(
-                                            replication_config.connector_name
-                                        )
-                                        
-                                        if not restart_success:
-                                            raise Exception(f"Failed to restart connector: {restart_error}")
-                                        
-                                        logger.info(f"✅ Connector restarted successfully")
+                                        logger.info(f"⏳ Waiting for Kafka Connect to auto-restart connector (3s)...")
+                                        time.sleep(3)
 
                                         # ================================================================
                                         # STEP 4: Wait for connector to stabilize
@@ -953,11 +990,53 @@ def cdc_edit_config(request, config_pk):
         messages.error(request, f"Failed to discover tables: {str(e)}")
         all_table_names = []
 
+    # ✅ Get CDC status for all tables (MS SQL Server only)
+    table_cdc_status = {}
+    if db_config.db_type.lower() == 'mssql':
+        try:
+            table_cdc_status = get_table_cdc_status(db_config, all_table_names)
+
+            cdc_enabled_count = sum(table_cdc_status.values())
+            logger.info(
+                f"MS SQL Server CDC Status: {cdc_enabled_count}/{len(all_table_names)} "
+                f"tables have CDC enabled"
+            )
+
+            # Show warning if some tables don't have CDC
+            if cdc_enabled_count < len(all_table_names):
+                non_cdc_tables = [t for t, enabled in table_cdc_status.items() if not enabled]
+                messages.warning(
+                    request,
+                    f"⚠️ {len(non_cdc_tables)} table(s) do not have CDC enabled. "
+                    f"You can only add tables with CDC enabled to replication."
+                )
+        except Exception as e:
+            logger.error(f"Failed to get CDC status: {e}")
+            messages.warning(
+                request,
+                "Could not verify CDC status for tables. Please ensure CDC is enabled."
+            )
+
     existing_mappings = {tm.source_table: tm for tm in replication_config.table_mappings.all()}
 
     tables_with_columns = []
     for table_name in all_table_names:
         existing_mapping = existing_mappings.get(table_name)
+
+        # ✅ FIX: For MS SQL Server, try both with and without schema prefix
+        # Handles legacy data where tables were stored without schema prefix
+        if not existing_mapping and db_config.db_type.lower() == 'mssql' and '.' in table_name:
+            # Try without schema prefix (e.g., "Customers" instead of "dbo.Customers")
+            table_name_without_schema = table_name.split('.', 1)[1]
+            existing_mapping = existing_mappings.get(table_name_without_schema)
+
+            # If found with old format, log it for visibility
+            if existing_mapping:
+                logger.warning(
+                    f"⚠️  Found table mapping using legacy format (without schema): "
+                    f"'{table_name_without_schema}' instead of '{table_name}'. "
+                    f"Consider updating source_table in database."
+                )
 
         try:
             schema = get_table_schema(db_config, table_name)
@@ -991,6 +1070,9 @@ def cdc_edit_config(request, config_pk):
             source_db_name = db_config.database_name
             default_target_table_name = f"{source_db_name}_{table_name}"
 
+            # ✅ Get CDC status for this table (MS SQL Server)
+            has_cdc = table_cdc_status.get(table_name, True)  # Default True for non-MSSQL
+
             table_data = {
                 'table_name': table_name,
                 'row_count': row_count,
@@ -1002,6 +1084,7 @@ def cdc_edit_config(request, config_pk):
                 'incremental_candidates': incremental_candidates,
                 'primary_keys': schema.get('primary_keys', []),
                 'default_target_name': default_target_table_name,
+                'has_cdc': has_cdc,  # ✅ CDC status flag
             }
 
             tables_with_columns.append(table_data)
@@ -1011,6 +1094,9 @@ def cdc_edit_config(request, config_pk):
             
             source_db_name = db_config.database_name
             default_target_table_name = f"{source_db_name}_{table_name}"
+
+            # ✅ Get CDC status for this table (MS SQL Server)
+            has_cdc = table_cdc_status.get(table_name, True)  # Default True for non-MSSQL
 
             table_data = {
                 'table_name': table_name,
@@ -1023,17 +1109,19 @@ def cdc_edit_config(request, config_pk):
                 'incremental_candidates': [],
                 'primary_keys': [],
                 'default_target_name': default_target_table_name,
+                'has_cdc': has_cdc,  # ✅ CDC status flag
             }
             tables_with_columns.append(table_data)
 
-    # Sort tables: mapped first, then by name
-    tables_with_columns.sort(key=lambda t: (not t['is_mapped'], t['table_name']))
+    # Sort tables: mapped first, then by CDC status, then by name
+    tables_with_columns.sort(key=lambda t: (not t['is_mapped'], not t['has_cdc'], t['table_name']))
 
     context = {
         'replication_config': replication_config,
         'db_config': db_config,
         'client': client,
         'tables_with_columns': tables_with_columns,
+        'is_mssql': db_config.db_type.lower() == 'mssql',  # ✅ Flag for template
     }
 
     return render(request, 'client/cdc/edit_config.html', context)

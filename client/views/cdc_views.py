@@ -2095,17 +2095,10 @@ def cdc_edit_config(request, config_pk):
 
                                         logger.info(f"✅ Connector config updated")
 
-                                        # Restart connector for non-PostgreSQL databases
-                                        if db_config.db_type.lower() != 'postgresql':
-                                            logger.info(f"🔄 Restarting connector tasks...")
-                                            restart_success, restart_error = manager.restart_connector(
-                                                replication_config.connector_name
-                                            )
-
-                                            if not restart_success:
-                                                raise Exception(f"Failed to restart: {restart_error}")
-
-                                            logger.info(f"✅ Connector tasks restarted")
+                                        # ⚠️ NOTE: Kafka Connect automatically restarts the connector when config changes
+                                        # (config.action.reload = restart). Manual restart is NOT needed and causes HTTP 409.
+                                        logger.info(f"⏳ Waiting for Kafka Connect to auto-restart connector (3s)...")
+                                        time.sleep(3)
 
                                         # Wait for connector to stabilize
                                         logger.info(f"⏳ Waiting for connector to stabilize...")
@@ -2127,8 +2120,12 @@ def cdc_edit_config(request, config_pk):
 
                                         # ================================================================
                                         # Send incremental snapshot signal for new tables
+                                        # ⚠️ NOTE: MS SQL Server does NOT support Kafka-only incremental snapshots
+                                        #          for read-only databases. Full snapshot happens on connector restart.
                                         # ================================================================
-                                        if newly_added_tables:
+                                        db_type = db_config.db_type.lower()
+
+                                        if newly_added_tables and db_type != 'mssql':
                                             logger.info(f"📡 Preparing incremental snapshot for {len(newly_added_tables)} table(s)...")
 
                                             try:
@@ -2137,9 +2134,9 @@ def cdc_edit_config(request, config_pk):
 
                                                 topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
                                                 signal_topic_name = f"{topic_prefix}.signals"
-                                                
+
                                                 logger.info(f"📡 Ensuring Kafka signal topic: {signal_topic_name}")
-                                                
+
                                                 topic_manager = KafkaTopicManager()
                                                 signal_topic_success, signal_topic_error = topic_manager.create_signal_topic(topic_prefix)
 
@@ -2153,9 +2150,6 @@ def cdc_edit_config(request, config_pk):
                                                 logger.info(f"📡 Sending incremental snapshot signal via Kafka")
                                                 logger.info(f"   Tables: {newly_added_tables}")
 
-                                                # Pass db_type and schema_name for correct formatting
-                                                db_type = db_config.db_type.lower()
-
                                                 if db_type == 'postgresql':
                                                     success, message = signal_sender.send_incremental_snapshot_signal(
                                                         topic_prefix=topic_prefix,
@@ -2163,26 +2157,6 @@ def cdc_edit_config(request, config_pk):
                                                         table_names=newly_added_tables,
                                                         schema_name='public',
                                                         db_type='postgresql'
-                                                    )
-                                                elif db_type == 'mssql':
-                                                    # MSSQL: table_names are in 'schema.table' format (e.g., 'dbo.Orders')
-                                                    # Extract schema and table names
-                                                    table_names_only = []
-                                                    schema_name = 'dbo'  # default
-
-                                                    for table in newly_added_tables:
-                                                        if '.' in table:
-                                                            schema_name, table_only = table.split('.', 1)
-                                                            table_names_only.append(table_only)
-                                                        else:
-                                                            table_names_only.append(table)
-
-                                                    success, message = signal_sender.send_incremental_snapshot_signal(
-                                                        topic_prefix=topic_prefix,
-                                                        database_name=db_config.database_name,
-                                                        table_names=table_names_only,
-                                                        schema_name=schema_name,
-                                                        db_type='mssql'
                                                     )
                                                 else:
                                                     # MySQL
@@ -2208,6 +2182,13 @@ def cdc_edit_config(request, config_pk):
                                             except Exception as e:
                                                 logger.error(f"❌ Error sending snapshot signal: {e}", exc_info=True)
                                                 messages.warning(request, f'⚠️ Snapshot signal failed: {str(e)}')
+                                        elif newly_added_tables and db_type == 'mssql':
+                                            # MS SQL Server: No signal sending - full snapshot via connector restart
+                                            logger.info(f"✅ MS SQL Server: {len(newly_added_tables)} table(s) added! Full snapshot will occur via connector restart.")
+                                            messages.success(
+                                                request,
+                                                f'✅ {len(newly_added_tables)} table(s) added! Initial snapshot in progress via connector restart.'
+                                            )
 
                                             # Restart consumer to subscribe to new table topics
                                             if replication_config.is_active:
@@ -2293,6 +2274,21 @@ def cdc_edit_config(request, config_pk):
     tables_with_columns = []
     for table_name in all_table_names:
         existing_mapping = existing_mappings.get(table_name)
+
+        # ✅ FIX: For MS SQL Server, try both with and without schema prefix
+        # Handles legacy data where tables were stored without schema prefix
+        if not existing_mapping and db_config.db_type.lower() == 'mssql' and '.' in table_name:
+            # Try without schema prefix (e.g., "Customers" instead of "dbo.Customers")
+            table_name_without_schema = table_name.split('.', 1)[1]
+            existing_mapping = existing_mappings.get(table_name_without_schema)
+
+            # If found with old format, log it for visibility
+            if existing_mapping:
+                logger.warning(
+                    f"⚠️  Found table mapping using legacy format (without schema): "
+                    f"'{table_name_without_schema}' instead of '{table_name}'. "
+                    f"Consider updating source_table in database."
+                )
 
         try:
             schema = get_table_schema(db_config, table_name)

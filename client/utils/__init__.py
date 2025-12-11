@@ -10,6 +10,8 @@ from .database_utils import (
     get_table_schema,
     create_client_database,
     check_binary_logging,
+    check_sql_server_cdc,
+    get_table_cdc_status,
     get_database_size,
 )
 
@@ -54,6 +56,8 @@ __all__ = [
     'get_table_schema',
     'create_client_database',
     'check_binary_logging',
+    'check_sql_server_cdc',
+    'get_table_cdc_status',
     'get_database_size',
     
     # Debezium management

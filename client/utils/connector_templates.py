@@ -288,114 +288,6 @@ def get_postgresql_connector_config(
     return config
 
 
-# def get_sqlserver_connector_config(
-#     client: Client,
-#     db_config: ClientDatabase,
-#     replication_config: Optional[ReplicationConfig] = None,
-#     tables_whitelist: Optional[List[str]] = None,
-#     kafka_bootstrap_servers: str = 'localhost:9092',
-#     schema_registry_url: str = 'http://localhost:8081',
-#     schema_name: str = 'dbo',
-#     snapshot_mode: str = 'initial',
-#     use_docker_internal_host: bool = True,
-# ) -> Dict[str, Any]:
-#     """
-#     CRITICAL FIX: SQL Server requires matching database.server.name and topic.prefix
-#     """
-#     version = replication_config.connector_version if replication_config else None
-#     connector_name = generate_connector_name(client, db_config, version=version)
-    
-#     db_host = db_config.host
-#     if use_docker_internal_host:
-#         if db_host in ['localhost', '127.0.0.1']:
-#             db_host = 'mssql2019'
-    
-#     # ✅ CRITICAL: Both must be the same for SQL Server
-#     server_name = f"client_{client.id}_db_{db_config.id}"
-    
-#     config = {
-#         "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
-        
-#         "database.hostname": db_host,
-#         "database.port": str(db_config.port),
-#         "database.user": db_config.username,
-#         "database.password": db_config.get_decrypted_password(),
-        
-#         # ✅ Use database.names (not database.include.list)
-#         "database.names": db_config.database_name,
-        
-#         # ✅ CRITICAL: These MUST match
-#         "database.server.name": server_name,
-#         "topic.prefix": server_name,
-        
-#         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-#         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
-        
-#         "snapshot.mode": snapshot_mode,
-#         "snapshot.isolation.mode": "read_committed",
-        
-#         "include.schema.changes": "true",
-        
-#         "incremental.snapshot.allow.schema.changes": "true",
-#         "incremental.snapshot.chunk.size": "1024",
-        
-#         "signal.enabled.channels": "kafka",
-#         "signal.kafka.topic": f"{server_name}.signals",
-#         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        
-#         "database.encrypt": "false",
-        
-#         "decimal.handling.mode": "precise",
-#         "binary.handling.mode": "bytes",
-#         "time.precision.mode": "adaptive_time_microseconds",
-        
-#         "tombstones.on.delete": "true",
-        
-#         "max.queue.size": "8192",
-#         "max.batch.size": "2048",
-#         "poll.interval.ms": "1000",
-        
-#         "database.connection.timeout.ms": "30000",
-#         "heartbeat.interval.ms": "10000",
-#     }
-    
-#     if tables_whitelist:
-#         tables_full = []
-#         for table in tables_whitelist:
-#             if '.' in table:
-#                 # Has schema: 'dbo.Customers'
-#                 tables_full.append(f"{db_config.database_name}.{table}")
-#             else:
-#                 # No schema: 'Customers'
-#                 tables_full.append(f"{db_config.database_name}.{schema_name}.{table}")
-        
-#         config["table.include.list"] = ",".join(tables_full)
-        
-#         logger.info(f"✅ SQL Server table whitelist:")
-#         logger.info(f"   Input: {tables_whitelist}")
-#         logger.info(f"   Formatted: {tables_full}")
-#         logger.info(f"   Expected topics:")
-#         for table in tables_whitelist:
-#             table_name = table.split('.')[-1] if '.' in table else table
-#             expected_topic = f"{server_name}.{db_config.database_name}.{schema_name}.{table_name}"
-#             logger.info(f"      {expected_topic}")
-    
-#     if replication_config:
-#         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
-#             config["snapshot.mode"] = replication_config.snapshot_mode
-        
-#         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
-#             config.update(replication_config.custom_config)
-    
-#     logger.info(f"✅ SQL Server connector config:")
-#     logger.info(f"   Connector: {connector_name}")
-#     logger.info(f"   Server name: {server_name}")
-#     logger.info(f"   Topic prefix: {server_name}")
-#     logger.info(f"   Database: {db_config.database_name}")
-    
-#     return config
-
-
 def get_sqlserver_connector_config(
     client: Client,
     db_config: ClientDatabase,
@@ -473,8 +365,13 @@ def get_sqlserver_connector_config(
 
         "include.schema.changes": "true",
 
+        # ✅ CRITICAL: Incremental snapshot configuration for read-only databases
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
+
+        # ✅ CRITICAL: Enable watermarking for incremental snapshots without signal table
+        # This allows Kafka-only signaling to work for read-only databases
+        "incremental.snapshot.watermarking.strategy": "insert_insert",
 
         # ✅ Signal topic uses topic_prefix (not server_name)
         "signal.enabled.channels": "kafka",
@@ -621,6 +518,8 @@ def get_oracle_connector_config(
     logger.info(f"Generated Oracle connector config for: {connector_name}")
     return config
 
+
+
 def get_connector_config_for_database(
     db_config: ClientDatabase,
     replication_config: Optional[ReplicationConfig] = None,
@@ -670,6 +569,8 @@ def get_connector_config_for_database(
         schema_registry_url=schema_registry_url,
         snapshot_mode=snapshot_mode,
     )
+
+
 
 def get_snapshot_modes() -> Dict[str, str]:
     """

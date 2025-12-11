@@ -468,43 +468,43 @@ def check_sql_server_cdc(db_config: ClientDatabase) -> Tuple[bool, Dict[str, Any
     """
     Check if SQL Server CDC is enabled (required for SQL Server CDC)
     Only applicable for SQL Server
-    
+
     Args:
         db_config: ClientDatabase model instance
-        
+
     Returns:
         Tuple[bool, Dict]: (is_enabled, info_dict)
             info_dict contains:
                 - database_cdc_enabled: bool
                 - agent_running: bool
                 - agent_status: str
-        
+
     Raises:
         DatabaseOperationError: If check fails
     """
     if db_config.db_type.lower() != 'mssql':
         return True, {'message': 'Not applicable'}
-    
+
     try:
         info = {
             'database_cdc_enabled': False,
             'agent_running': False,
             'agent_status': 'Unknown'
         }
-        
+
         with get_database_connection(db_config) as conn:
             # Check if CDC is enabled at database level
             cdc_check = text("""
-                SELECT is_cdc_enabled 
-                FROM sys.databases 
+                SELECT is_cdc_enabled
+                FROM sys.databases
                 WHERE name = :db_name
             """)
             result = conn.execute(cdc_check, {"db_name": db_config.database_name})
             row = result.fetchone()
-            
+
             if row:
                 info['database_cdc_enabled'] = bool(row[0])
-            
+
             # Check if SQL Server Agent is running
             agent_check = text("""
                 SELECT dss.[status], dss.[status_desc]
@@ -513,23 +513,117 @@ def check_sql_server_cdc(db_config: ClientDatabase) -> Tuple[bool, Dict[str, Any
             """)
             result = conn.execute(agent_check)
             agent_row = result.fetchone()
-            
+
             if agent_row:
                 info['agent_running'] = (agent_row[0] == 4)  # 4 = Running
                 info['agent_status'] = agent_row[1]
-            
+
             is_enabled = info['database_cdc_enabled'] and info['agent_running']
-            
+
             logger.info(
                 f"SQL Server CDC check for {db_config.connection_name}: "
                 f"DB CDC={info['database_cdc_enabled']}, "
                 f"Agent={info['agent_status']}"
             )
-            
+
             return is_enabled, info
-            
+
     except Exception as e:
         error_msg = f"Failed to check SQL Server CDC: {str(e)}"
+        logger.error(error_msg)
+        raise DatabaseOperationError(error_msg) from e
+
+
+def get_table_cdc_status(db_config: ClientDatabase, table_names: Optional[List[str]] = None) -> Dict[str, bool]:
+    """
+    Check which tables have CDC enabled in SQL Server
+    Only applicable for SQL Server
+
+    Args:
+        db_config: ClientDatabase model instance
+        table_names: Optional list of table names to check (format: 'schema.table' or 'table')
+                    If None, checks all tables
+
+    Returns:
+        Dict[str, bool]: Dictionary mapping table_name -> is_cdc_enabled
+            Keys use 'schema.table' format for consistency
+
+    Example:
+        {
+            'dbo.Customers': True,
+            'dbo.Orders': True,
+            'dbo.TempTable': False
+        }
+
+    Raises:
+        DatabaseOperationError: If check fails
+    """
+    if db_config.db_type.lower() != 'mssql':
+        # For non-MS SQL Server databases, all tables are considered "CDC-ready"
+        if table_names:
+            return {table: True for table in table_names}
+        return {}
+
+    try:
+        cdc_status = {}
+
+        with get_database_connection(db_config) as conn:
+            if table_names:
+                # Check specific tables
+                for table_name in table_names:
+                    # Parse schema and table name
+                    if '.' in table_name:
+                        schema_name, actual_table = table_name.split('.', 1)
+                    else:
+                        schema_name = 'dbo'
+                        actual_table = table_name
+                        table_name = f"{schema_name}.{actual_table}"
+
+                    query = text("""
+                        SELECT t.is_tracked_by_cdc
+                        FROM sys.tables t
+                        INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                        WHERE s.name = :schema_name
+                        AND t.name = :table_name
+                    """)
+
+                    result = conn.execute(query, {
+                        "schema_name": schema_name,
+                        "table_name": actual_table
+                    })
+                    row = result.fetchone()
+
+                    cdc_status[table_name] = bool(row[0]) if row else False
+            else:
+                # Get all tables with CDC status
+                query = text("""
+                    SELECT
+                        s.name AS schema_name,
+                        t.name AS table_name,
+                        t.is_tracked_by_cdc
+                    FROM sys.tables t
+                    INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                    WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+                    ORDER BY s.name, t.name
+                """)
+
+                result = conn.execute(query)
+                for row in result:
+                    schema_name = row[0]
+                    table_name = row[1]
+                    is_tracked = bool(row[2])
+                    full_name = f"{schema_name}.{table_name}"
+                    cdc_status[full_name] = is_tracked
+
+        logger.info(
+            f"CDC status check for {db_config.connection_name}: "
+            f"{sum(cdc_status.values())}/{len(cdc_status)} tables have CDC enabled"
+        )
+
+        return cdc_status
+
+    except Exception as e:
+        error_msg = f"Failed to get table CDC status: {str(e)}"
         logger.error(error_msg)
         raise DatabaseOperationError(error_msg) from e
 
