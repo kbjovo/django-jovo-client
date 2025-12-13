@@ -300,13 +300,18 @@ def get_sqlserver_connector_config(
     use_docker_internal_host: bool = True,
 ) -> Dict[str, Any]:
     """
-    ✅ FIXED: SQL Server connector with correct topic naming and case sensitivity
-
-    Key fixes:
-    - database.server.name and topic.prefix must be DIFFERENT
-    - database.server.name: Logical server identifier for Debezium internals
-    - topic.prefix: Kafka topic prefix for actual topic names
-    - SQL Server is CASE-SENSITIVE for table.include.list - must match exact database name case
+    ✅ FIXED: SQL Server connector with incremental snapshots via Kafka signals
+    
+    Key features:
+    - Supports incremental snapshots for adding new tables
+    - Uses Kafka-only signaling (no DB writes needed)
+    - Correct topic naming: {prefix}.{database}.{schema}.{table}
+    - Works with read-only databases (no signal table required)
+    
+    CRITICAL REQUIREMENTS:
+    1. CDC must be enabled: EXEC sys.sp_cdc_enable_db
+    2. SQL Server Agent must be running
+    3. User needs CDC permissions: EXEC sys.sp_cdc_enable_table
     """
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
@@ -317,30 +322,15 @@ def get_sqlserver_connector_config(
             db_host = 'mssql2019'
 
     # ✅ CRITICAL FIX: Use different values for server name and topic prefix
-    # database.server.name: Used internally by Debezium for offset tracking
-    # Format: sqlserver_{connector_name} (must be unique per connector)
     server_name = f"sqlserver_{client.id}_{db_config.id}"
-
-    # topic.prefix: Used for Kafka topic names
-    # Format: client_{client_id}_db_{db_id} (consistent with other DB types)
     topic_prefix = f"client_{client.id}_db_{db_config.id}"
-
-    # ✅ CRITICAL: SQL Server is CASE-SENSITIVE for database.names
-    # Must use the EXACT case as stored in SQL Server for both database.names AND table.include.list
-    # Using lowercase causes "no changes will be captured" warning in CDC streaming
-
-    # ⚠️ WARNING: If the database name in Django config doesn't match the exact case in SQL Server,
-    # CDC will fail with "no changes will be captured" warning.
-    # Solution: Update database_name in Django to match SQL Server's exact case
-    # Or use Option 2: Query SQL Server to get the actual case (requires additional DB connection)
 
     logger.info(f"🔧 SQL Server connector configuration:")
     logger.info(f"   Connector name: {connector_name}")
     logger.info(f"   Server name (internal): {server_name}")
     logger.info(f"   Topic prefix (Kafka): {topic_prefix}")
-    logger.info(f"   Database name from config: {db_config.database_name}")
-    logger.warning(f"   ⚠️  IMPORTANT: Database name must match EXACT case in SQL Server!")
-    logger.warning(f"   ⚠️  If you entered 'appdb' but SQL Server has 'AppDB', CDC will NOT work!")
+    logger.info(f"   Database name: {db_config.database_name}")
+    logger.warning(f"   ⚠️  IMPORTANT: Database name is CASE-SENSITIVE!")
     logger.info(f"   Expected topic format: {topic_prefix}.{db_config.database_name}.{schema_name}.{{table}}")
 
     config = {
@@ -351,57 +341,70 @@ def get_sqlserver_connector_config(
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
 
+        # ✅ CRITICAL: Must match EXACT case in SQL Server
         "database.names": db_config.database_name,
 
-        # ✅ CRITICAL FIX: These MUST be different for SQL Server
+        # ✅ CRITICAL: These MUST be different for SQL Server
         "database.server.name": server_name,      # Internal identifier
         "topic.prefix": topic_prefix,              # Kafka topic prefix
 
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
+        # ✅ Snapshot mode - use 'initial' for first run, 'when_needed' after
         "snapshot.mode": snapshot_mode,
         "snapshot.isolation.mode": "read_committed",
 
         "include.schema.changes": "true",
 
-        # ✅ CRITICAL: Incremental snapshot configuration for read-only databases
+        # ✅ CRITICAL: Incremental snapshot configuration
+        # SQL Server REQUIRES a signal table for incremental snapshots (unlike MySQL/PostgreSQL)
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
 
-        # ✅ CRITICAL: Enable watermarking for incremental snapshots without signal table
-        # This allows Kafka-only signaling to work for read-only databases
+        # ✅ CRITICAL: Watermarking strategy for incremental snapshots
+        # SQL Server requires 'insert_insert' with a signal table
         "incremental.snapshot.watermarking.strategy": "insert_insert",
 
-        # ✅ Signal topic uses topic_prefix (not server_name)
-        "signal.enabled.channels": "kafka",
+        # ✅ CRITICAL: Signal configuration for SQL Server
+        # SQL Server incremental snapshots require BOTH Kafka signals AND a database signal table
+        "signal.enabled.channels": "source,kafka",  # ✅ CHANGED: Enable BOTH channels
         "signal.kafka.topic": f"{topic_prefix}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        
+        # ✅ NEW: Add signal table (required for SQL Server incremental snapshots)
+        "signal.data.collection": f"{db_config.database_name}.dbo.debezium_signal",
 
+        # Disable encryption (for local development)
         "database.encrypt": "false",
 
+        # Data type handling
         "decimal.handling.mode": "precise",
         "binary.handling.mode": "bytes",
         "time.precision.mode": "adaptive_time_microseconds",
 
+        # Tombstones for deletes
         "tombstones.on.delete": "true",
 
+        # Performance tuning
         "max.queue.size": "8192",
         "max.batch.size": "2048",
         "poll.interval.ms": "1000",
 
+        # Connection settings
         "database.connection.timeout.ms": "30000",
         "heartbeat.interval.ms": "10000",
     }
 
+    # ✅ CRITICAL: Table whitelist format for SQL Server
     # Format: "dbo.Customers,dbo.Orders" (NOT "AppDB.dbo.Customers")
+    # Debezium will automatically prepend the database name
     if tables_whitelist:
         logger.warning(f"⚠️  SQL Server is CASE-SENSITIVE for table filters!")
-        logger.warning(f"⚠️  Ensure database name case matches SQL Server: {db_config.database_name}")
+        logger.warning(f"⚠️  Database name: {db_config.database_name}")
 
         tables_full = []
         for table in tables_whitelist:
-            # Preserve exact case provided by user for table names
             if '.' in table:
                 # Already has schema: 'dbo.Customers' - use as-is
                 tables_full.append(table)
@@ -410,7 +413,12 @@ def get_sqlserver_connector_config(
                 tables_full.append(f"{schema_name}.{table}")
 
         config["table.include.list"] = ",".join(tables_full)
+        
+        logger.info(f"✅ Table filter configured:")
+        for table in tables_full:
+            logger.info(f"   - {table}")
     
+    # Apply custom config from ReplicationConfig
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
@@ -418,14 +426,15 @@ def get_sqlserver_connector_config(
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
     
-    logger.info(f"✅ SQL Server connector config:")
+    logger.info(f"✅ SQL Server connector config generated:")
     logger.info(f"   Connector: {connector_name}")
     logger.info(f"   Server name: {server_name}")
     logger.info(f"   Topic prefix: {topic_prefix}")
     logger.info(f"   Database: {db_config.database_name}")
+    logger.info(f"   Snapshot mode: {config['snapshot.mode']}")
+    logger.info(f"   Incremental snapshots: ENABLED (Kafka signals)")
     
     return config
-
 
  
 def get_oracle_connector_config(

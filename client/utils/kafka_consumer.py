@@ -316,42 +316,202 @@ class DebeziumCDCConsumer:
     def get_table_mapping(self, source_table: str) -> Optional[Any]:
         """
         Look up TableMapping for the given source table.
-
+        
+        FIXED: Handles SQL Server schema.table format correctly
+        
+        Lookup strategies:
+        1. Exact match (e.g., 'dbo.Products')
+        2. Without schema (e.g., 'Products')
+        3. With default schema (e.g., 'dbo.Products' if input was 'Products')
+        
         Args:
-            source_db: Source database name
-            source_table: Source table name (e.g., 'Orders' for MySQL or 'dbo.Orders' for MSSQL)
-
+            source_table: Source table name from Kafka topic
+                        Can be 'dbo.Products' or 'Products'
+        
         Returns:
             TableMapping instance or None if not found
         """
         try:
             from client.models import TableMapping
-            lookup_value = ''
-            if '.' in source_table:
-                lookup_value = source_table.split('.')[-1]
-            else: 
-                lookup_value = source_table
-                        
+            
+            logger.debug(f"🔍 Looking up TableMapping for: {source_table}")
+            
+            # Get database type
+            db_type = self.replication_config.client_database.db_type.lower()
+            
+            # ================================================================
+            # STRATEGY 1: Try exact match first
+            # ================================================================
             table_mapping = TableMapping.objects.filter(
                 replication_config=self.replication_config,
-                source_table=lookup_value,
+                source_table=source_table,
                 is_enabled=True
             ).first()
-
+            
             if table_mapping:
-                logger.debug(f"   ✓ Found TableMapping: {table_mapping}")
+                logger.debug(f"   ✓ Found exact match: {table_mapping.source_table}")
                 return table_mapping
-
+            
+            # ================================================================
+            # STRATEGY 2: Try without schema prefix (for SQL Server)
+            # ================================================================
+            if db_type == 'mssql' and '.' in source_table:
+                # Input: 'dbo.Products' → Try: 'Products'
+                table_without_schema = source_table.split('.', 1)[1]
+                
+                table_mapping = TableMapping.objects.filter(
+                    replication_config=self.replication_config,
+                    source_table=table_without_schema,
+                    is_enabled=True
+                ).first()
+                
+                if table_mapping:
+                    logger.warning(
+                        f"   ⚠️  Found legacy mapping without schema: "
+                        f"'{table_without_schema}' (should be '{source_table}')"
+                    )
+                    return table_mapping
+            
+            # ================================================================
+            # STRATEGY 3: Try with default schema prefix (for SQL Server)
+            # ================================================================
+            if db_type == 'mssql' and '.' not in source_table:
+                # Input: 'Products' → Try: 'dbo.Products'
+                table_with_schema = f"dbo.{source_table}"
+                
+                table_mapping = TableMapping.objects.filter(
+                    replication_config=self.replication_config,
+                    source_table=table_with_schema,
+                    is_enabled=True
+                ).first()
+                
+                if table_mapping:
+                    logger.debug(f"   ✓ Found with schema prefix: {table_with_schema}")
+                    return table_mapping
+            
+            # ================================================================
+            # STRATEGY 4: Case-insensitive match (last resort)
+            # ================================================================
+            table_mapping = TableMapping.objects.filter(
+                replication_config=self.replication_config,
+                source_table__iexact=source_table,
+                is_enabled=True
+            ).first()
+            
+            if table_mapping:
+                logger.warning(
+                    f"   ⚠️  Found case-insensitive match: "
+                    f"'{table_mapping.source_table}' (searched for '{source_table}')"
+                )
+                return table_mapping
+            
+            # ================================================================
+            # NOT FOUND
+            # ================================================================
             logger.warning(
+                f"   ❌ No TableMapping found for '{source_table}' "
                 f"in ReplicationConfig {self.replication_config.id}. Skipping."
             )
+            
+            # Debug: Show what mappings DO exist
+            existing_mappings = TableMapping.objects.filter(
+                replication_config=self.replication_config,
+                is_enabled=True
+            ).values_list('source_table', flat=True)
+            
+            if existing_mappings:
+                logger.debug(f"   📋 Available mappings: {list(existing_mappings)}")
+            else:
+                logger.warning(f"   ⚠️  No enabled table mappings found in this config!")
+            
             return None
 
         except Exception as e:
             logger.error(f"   ❌ Error looking up TableMapping: {e}")
             return None
 
-
+    def get_table_mapping_v2(self, source_table: str) -> Optional[Any]:
+        """
+        Enhanced table mapping lookup with fuzzy matching.
+        
+        This version is more forgiving and handles:
+        - Schema variations (dbo.Table vs Table)
+        - Case variations (Products vs products)
+        - Legacy data formats
+        
+        Use this if you have inconsistent data from multiple sources.
+        """
+        try:
+            from client.models import TableMapping
+            
+            logger.debug(f"🔍 Looking up TableMapping for: {source_table}")
+            
+            db_type = self.replication_config.client_database.db_type.lower()
+            
+            # Get all enabled mappings for this config
+            all_mappings = TableMapping.objects.filter(
+                replication_config=self.replication_config,
+                is_enabled=True
+            )
+            
+            if not all_mappings.exists():
+                logger.warning(f"   ⚠️  No enabled table mappings in config {self.replication_config.id}")
+                return None
+            
+            # ================================================================
+            # Try multiple matching strategies
+            # ================================================================
+            
+            # Normalize input table name
+            input_normalized = source_table.lower().strip()
+            input_without_schema = (
+                source_table.split('.', 1)[1] if '.' in source_table else source_table
+            ).lower().strip()
+            
+            for mapping in all_mappings:
+                stored_table = mapping.source_table
+                stored_normalized = stored_table.lower().strip()
+                stored_without_schema = (
+                    stored_table.split('.', 1)[1] if '.' in stored_table else stored_table
+                ).lower().strip()
+                
+                # Match 1: Exact match (case-insensitive)
+                if input_normalized == stored_normalized:
+                    logger.debug(f"   ✓ Exact match: {stored_table}")
+                    return mapping
+                
+                # Match 2: Without schema (for SQL Server)
+                if db_type == 'mssql':
+                    if input_without_schema == stored_without_schema:
+                        logger.debug(f"   ✓ Schema-agnostic match: {stored_table}")
+                        return mapping
+                
+                # Match 3: Input has schema, stored doesn't (legacy data)
+                if '.' in source_table and '.' not in stored_table:
+                    if input_without_schema == stored_normalized:
+                        logger.warning(
+                            f"   ⚠️  Legacy match: '{stored_table}' (should be '{source_table}')"
+                        )
+                        return mapping
+                
+                # Match 4: Input lacks schema, stored has it
+                if '.' not in source_table and '.' in stored_table:
+                    if input_normalized == stored_without_schema:
+                        logger.debug(f"   ✓ Match with stored schema: {stored_table}")
+                        return mapping
+            
+            # Not found
+            logger.warning(f"   ❌ No match found for '{source_table}'")
+            logger.debug(
+                f"   📋 Available tables: "
+                f"{[m.source_table for m in all_mappings[:5]]}{'...' if all_mappings.count() > 5 else ''}"
+            )
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"   ❌ Error in table lookup: {e}")
+            return None
 
     def convert_debezium_timestamps(self, row: dict, table: Table = None) -> dict:
         """
@@ -721,6 +881,7 @@ class DebeziumCDCConsumer:
     def process_message(self, msg):
         """
         Process a confluent_kafka.Message object
+        FIXED: Better table mapping lookup for SQL Server
         """
         try:
             topic = msg.topic()
@@ -734,13 +895,13 @@ class DebeziumCDCConsumer:
             logger.info(f"   Offset: {offset}")
             logger.info("=" * 80)
 
-            # AvroConsumer automatically deserializes Avro messages to Python dicts
+            # AvroConsumer automatically deserializes Avro messages
             message_value = msg.value()
             if message_value is None:
                 logger.warning(f"⚠️  Empty message received on topic {topic}")
                 return
 
-            logger.debug(f"📄 Avro-deserialized message: {json.dumps(message_value, indent=2, default=str)[:500]}...")
+            logger.debug(f"📄 Message: {json.dumps(message_value, indent=2, default=str)[:500]}...")
 
             op, before, after, payload_source_db = self.parse_debezium_payload(message_value)
 
@@ -750,7 +911,7 @@ class DebeziumCDCConsumer:
             logger.info(f"   Has 'before': {before is not None}")
             logger.info(f"   Has 'after': {after is not None}")
 
-            # determine source_db & table (prefer payload source, fallback to topic)
+            # Extract table info from topic
             topic_db, topic_table = self.extract_table_from_topic(topic)
             source_db = payload_source_db or topic_db or "unknown_source"
             table_name = topic_table or "unknown_table"
@@ -759,7 +920,7 @@ class DebeziumCDCConsumer:
             logger.info(f"   Source DB: {source_db}")
             logger.info(f"   Source Table: {table_name}")
 
-            # Look up TableMapping for this source table
+            # ✅ FIX: Look up TableMapping with better strategy
             table_mapping = self.get_table_mapping(table_name)
             if not table_mapping:
                 logger.warning(f"   ⚠️  Skipping message - no TableMapping found for {table_name}")
@@ -767,73 +928,70 @@ class DebeziumCDCConsumer:
 
             # Get target table name from TableMapping
             target_table_name = table_mapping.target_table
-            logger.info(f"   Target Table: {target_table_name}")
+            logger.info(f"   ✓ Target Table: {target_table_name}")
 
-            # ensure table exists (use after|before to infer)
-            # Convert timestamps in sample data for proper type inference
+            # Convert timestamps in sample data
             sample = self.convert_debezium_timestamps(after or before or {})
+            
+            # Ensure table exists
             if target_table_name not in self.table_cache:
-                # attempt to load existing table or create from sample
                 try:
                     self.ensure_table_exists(target_table_name, sample)
-                    # re-load Table instance into cache if created by ensure_table_exists
                     if target_table_name not in self.table_cache:
-                        # attempt autoload
                         t = Table(target_table_name, self.metadata, autoload_with=self.target_engine)
                         self.table_cache[target_table_name] = t
                 except Exception as e:
                     logger.exception(f"Failed to prepare table {target_table_name}: {e}")
-                    return  # skip this message
+                    return
 
-            # Get SQLAlchemy Table object from cache
+            # Get SQLAlchemy Table object
             target_table_obj = self.table_cache.get(target_table_name)
             if target_table_obj is None:
                 logger.error(f"   ❌ Table object not in cache for {target_table_name}")
                 return
 
-            # handle operations
+            # Handle operations
             logger.info(f"🔧 Processing Operation: {op}")
 
             if op in ("c", "r"):  # create or snapshot read
                 if after:
                     logger.info(f"➕ INSERT operation detected")
-                    logger.info(f"   Data to insert: {json.dumps(after, default=str)[:200]}...")
-                    # Debezium 'after' is a dict of column->value
+                    logger.info(f"   Data: {json.dumps(after, default=str)[:200]}...")
                     self.apply_insert(target_table_obj, after, table_mapping)
                 else:
                     logger.warning(f"⚠️  CREATE/READ operation but no 'after' data")
+                    
             elif op == "u":
                 logger.info(f"✏️  UPDATE operation detected")
-                logger.info(f"   Before: {json.dumps(before, default=str)[:150] if before else 'None'}...")
-                logger.info(f"   After: {json.dumps(after, default=str)[:150] if after else 'None'}...")
-                # update
                 self.apply_update(target_table_obj, after or {}, table_mapping)
+                
             elif op == "d":
                 logger.info(f"🗑️  DELETE operation detected")
-                logger.info(f"   Before: {json.dumps(before, default=str)[:200] if before else 'None'}...")
-                # delete
                 self.apply_delete(target_table_obj, before or {}, table_mapping)
+                
             else:
                 logger.warning(f"⚠️  Unknown operation '{op}'")
-                # Unknown op: could still be message with payload structure; treat as insert if 'after' present
                 if after:
                     logger.info(f"   Treating as INSERT since 'after' data is present")
                     self.apply_insert(target_table_obj, after, table_mapping)
                 else:
                     logger.warning(f"   No 'after' data - skipping message")
 
-            # update stats
+            # Update stats
             self.stats["messages_processed"] += 1
             self.stats["last_message_time"] = datetime.utcnow()
 
             logger.info(f"✅ Message processed successfully")
-            logger.info(f"📈 Stats: {self.stats['messages_processed']} messages, {self.stats['inserts']} inserts, {self.stats['updates']} updates, {self.stats['deletes']} deletes, {self.stats['errors']} errors")
+            logger.info(
+                f"📈 Stats: {self.stats['messages_processed']} messages, "
+                f"{self.stats['inserts']} inserts, {self.stats['updates']} updates, "
+                f"{self.stats['deletes']} deletes, {self.stats['errors']} errors"
+            )
             logger.info("=" * 80)
 
         except Exception as e:
             self.stats["errors"] += 1
             logger.exception(f"Error processing message from {msg.topic()}: {e}")
-            # do not raise - continue processing
 
     # -------------------------
     # Consume loop
