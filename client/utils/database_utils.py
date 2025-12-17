@@ -1,6 +1,7 @@
 """
 Database utility functions for connection management and operations
 Supports: MySQL, PostgreSQL, SQL Server, Oracle, SQLite
+FIXED: Proper Oracle handling while maintaining compatibility with all other databases
 """
 
 import logging
@@ -30,22 +31,12 @@ class DatabaseOperationError(Exception):
 def build_connection_string(db_config: ClientDatabase) -> str:
     """
     Build SQLAlchemy connection string from ClientDatabase instance
-
-    Args:
-        db_config: ClientDatabase model instance
-
-    Returns:
-        str: SQLAlchemy connection string
-
-    Raises:
-        ValueError: If database type is not supported
     """
     from urllib.parse import quote_plus
 
     db_type = db_config.db_type.lower()
     host = db_config.host
     port = db_config.port
-    # URL-encode username and password to handle special characters (@, :, /, etc.)
     username = quote_plus(db_config.username)
     password = quote_plus(db_config.get_decrypted_password())
     database = db_config.database_name
@@ -54,7 +45,7 @@ def build_connection_string(db_config: ClientDatabase) -> str:
         'mysql': f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}",
         'postgresql': f"postgresql+psycopg2://{username}:{password}@{host}:{port}/{database}",
         'mssql': f"mssql+pymssql://{username}:{password}@{host}:{port}/{database}",
-        'oracle': f"oracle+cx_oracle://{username}:{password}@{host}:{port}/{database}",
+        'oracle': f"oracle+oracledb://{username}:{password}@{host}:{port}/?service_name={database}",
         'sqlite': f"sqlite:///{database}",
     }
 
@@ -113,13 +104,7 @@ def test_database_connection(db_config: ClientDatabase) -> Tuple[bool, Optional[
         
         with engine.connect() as conn:
             # Test query based on database type
-            if db_config.db_type.lower() == 'mysql':
-                result = conn.execute(text("SELECT 1"))
-            elif db_config.db_type.lower() == 'postgresql':
-                result = conn.execute(text("SELECT 1"))
-            elif db_config.db_type.lower() == 'mssql':
-                result = conn.execute(text("SELECT 1"))
-            elif db_config.db_type.lower() == 'oracle':
+            if db_config.db_type.lower() == 'oracle':
                 result = conn.execute(text("SELECT 1 FROM DUAL"))
             else:
                 result = conn.execute(text("SELECT 1"))
@@ -210,7 +195,7 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
     - MySQL: All tables from specified database
     - PostgreSQL: Tables from 'public' schema (or specified schema)
     - SQL Server: Tables from all user schemas (dbo, etc.) as 'schema.table'
-    - Oracle: All tables from user schema
+    - Oracle: All tables from user schema as 'SCHEMA.TABLE'
     - SQLite: All tables
     
     Args:
@@ -218,7 +203,7 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
         schema: Schema name (optional, overrides defaults)
         
     Returns:
-        List[str]: List of table names (SQL Server format: 'schema.table')
+        List[str]: List of table names (SQL Server/Oracle format: 'schema.table')
         
     Raises:
         DatabaseOperationError: If operation fails
@@ -277,12 +262,21 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
             logger.info(f"MySQL: Found {len(tables)} tables")
             
         elif db_type == 'oracle':
-            # Oracle: Get tables from current user schema
+            # ✅ Oracle: Get tables from user schema with SCHEMA.TABLE format
             if schema:
-                tables = inspector.get_table_names(schema=schema)
+                schema_name = schema.upper()
             else:
-                tables = inspector.get_table_names()
-            logger.info(f"Oracle: Found {len(tables)} tables")
+                schema_name = db_config.username.upper()
+            
+            try:
+                # Get tables from specified schema
+                oracle_tables = inspector.get_table_names(schema=schema_name)
+                # Return in SCHEMA.TABLE format for consistency
+                tables = [f"{schema_name}.{table}" for table in oracle_tables]
+                logger.info(f"Oracle: Found {len(tables)} tables in schema '{schema_name}'")
+            except Exception as e:
+                logger.error(f"Oracle: Failed to get tables from schema '{schema_name}': {e}")
+                tables = []
             
         elif db_type == 'sqlite':
             # SQLite: Get all tables
@@ -307,9 +301,15 @@ def get_table_schema(db_config: ClientDatabase, table_name: str, schema: Optiona
     """
     Get table schema information (columns, types, constraints)
     
+    FIXED: Proper handling for all database types including Oracle
+    
     Args:
         db_config: ClientDatabase model instance
-        table_name: Name of the table (for SQL Server: 'schema.table' or just 'table')
+        table_name: Name of the table
+            - MySQL: 'table_name'
+            - PostgreSQL: 'table_name' or 'schema.table_name'
+            - SQL Server: 'table_name' or 'schema.table_name'
+            - Oracle: 'table_name' or 'SCHEMA.TABLE_NAME'
         schema: Schema name (optional, overrides default)
         
     Returns:
@@ -329,12 +329,12 @@ def get_table_schema(db_config: ClientDatabase, table_name: str, schema: Optiona
         
         db_type = db_config.db_type.lower()
         
-        # Parse schema and table name for SQL Server
+        # Parse schema and table name
         schema_name = schema
         actual_table_name = table_name
         
         if db_type == 'mssql':
-            # SQL Server: Parse 'schema.table' format
+            # ✅ SQL Server: Parse 'schema.table' format
             if '.' in table_name:
                 schema_name, actual_table_name = table_name.split('.', 1)
             else:
@@ -343,17 +343,42 @@ def get_table_schema(db_config: ClientDatabase, table_name: str, schema: Optiona
             logger.debug(f"SQL Server: schema='{schema_name}', table='{actual_table_name}'")
             
         elif db_type == 'postgresql':
-            # PostgreSQL: Use specified schema or default to 'public'
-            schema_name = schema_name or 'public'
+            # ✅ PostgreSQL: Parse 'schema.table' format
+            if '.' in table_name:
+                schema_name, actual_table_name = table_name.rsplit('.', 1)
+            else:
+                schema_name = schema_name or 'public'  # Default schema
+            
             logger.debug(f"PostgreSQL: schema='{schema_name}', table='{actual_table_name}'")
         
-        # Get column information
-        if schema_name:
+        elif db_type == 'oracle':
+            # ✅ Oracle: Parse 'SCHEMA.TABLE' format (case-sensitive)
+            if '.' in table_name:
+                # Format: 'SCHEMA.TABLE' or 'schema.table'
+                schema_name, actual_table_name = table_name.rsplit('.', 1)
+                # Oracle uses uppercase for identifiers
+                schema_name = schema_name.upper()
+                actual_table_name = actual_table_name.upper()
+            else:
+                # No schema prefix - use current user's schema
+                schema_name = schema_name or db_config.username.upper()
+                actual_table_name = table_name.upper()
+            
+            logger.debug(f"Oracle: schema='{schema_name}', table='{actual_table_name}'")
+        
+        elif db_type == 'mysql':
+            # ✅ MySQL: No schema concept (database = schema)
+            # Just use the table name as-is
+            logger.debug(f"MySQL: table='{actual_table_name}'")
+        
+        # Get column information using parsed schema/table
+        if schema_name and db_type != 'mysql':
             columns = inspector.get_columns(actual_table_name, schema=schema_name)
             pk_constraint = inspector.get_pk_constraint(actual_table_name, schema=schema_name)
             indexes = inspector.get_indexes(actual_table_name, schema=schema_name)
             foreign_keys = inspector.get_foreign_keys(actual_table_name, schema=schema_name)
         else:
+            # MySQL or no schema specified
             columns = inspector.get_columns(actual_table_name)
             pk_constraint = inspector.get_pk_constraint(actual_table_name)
             indexes = inspector.get_indexes(actual_table_name)
@@ -665,6 +690,14 @@ def get_database_size(db_config: ClientDatabase) -> Dict[str, Any]:
                 FROM sys.master_files
                 WHERE database_id = DB_ID(:database_name)
             """
+        elif db_type == 'oracle':
+            query = """
+                SELECT 
+                    SUM(bytes) / 1024 / 1024 AS size_mb,
+                    COUNT(DISTINCT table_name) AS table_count
+                FROM user_segments
+                WHERE segment_type = 'TABLE'
+            """
         else:
             return {'size_mb': 0, 'table_count': 0, 'error': 'Unsupported database type'}
         
@@ -687,9 +720,11 @@ def get_row_count(db_config: ClientDatabase, table_name: str, schema: Optional[s
     """
     Get row count for a specific table
     
+    FIXED: Proper handling for all database types including Oracle
+    
     Args:
         db_config: ClientDatabase model instance
-        table_name: Name of the table (for SQL Server: 'schema.table' or just 'table')
+        table_name: Name of the table (may include schema prefix)
         schema: Schema name (optional)
         
     Returns:
@@ -701,11 +736,12 @@ def get_row_count(db_config: ClientDatabase, table_name: str, schema: Optional[s
     try:
         db_type = db_config.db_type.lower()
         
-        # Parse schema and table name for SQL Server
+        # Parse schema and table name
         schema_name = schema
         actual_table_name = table_name
         
         if db_type == 'mssql':
+            # ✅ SQL Server
             if '.' in table_name:
                 schema_name, actual_table_name = table_name.split('.', 1)
             else:
@@ -714,13 +750,32 @@ def get_row_count(db_config: ClientDatabase, table_name: str, schema: Optional[s
             query = f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{actual_table_name}]"
             
         elif db_type == 'postgresql':
-            schema_name = schema_name or 'public'
+            # ✅ PostgreSQL
+            if '.' in table_name:
+                schema_name, actual_table_name = table_name.rsplit('.', 1)
+            else:
+                schema_name = schema_name or 'public'
             query = f'SELECT COUNT(*) as cnt FROM "{schema_name}"."{actual_table_name}"'
             
+        elif db_type == 'oracle':
+            # ✅ Oracle: Use uppercase and unquoted identifiers
+            if '.' in table_name:
+                schema_name, actual_table_name = table_name.rsplit('.', 1)
+                schema_name = schema_name.upper()
+                actual_table_name = actual_table_name.upper()
+            else:
+                schema_name = schema_name or db_config.username.upper()
+                actual_table_name = table_name.upper()
+            
+            # Oracle: Use unquoted identifiers (already uppercase)
+            query = f"SELECT COUNT(*) as cnt FROM {schema_name}.{actual_table_name}"
+            
         elif db_type == 'mysql':
+            # ✅ MySQL: No schema concept
             query = f"SELECT COUNT(*) as cnt FROM `{actual_table_name}`"
             
         else:
+            # Generic fallback
             query = f"SELECT COUNT(*) as cnt FROM {actual_table_name}"
         
         with get_database_connection(db_config) as conn:
@@ -743,7 +798,7 @@ def table_exists(db_config: ClientDatabase, table_name: str, schema: Optional[st
     
     Args:
         db_config: ClientDatabase model instance
-        table_name: Name of the table (for SQL Server: 'schema.table' or just 'table')
+        table_name: Name of the table (may include schema prefix)
         schema: Schema name (optional)
         
     Returns:
@@ -752,14 +807,94 @@ def table_exists(db_config: ClientDatabase, table_name: str, schema: Optional[st
     try:
         tables = get_table_list(db_config, schema=schema)
         
-        # For SQL Server, handle both 'schema.table' and 'table' formats
+        # Handle schema.table format
         if db_config.db_type.lower() == 'mssql':
             if '.' not in table_name:
                 schema_name = schema or 'dbo'
                 table_name = f"{schema_name}.{table_name}"
+        elif db_config.db_type.lower() == 'oracle':
+            if '.' not in table_name:
+                schema_name = schema or db_config.username.upper()
+                table_name = f"{schema_name}.{table_name}".upper()
+            else:
+                table_name = table_name.upper()
         
         return table_name in tables
         
     except Exception as e:
         logger.error(f"Failed to check if table exists: {str(e)}")
         return False
+    
+
+
+def check_oracle_logminer(db_config: ClientDatabase) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Check if Oracle LogMiner is enabled (required for CDC)
+    Only applicable for Oracle
+    
+    Returns:
+        Tuple[bool, Dict]: (is_enabled, info_dict)
+    """
+    if db_config.db_type.lower() != 'oracle':
+        return True, {'message': 'Not applicable'}
+    
+    try:
+        info = {
+            'supplemental_logging': False,
+            'archive_log_mode': False,
+            'logminer_available': False,
+        }
+        
+        with get_database_connection(db_config) as conn:
+            # Check supplemental logging
+            supp_log_check = text("""
+                SELECT SUPPLEMENTAL_LOG_DATA_MIN 
+                FROM V$DATABASE
+            """)
+            result = conn.execute(supp_log_check)
+            row = result.fetchone()
+            if row:
+                info['supplemental_logging'] = row[0] == 'YES'
+            
+            # Check archive log mode
+            archive_check = text("""
+                SELECT LOG_MODE 
+                FROM V$DATABASE
+            """)
+            result = conn.execute(archive_check)
+            row = result.fetchone()
+            if row:
+                info['archive_log_mode'] = row[0] == 'ARCHIVELOG'
+            
+            # Check LogMiner availability
+            try:
+                logminer_check = text("""
+                    SELECT COUNT(*) 
+                    FROM DBA_OBJECTS 
+                    WHERE OBJECT_NAME = 'DBMS_LOGMNR'
+                """)
+                result = conn.execute(logminer_check)
+                row = result.fetchone()
+                info['logminer_available'] = row[0] > 0 if row else False
+            except:
+                info['logminer_available'] = False
+            
+            is_enabled = (
+                info['supplemental_logging'] and 
+                info['archive_log_mode'] and 
+                info['logminer_available']
+            )
+            
+            logger.info(
+                f"Oracle LogMiner check: "
+                f"Supplemental Logging={info['supplemental_logging']}, "
+                f"Archive Log={info['archive_log_mode']}, "
+                f"LogMiner={info['logminer_available']}"
+            )
+            
+            return is_enabled, info
+    
+    except Exception as e:
+        error_msg = f"Failed to check Oracle LogMiner: {str(e)}"
+        logger.error(error_msg)
+        raise DatabaseOperationError(error_msg) from e

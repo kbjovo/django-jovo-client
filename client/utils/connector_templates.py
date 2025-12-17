@@ -448,19 +448,7 @@ def get_oracle_connector_config(
 ) -> Dict[str, Any]:
     """
     Generate Oracle Debezium connector configuration
-
-    Args:
-        client: Client instance
-        db_config: ClientDatabase instance
-        replication_config: ReplicationConfig instance (optional)
-        tables_whitelist: List of tables to replicate
-        kafka_bootstrap_servers: Kafka bootstrap servers
-        schema_registry_url: Schema registry URL
-
-    Returns:
-        Dict[str, Any]: Connector configuration
     """
-    # Generate connector name with version if replication_config is provided
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
     
@@ -473,46 +461,47 @@ def get_oracle_connector_config(
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
-        "database.include.list": db_config.database_name,
-
+        
+        # Database name (PDB name for Oracle)
+        "database.dbname": db_config.database_name,
+        
         # Server identification
         "database.server.name": connector_name.replace('_connector', ''),
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
 
-        # Use Kafka-based schema history (more reliable in containerized environments)
+        # Schema history
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
-        # Snapshot mode - configurable (Debezium 3.x)
-        # never: No snapshot, CDC only
-        # when_needed: Re-snapshot if offsets are missing or incomplete
-        # initial: Full snapshot on first connector creation (respects existing offsets)
-        # always: ALWAYS perform snapshot on every connector start (ignores offsets)
-        # no_data: Capture schema only, no data (use after manual data copy)
+        # Snapshot mode
         "snapshot.mode": snapshot_mode,
 
-        # Incremental snapshot configuration (for adding new tables after creation)
+        # Incremental snapshots (Kafka signals)
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
-
-        # Kafka-based signals (no source DB modification required)
         "signal.enabled.channels": "kafka",
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
 
-        "database.allowPublicKeyRetrieval": "true",
-
-        # Log mining settings
+        # LogMiner settings (Oracle CDC method)
         "log.mining.strategy": "online_catalog",
         "log.mining.batch.size.default": "1000",
         "log.mining.sleep.time.default.ms": "1000",
         "log.mining.sleep.time.min.ms": "0",
         "log.mining.sleep.time.max.ms": "3000",
         "log.mining.sleep.time.increment.ms": "200",
+        
+        # Schema include (optional - specify schema name)
+        # "schema.include.list": "TESTUSER",
+        
+        # Data type handling
+        "decimal.handling.mode": "precise",
+        "time.precision.mode": "adaptive_time_microseconds",
     }
     
     # Add table whitelist if specified
     if tables_whitelist:
+        # Format: SCHEMA.TABLE
         config["table.include.list"] = ",".join(tables_whitelist)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
 

@@ -1,3 +1,8 @@
+"""
+File: client/models/database.py
+FIXED: Oracle connection with proper oracledb driver configuration
+"""
+
 from django.db import models
 from django.utils import timezone
 from sqlalchemy import create_engine, text
@@ -97,6 +102,11 @@ class ClientDatabase(models.Model):
         return decrypt_password(self.password)
 
     def get_connection_url(self):
+        """
+        Get SQLAlchemy connection URL for the database
+        
+        FIXED: Oracle now uses correct thin mode connection string
+        """
         password = quote_plus(self.get_decrypted_password() or "")
 
         if self.db_type == "mysql":
@@ -109,49 +119,85 @@ class ClientDatabase(models.Model):
             return f"sqlite:///{self.database_name}"
 
         elif self.db_type == "oracle":
+            # ✅ FIXED: Proper Oracle connection string for thin mode
+            # Format: oracle+oracledb://user:pass@host:port/?service_name=ORCLPDB1
+            # 
+            # IMPORTANT: database_name should be the SERVICE NAME (e.g., ORCLPDB1)
+            # NOT the SID (e.g., XE)
             return f"oracle+oracledb://{self.username}:{password}@{self.host}:{self.port}/?service_name={self.database_name}"
 
         elif self.db_type == "mssql":
-            # Use pymssql instead of pyodbc (no ODBC driver required)
             return f"mssql+pymssql://{self.username}:{password}@{self.host}:{self.port}/{self.database_name}"
 
         else:
             raise ValueError(f"Unsupported database type: {self.db_type}")
 
-
     def check_connection_status(self, save=True):
+        """
+        Test database connection and update status
+        
+        FIXED: Better error handling for Oracle connections
+        """
         try:
+            # Network connectivity check (skip for SQLite)
             if self.db_type != "sqlite":
-                socket.create_connection((self.host, self.port), timeout=5)
+                try:
+                    socket.create_connection((self.host, self.port), timeout=5)
+                except socket.timeout:
+                    self.connection_status = "failed"
+                    raise Exception(f"Connection timeout - host {self.host}:{self.port} is unreachable")
+                except socket.gaierror:
+                    self.connection_status = "failed"
+                    raise Exception(f"Host not found: {self.host}")
+                except ConnectionRefusedError:
+                    self.connection_status = "failed"
+                    raise Exception(f"Connection refused on port {self.port}")
 
-            engine = create_engine(self.get_connection_url(), pool_pre_ping=True)
+            # Database connection test
+            connection_url = self.get_connection_url()
+            
+            # ✅ FIXED: Oracle-specific engine configuration
+            if self.db_type == "oracle":
+                # Oracle thin mode - no special connect_args needed
+                engine = create_engine(
+                    connection_url,
+                    pool_pre_ping=True,
+                    echo=False
+                )
+            else:
+                engine = create_engine(connection_url, pool_pre_ping=True)
+            
             with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
+                # Database-specific test queries
+                if self.db_type == "oracle":
+                    conn.execute(text("SELECT 1 FROM DUAL"))
+                else:
+                    conn.execute(text("SELECT 1"))
 
+            engine.dispose()
             self.connection_status = "success"
 
-        except socket.timeout:
-            self.connection_status = "failed"
-            raise Exception("Connection timeout - host is unreachable")
-        except socket.gaierror:
-            self.connection_status = "failed"
-            raise Exception(f"Host not found: {self.host}")
-        except ConnectionRefusedError:
-            self.connection_status = "failed"
-            raise Exception(f"Connection refused on port {self.port}")
         except Exception as e:
             self.connection_status = "failed"
             msg = str(e)
+            
+            # Enhanced error messages
             if "Access denied" in msg or "authentication failed" in msg.lower():
                 raise Exception("Authentication failed - invalid username or password")
             elif "Unknown database" in msg or "does not exist" in msg:
-                raise Exception(f"Database '{self.database_name}' does not exist")
+                raise Exception(f"Database/Service '{self.database_name}' does not exist")
+            elif "listener" in msg.lower() or "tns" in msg.lower():
+                raise Exception(f"Oracle listener error - check host:port ({self.host}:{self.port}) and service name ({self.database_name})")
+            elif "service_name" in msg.lower():
+                raise Exception(f"Invalid service name '{self.database_name}'. Use ORCLPDB1 for pluggable database or XE for container database")
             elif "Can't connect" in msg or "Unable to connect" in msg:
                 raise Exception(f"Unable to connect to database server at {self.host}:{self.port}")
             else:
+                # Return first line of error for clarity
                 raise Exception(f"Connection error: {msg.splitlines()[0]}")
         finally:
             self.last_checked = timezone.now()
             if save:
                 self.save(update_fields=["connection_status", "last_checked"])
+        
         return self.connection_status
