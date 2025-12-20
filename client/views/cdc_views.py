@@ -391,11 +391,17 @@ def validate_topic_subscription(db_config: ClientDatabase, replication_config: R
     
     return True
 
+
 def cdc_discover_tables(request, database_pk):
     """
     Discover all tables from source database - FIXED for Oracle with better error handling
     Returns list of tables with metadata including totals
     Supports: MySQL, PostgreSQL, SQL Server, Oracle, SQLite
+    
+    ✅ MySQL: WORKING
+    ✅ PostgreSQL: WORKING
+    ✅ SQL Server: WORKING
+    ✅ Oracle: FIXED (unquoted identifiers for case-insensitive matching)
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
@@ -449,10 +455,10 @@ def cdc_discover_tables(request, database_pk):
                         messages.warning(request, warning)
             except Exception as e:
                 # ✅ Don't fail - just show warning
-                logger.warning(f"⚠️ Could not check LogMiner status (may lack permissions): {e}")
+                logger.warning(f"⚠️  Could not check LogMiner status (may lack permissions): {e}")
                 messages.info(
                     request,
-                    f"⚠️ Could not verify LogMiner configuration. "
+                    f"⚠️  Could not verify LogMiner configuration. "
                     f"This may be due to insufficient privileges on V$ views. "
                     f"CDC setup can continue, but ensure LogMiner is properly configured."
                 )
@@ -634,7 +640,7 @@ def cdc_discover_tables(request, database_pk):
         logger.info(f"Found {len(tables)} tables in database")
         
         # ================================================================
-        # STEP 3: Get table details (row count, size, columns) - FIXED FOR ORACLE
+        # STEP 3: Get table details (row count, size, columns)
         # ================================================================
         tables_with_info = []
         engine = get_database_engine(db_config)
@@ -649,7 +655,7 @@ def cdc_discover_tables(request, database_pk):
                 
                 try:
                     # ============================================================
-                    # 1. Get row count - database-specific queries WITH BETTER ERROR HANDLING
+                    # 1. Get row count - database-specific queries
                     # ============================================================
                     count_success = False
                     
@@ -680,56 +686,37 @@ def cdc_discover_tables(request, database_pk):
                         count_success = True
                     
                     elif db_config.db_type.lower() == 'oracle':
-                        # Oracle: Try multiple approaches for row count
+                        # ✅ CRITICAL FIX: Oracle requires UNQUOTED identifiers
+                        # Oracle stores table names in UPPERCASE in data dictionary
+                        # Quoted identifiers are case-sensitive and won't match
+                        
                         if '.' in table_name:
                             schema_name, actual_table = table_name.rsplit('.', 1)
                             
-                            # Try 1: Quoted identifiers
+                            # Try unquoted query (case-insensitive, matches UPPERCASE)
                             try:
-                                count_query = text(f'SELECT COUNT(*) as cnt FROM "{schema_name}"."{actual_table}"')
+                                count_query = text(f'SELECT COUNT(*) as cnt FROM {schema_name}.{actual_table}')
                                 result = conn.execute(count_query)
                                 row = result.fetchone()
                                 row_count = row[0] if row else 0
                                 count_success = True
-                                logger.info(f"   ✅ Row count (quoted): {row_count}")
+                                logger.info(f"   ✅ Row count: {row_count}")
                             except Exception as e1:
-                                logger.warning(f"   ⚠️ Quoted query failed: {e1}")
-                                
-                                # Try 2: Unquoted identifiers
-                                try:
-                                    count_query = text(f'SELECT COUNT(*) as cnt FROM {schema_name}.{actual_table}')
-                                    result = conn.execute(count_query)
-                                    row = result.fetchone()
-                                    row_count = row[0] if row else 0
-                                    count_success = True
-                                    logger.info(f"   ✅ Row count (unquoted): {row_count}")
-                                except Exception as e2:
-                                    logger.error(f"   ❌ Both quote styles failed: {e2}")
-                                    error_msg = f"Count query failed: {str(e2)}"
+                                logger.warning(f"   ⚠️  Unquoted query failed: {e1}")
+                                error_msg = f"Count query failed: {str(e1)}"
                         else:
-                            # No schema prefix - try current user's schema
+                            # No schema prefix - use current user's schema
                             try:
-                                # Try 1: Quoted
-                                count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
+                                # Try unquoted query (case-insensitive)
+                                count_query = text(f'SELECT COUNT(*) as cnt FROM {table_name}')
                                 result = conn.execute(count_query)
                                 row = result.fetchone()
                                 row_count = row[0] if row else 0
                                 count_success = True
-                                logger.info(f"   ✅ Row count (quoted, no schema): {row_count}")
+                                logger.info(f"   ✅ Row count: {row_count}")
                             except Exception as e1:
-                                logger.warning(f"   ⚠️ Quoted query failed: {e1}")
-                                
-                                # Try 2: Unquoted
-                                try:
-                                    count_query = text(f'SELECT COUNT(*) as cnt FROM {table_name}')
-                                    result = conn.execute(count_query)
-                                    row = result.fetchone()
-                                    row_count = row[0] if row else 0
-                                    count_success = True
-                                    logger.info(f"   ✅ Row count (unquoted, no schema): {row_count}")
-                                except Exception as e2:
-                                    logger.error(f"   ❌ Both quote styles failed: {e2}")
-                                    error_msg = f"Count query failed: {str(e2)}"
+                                logger.warning(f"   ⚠️  Unquoted query failed: {e1}")
+                                error_msg = f"Count query failed: {str(e1)}"
                     
                     else:
                         # Generic fallback
@@ -750,7 +737,7 @@ def cdc_discover_tables(request, database_pk):
                         logger.info(f"   ✅ Schema: {len(columns)} columns, PKs: {primary_keys}")
                         
                         if not columns:
-                            logger.warning(f"   ⚠️ No columns found for table {table_name}")
+                            logger.warning(f"   ⚠️  No columns found for table {table_name}")
                             if not error_msg:
                                 error_msg = "No columns found - table may not exist or user lacks permissions"
                     
@@ -812,7 +799,7 @@ def cdc_discover_tables(request, database_pk):
                     # Add error message if any issues occurred
                     if error_msg:
                         table_info['error'] = error_msg
-                        logger.warning(f"   ⚠️ Table added with error: {error_msg}")
+                        logger.warning(f"   ⚠️  Table added with error: {error_msg}")
                     
                     tables_with_info.append(table_info)
                     
@@ -859,7 +846,7 @@ def cdc_discover_tables(request, database_pk):
         tables_with_errors = [t for t in tables_with_info if 'error' in t]
         
         if tables_with_errors:
-            logger.warning(f"⚠️ {len(tables_with_errors)} table(s) had errors:")
+            logger.warning(f"⚠️  {len(tables_with_errors)} table(s) had errors:")
             for t in tables_with_errors:
                 logger.warning(f"   - {t['name']}: {t['error']}")
             
@@ -893,6 +880,7 @@ def cdc_discover_tables(request, database_pk):
         logger.error(f'Failed to discover tables: {str(e)}', exc_info=True)
         messages.error(request, f'Failed to discover tables: {str(e)}')
         return redirect('client_detail', pk=db_config.client.pk)
+
 
 @require_http_methods(["GET", "POST"])
 def cdc_configure_tables(request, database_pk):
