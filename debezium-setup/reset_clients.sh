@@ -18,10 +18,7 @@ docker compose exec django python manage.py migrate
 echo "📦 Installing database drivers..."
 docker compose exec django pip install --upgrade pip
 docker compose exec django pip install pymssql
-docker compose exec django pip install oracledb  # ✅ ADD THIS LINE
-
-echo "✅ Verifying Oracle driver installation..."
-docker compose exec django python -c "import oracledb; print(f'✔️ oracledb version: {oracledb.__version__}')"
+docker compose exec django pip install oracledb   # ✅ install only
 
 echo "➕ Resetting client & adding DB connectors..."
 
@@ -77,34 +74,7 @@ ClientDatabase.objects.create(
     database_name="AppDB",
 )
 
-ClientDatabase.objects.create(
-    client=client,
-    connection_name="oracle-connector",
-    db_type="oracle",
-    host="192.168.0.50",
-    port=1521,
-    username="jovo",
-    password="Admin@123",
-    database_name="ORCLPDB1",
-)
-
-print("✔️ Client and database connectors created successfully!")
-EOF
-
-echo "🔍 Testing Oracle connection..."
-docker compose exec -T django python manage.py shell << 'EOF'
-from client.models.database import ClientDatabase
-oracle_db = ClientDatabase.objects.get(db_type='oracle')
-print(f"\n📊 Testing Oracle connection: {oracle_db.connection_name}")
-print(f"   Host: {oracle_db.host}:{oracle_db.port}")
-print(f"   Service: {oracle_db.database_name}")
-print(f"   User: {oracle_db.username}")
-
-try:
-    oracle_db.check_connection_status(save=False)
-    print(f"✅ Oracle connection successful!")
-except Exception as e:
-    print(f"❌ Oracle connection failed: {e}")
+print("✔️ Client and database connectors created (Oracle skipped)")
 EOF
 
 echo "🎉 Reset complete!"

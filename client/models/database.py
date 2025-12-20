@@ -1,6 +1,6 @@
 """
 File: client/models/database.py
-FIXED: Oracle connection with proper oracledb driver configuration
+ENHANCED: Oracle connection with service_name/SID mode selection
 """
 
 from django.db import models
@@ -29,6 +29,12 @@ class ClientDatabase(models.Model):
         ("inactive", "Inactive"),
     ]
 
+    # ✅ NEW: Oracle connection mode choices
+    ORACLE_CONN_MODE_CHOICES = [
+        ("service", "Service Name (Recommended)"),
+        ("sid", "SID (Legacy)"),
+    ]
+
     client = models.ForeignKey(
         Client,
         on_delete=models.CASCADE,
@@ -47,6 +53,16 @@ class ClientDatabase(models.Model):
     username = models.CharField(max_length=100)
     password = models.CharField(max_length=255)
     database_name = models.CharField(max_length=100)
+
+    # ✅ NEW: Oracle-specific connection mode
+    oracle_connection_mode = models.CharField(
+        max_length=20,
+        choices=ORACLE_CONN_MODE_CHOICES,
+        default="service",
+        blank=True,
+        null=True,
+        help_text="Oracle connection type: service name (PDB, Docker, Cloud) or SID (legacy)"
+    )
 
     # Settings
     is_primary = models.BooleanField(
@@ -91,6 +107,11 @@ class ClientDatabase(models.Model):
         """Encrypt password before storing."""
         if self.password and not self._is_password_encrypted():
             self.password = encrypt_password(self.password)
+        
+        # ✅ Auto-set oracle_connection_mode to 'service' if Oracle and not set
+        if self.db_type == "oracle" and not self.oracle_connection_mode:
+            self.oracle_connection_mode = "service"
+        
         super().save(*args, **kwargs)
 
     def _is_password_encrypted(self):
@@ -101,11 +122,23 @@ class ClientDatabase(models.Model):
     def get_decrypted_password(self):
         return decrypt_password(self.password)
 
+    def get_oracle_connection_display(self):
+        """
+        Get human-readable Oracle connection info
+        Returns: 'XEPDB1 (Service)' or 'XE (SID)'
+        """
+        if self.db_type != "oracle":
+            return self.database_name
+        
+        mode = self.oracle_connection_mode or "service"
+        mode_display = "Service" if mode == "service" else "SID"
+        return f"{self.database_name} ({mode_display})"
+
     def get_connection_url(self):
         """
         Get SQLAlchemy connection URL for the database
         
-        FIXED: Oracle now uses correct thin mode connection string
+        ✅ ENHANCED: Oracle now supports both service_name and SID modes
         """
         password = quote_plus(self.get_decrypted_password() or "")
 
@@ -119,12 +152,23 @@ class ClientDatabase(models.Model):
             return f"sqlite:///{self.database_name}"
 
         elif self.db_type == "oracle":
-            # ✅ FIXED: Proper Oracle connection string for thin mode
-            # Format: oracle+oracledb://user:pass@host:port/?service_name=ORCLPDB1
-            # 
-            # IMPORTANT: database_name should be the SERVICE NAME (e.g., ORCLPDB1)
-            # NOT the SID (e.g., XE)
-            return f"oracle+oracledb://{self.username}:{password}@{self.host}:{self.port}/?service_name={self.database_name}"
+            # ✅ ENHANCED: Support both service_name and SID
+            mode = self.oracle_connection_mode or "service"
+            
+            if mode == "sid":
+                # Legacy SID-based connection (e.g., XE for container database)
+                # Format: oracle+oracledb://user:pass@host:port/?sid=XE
+                return (
+                    f"oracle+oracledb://{self.username}:{password}"
+                    f"@{self.host}:{self.port}/?sid={self.database_name}"
+                )
+            else:
+                # Default: SERVICE NAME (recommended for PDB, Docker, Cloud)
+                # Format: oracle+oracledb://user:pass@host:port/?service_name=XEPDB1
+                return (
+                    f"oracle+oracledb://{self.username}:{password}"
+                    f"@{self.host}:{self.port}/?service_name={self.database_name}"
+                )
 
         elif self.db_type == "mssql":
             return f"mssql+pymssql://{self.username}:{password}@{self.host}:{self.port}/{self.database_name}"
@@ -136,7 +180,7 @@ class ClientDatabase(models.Model):
         """
         Test database connection and update status
         
-        FIXED: Better error handling for Oracle connections
+        ✅ ENHANCED: Better Oracle error messages with service/SID context
         """
         try:
             # Network connectivity check (skip for SQLite)
@@ -156,9 +200,8 @@ class ClientDatabase(models.Model):
             # Database connection test
             connection_url = self.get_connection_url()
             
-            # ✅ FIXED: Oracle-specific engine configuration
+            # ✅ Oracle-specific engine configuration
             if self.db_type == "oracle":
-                # Oracle thin mode - no special connect_args needed
                 engine = create_engine(
                     connection_url,
                     pool_pre_ping=True,
@@ -181,15 +224,38 @@ class ClientDatabase(models.Model):
             self.connection_status = "failed"
             msg = str(e)
             
-            # Enhanced error messages
+            # ✅ ENHANCED: Oracle-specific error messages with service/SID context
             if "Access denied" in msg or "authentication failed" in msg.lower():
                 raise Exception("Authentication failed - invalid username or password")
             elif "Unknown database" in msg or "does not exist" in msg:
                 raise Exception(f"Database/Service '{self.database_name}' does not exist")
+            elif "ORA-12505" in msg:
+                # TNS listener error - suggest checking service/SID mode
+                mode = self.oracle_connection_mode or "service"
+                if mode == "service":
+                    raise Exception(
+                        f"TNS:listener does not currently know of SID - "
+                        f"Service '{self.database_name}' not found. "
+                        f"Try switching to SID mode if this is a container database (e.g., XE), "
+                        f"or verify the service name (e.g., XEPDB1 for pluggable database)"
+                    )
+                else:
+                    raise Exception(
+                        f"TNS:listener error - SID '{self.database_name}' not found. "
+                        f"Try switching to Service Name mode if this is a pluggable database (e.g., XEPDB1)"
+                    )
             elif "listener" in msg.lower() or "tns" in msg.lower():
-                raise Exception(f"Oracle listener error - check host:port ({self.host}:{self.port}) and service name ({self.database_name})")
-            elif "service_name" in msg.lower():
-                raise Exception(f"Invalid service name '{self.database_name}'. Use ORCLPDB1 for pluggable database or XE for container database")
+                raise Exception(
+                    f"Oracle listener error - check host:port ({self.host}:{self.port}) "
+                    f"and {self.oracle_connection_mode or 'service'} name ({self.database_name})"
+                )
+            elif "service_name" in msg.lower() or "sid" in msg.lower():
+                mode = self.oracle_connection_mode or "service"
+                raise Exception(
+                    f"Invalid {mode} '{self.database_name}'. "
+                    f"Use XEPDB1 for pluggable database or XE for container database. "
+                    f"Try switching connection mode if needed."
+                )
             elif "Can't connect" in msg or "Unable to connect" in msg:
                 raise Exception(f"Unable to connect to database server at {self.host}:{self.port}")
             else:

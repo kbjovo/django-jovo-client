@@ -74,7 +74,9 @@ class ClientDatabaseForm(forms.ModelForm):
         model = ClientDatabase
         fields = [
             'connection_name', 'db_type', 'host', 'port', 
-            'username', 'password', 'database_name', 'is_primary'
+            'username', 'password', 'database_name', 
+            'oracle_connection_mode',  # ✅ NEW: Oracle mode field
+            'is_primary'
         ]
         widgets = {
             'password': forms.PasswordInput(attrs={'autocomplete': 'new-password'}),
@@ -89,11 +91,21 @@ class ClientDatabaseForm(forms.ModelForm):
             'placeholder': 'e.g., Production DB'
         })
         self.fields['host'].widget.attrs.update({
-            'placeholder': 'e.g., 192.168.1.100'
+            'placeholder': 'e.g., 192.168.1.100 or localhost'
         })
         self.fields['database_name'].widget.attrs.update({
             'placeholder': 'e.g., my_database'
         })
+        
+        # ✅ Make oracle_connection_mode not required (will auto-default to 'service')
+        self.fields['oracle_connection_mode'].required = False
+        
+        # ✅ Add helpful help text
+        self.fields['database_name'].help_text = (
+            "For MySQL/PostgreSQL: database name. "
+            "For Oracle Service: service name (e.g., XEPDB1). "
+            "For Oracle SID: SID name (e.g., XE)"
+        )
         
     def clean_connection_name(self):
         connection_name = self.cleaned_data.get('connection_name', '').strip()
@@ -118,3 +130,36 @@ class ClientDatabaseForm(forms.ModelForm):
         if port and (port < 1 or port > 65535):
             raise forms.ValidationError("Port must be between 1 and 65535.")
         return port
+    
+    def clean(self):
+        """
+        Cross-field validation for Oracle connections
+        """
+        cleaned_data = super().clean()
+        db_type = cleaned_data.get('db_type')
+        oracle_mode = cleaned_data.get('oracle_connection_mode')
+        database_name = cleaned_data.get('database_name')
+        
+        # ✅ Auto-set oracle_connection_mode to 'service' if Oracle and not set
+        if db_type == 'oracle':
+            if not oracle_mode:
+                cleaned_data['oracle_connection_mode'] = 'service'
+            
+            # ✅ Provide helpful hints for common Oracle database names
+            if database_name:
+                db_upper = database_name.upper()
+                mode = oracle_mode or 'service'
+                
+                # Warn if using common PDB name with SID mode
+                if mode == 'sid' and db_upper in ['XEPDB1', 'ORCLPDB1', 'PDB1']:
+                    self.add_error('oracle_connection_mode', 
+                        f"'{database_name}' appears to be a pluggable database (PDB). "
+                        f"Consider using 'Service Name' mode instead of 'SID'."
+                    )
+                
+                # Warn if using common SID with service mode
+                if mode == 'service' and db_upper in ['XE', 'ORCL'] and 'PDB' not in db_upper:
+                    # This is just a warning, not an error
+                    pass  # User might be intentionally using XE as a service
+        
+        return cleaned_data

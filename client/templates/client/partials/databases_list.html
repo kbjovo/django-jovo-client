@@ -1,4 +1,4 @@
-<!-- Databases List View Mode -->
+<!-- Databases List View Mode - ENHANCED WITH ORACLE MODE DISPLAY -->
 <div>
   <!-- Tab Header with Add Button -->
   <div class="flex justify-between items-center mb-6">
@@ -52,12 +52,35 @@
               <p class="text-xs text-gray-500 dark:text-gray-400">{{ db.get_db_type_display }}</p>
             </div>
 
-            <!-- Database Name -->
+            <!-- Database Name (with Oracle mode indicator) -->
             <div class="min-w-0 flex-1">
-              <p class="text-xs text-gray-500 dark:text-gray-400">Database</p>
-              <p class="text-sm font-medium text-gray-900 dark:text-white font-mono truncate" title="{{ db.database_name }}">
-                {{ db.database_name }}
+              <p class="text-xs text-gray-500 dark:text-gray-400">
+                {% if db.db_type == 'oracle' %}
+                  {% if db.oracle_connection_mode == 'sid' %}
+                    SID
+                  {% else %}
+                    Service Name
+                  {% endif %}
+                {% else %}
+                  Database
+                {% endif %}
               </p>
+              <div class="flex items-center gap-2">
+                <p class="text-sm font-medium text-gray-900 dark:text-white font-mono truncate" title="{{ db.database_name }}">
+                  {{ db.database_name }}
+                </p>
+                {% if db.db_type == 'oracle' %}
+                  {% if db.oracle_connection_mode == 'sid' %}
+                    <span class="inline-flex items-center px-1.5 py-0.5 text-xs font-medium bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400 rounded" title="Legacy SID connection">
+                      SID
+                    </span>
+                  {% else %}
+                    <span class="inline-flex items-center px-1.5 py-0.5 text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 rounded" title="Service Name connection (recommended)">
+                      SVC
+                    </span>
+                  {% endif %}
+                {% endif %}
+              </div>
             </div>
 
             <!-- Host:Port -->
