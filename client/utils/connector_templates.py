@@ -8,6 +8,7 @@ from client.models.client import Client
 from client.models.database import ClientDatabase
 from client.models.job import ReplicationConfig
 import random
+from sqlalchemy.sql import text
 
 logger = logging.getLogger(__name__)
 
@@ -436,309 +437,263 @@ def get_sqlserver_connector_config(
     
     return config
 
- 
+
 def get_oracle_connector_config(
-    client: Client,
-    db_config: ClientDatabase,
-    replication_config: Optional[ReplicationConfig] = None,
-    tables_whitelist: Optional[List[str]] = None,
-    kafka_bootstrap_servers: str = 'localhost:9092',
+    client,
+    db_config,
+    replication_config=None,
+    tables_whitelist=None,
+    kafka_bootstrap_servers: str = 'kafka:29092',
     schema_registry_url: str = 'http://localhost:8081',
     snapshot_mode: str = 'initial',
-) -> Dict[str, Any]:
+):
     """
-    ✅ PRODUCTION-GRADE: Oracle Debezium Connector Configuration - FIXED
-    
-    CRITICAL FIXES:
-    1. ✅ Proper schema.include.list format (no C## prefix needed)
-    2. ✅ Correct table.include.list format (SCHEMA.TABLE)
-    3. ✅ Flush table configuration for proper permissions
-    4. ✅ Optional: Use tablespace for flush table
-    
-    CRITICAL PREREQUISITES (Must be completed FIRST):
-    ==================================================
-    1. Database in ARCHIVELOG mode
-    2. Supplemental logging enabled
-    3. CDC user permissions including:
-       - CREATE TABLE (for flush table)
-       - QUOTA on tablespace
-       - All LogMiner permissions
-    4. Tables must have PRIMARY KEYS
-    
-    Connection Modes:
-    =================
-    - Service Name (XEPDB1): Recommended for Oracle 12c+ Pluggable Databases
-    - SID (XE): Legacy mode for Container Databases
-    
-    Topic Naming Convention:
-    ========================
-    Format: {topic_prefix}.{schema}.{table}
-    Example: client_1_db_5.CDCUSER.CUSTOMERS
+    ✅ FIXED: Oracle connector with PDB support
     """
-    # ============================================================================
-    # STEP 1: GENERATE CONNECTOR NAME AND IDENTIFIERS
-    # ============================================================================
+    import logging
+    import random
+    
+    logger = logging.getLogger(__name__)
+    
+    # Generate connector name
+    def generate_connector_name(client, db_config, version=None):
+        client_name = client.name.lower().replace(' ', '_').replace('-', '_')
+        client_name = ''.join(c for c in client_name if c.isalnum() or c == '_')
+        db_name = db_config.connection_name.lower().replace(' ', '_').replace('-', '_')
+        db_name = ''.join(c for c in db_name if c.isalnum() or c == '_')
+        connector_name = f"{client_name}_{db_name}_connector"
+        if version is not None:
+            connector_name = f"{connector_name}_v_{version}"
+        return connector_name
+    
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
     
-    # ✅ FIX: Schema name - remove C## prefix for schema.include.list
-    # Oracle stores common user schemas with C## prefix in the database,
-    # but Debezium expects the schema name WITHOUT the C## prefix
-    raw_username = db_config.username.upper()
+    # ============================================================================
+    # STEP 1: Handle PDB to CDB conversion
+    # ============================================================================
+    database_name_from_config = db_config.database_name
     
-    # Remove C## prefix if present for schema filtering
-    if raw_username.startswith('C##'):
-        schema_name = raw_username[3:]  # Remove 'C##' prefix
-        logger.info(f"📋 Detected common user: {raw_username}, using schema name: {schema_name}")
+    def is_oracle_pdb(database_name: str) -> bool:
+        db_upper = database_name.upper()
+        return 'PDB' in db_upper or db_upper.endswith('PDB1')
+    
+    def get_oracle_cdb_name(pdb_name: str) -> str:
+        pdb_upper = pdb_name.upper()
+        if pdb_upper.endswith('PDB1'):
+            return pdb_upper[:-4]
+        elif pdb_upper.endswith('PDB'):
+            return pdb_upper[:-3]
+        return pdb_name
+    
+    is_pdb = is_oracle_pdb(database_name_from_config)
+    
+    if is_pdb:
+        cdb_name = get_oracle_cdb_name(database_name_from_config)
+        logger.warning("=" * 80)
+        logger.warning("🔄 AUTO-FIX: Detected Pluggable Database connection")
+        logger.warning(f"   Original config: {database_name_from_config} (PDB)")
+        logger.warning(f"   LogMiner requires: {cdb_name} (CDB root)")
+        logger.warning(f"   ✅ Will use database.pdb.name: {database_name_from_config}")
+        logger.warning("=" * 80)
+        connection_db = cdb_name
+        pdb_name = database_name_from_config
     else:
-        schema_name = raw_username
-    
-    # Topic prefix for Kafka topics
-    topic_prefix = f"client_{client.id}_db_{db_config.id}"
-    
-    # Server name (internal identifier)
-    server_name = connector_name.replace('_connector', '')
-    
-    logger.info("=" * 80)
-    logger.info("ORACLE CONNECTOR CONFIGURATION - FIXED")
-    logger.info("=" * 80)
-    logger.info(f"Connector name: {connector_name}")
-    logger.info(f"Database: {db_config.database_name} ({db_config.get_oracle_connection_display()})")
-    logger.info(f"Username (raw): {raw_username}")
-    logger.info(f"Schema filter: {schema_name}")
-    logger.info(f"Host: {db_config.host}:{db_config.port}")
-    logger.info(f"Topic prefix: {topic_prefix}")
-    logger.info(f"Snapshot mode: {snapshot_mode}")
-    logger.info("=" * 80)
+        logger.info(f"✅ Detected Container Database: {database_name_from_config}")
+        connection_db = database_name_from_config
+        pdb_name = None
     
     # ============================================================================
-    # STEP 2: BUILD JDBC CONNECTION URL
+    # STEP 2: Extract schema name (remove C## prefix if present)
+    # ============================================================================
+    raw_username = db_config.username.upper()
+    
+    if raw_username.startswith('C##'):
+        schema_name = raw_username[3:]  # Remove C## prefix
+        logger.info(f"🔍 Common user detected: {raw_username}")
+        logger.info(f"   Schema filter: {schema_name}")
+    else:
+        schema_name = raw_username
+        logger.info(f"🔍 Local user detected: {raw_username}")
+        logger.info(f"   Schema filter: {schema_name}")
+    
+    topic_prefix = f"client_{client.id}_db_{db_config.id}"
+    server_name = connector_name.replace('_connector', '')
+    
+    # ============================================================================
+    # STEP 3: Build JDBC URL
     # ============================================================================
     oracle_mode = db_config.oracle_connection_mode or 'service'
     
     if oracle_mode == 'sid':
-        jdbc_url = f"jdbc:oracle:thin:@{db_config.host}:{db_config.port}:{db_config.database_name}"
-        logger.info(f"📡 Connection: SID mode - {jdbc_url}")
+        jdbc_url = f"jdbc:oracle:thin:@{db_config.host}:{db_config.port}:{connection_db}"
+        logger.info(f"🔌 Connection: SID mode - {jdbc_url}")
     else:
-        jdbc_url = f"jdbc:oracle:thin:@//{db_config.host}:{db_config.port}/{db_config.database_name}"
-        logger.info(f"📡 Connection: Service Name mode - {jdbc_url}")
+        jdbc_url = f"jdbc:oracle:thin:@//{db_config.host}:{db_config.port}/{connection_db}"
+        logger.info(f"🔌 Connection: Service Name mode - {jdbc_url}")
     
     # ============================================================================
-    # STEP 3: CORE CONNECTOR CONFIGURATION
+    # STEP 4: Build connector configuration
     # ============================================================================
     config = {
-        # ========================================================================
-        # CONNECTOR CLASS
-        # ========================================================================
         "connector.class": "io.debezium.connector.oracle.OracleConnector",
         
-        # ========================================================================
-        # DATABASE CONNECTION
-        # ========================================================================
+        # Database connection
         "database.hostname": db_config.host,
         "database.port": str(db_config.port),
-        "database.user": db_config.username,  # Keep original with C## prefix for login
+        "database.user": db_config.username,  # Keep C## prefix for connection
         "database.password": db_config.get_decrypted_password(),
-        "database.dbname": db_config.database_name,
-        
-        # ✅ CRITICAL: Full JDBC URL
+        "database.dbname": connection_db,  # ✅ CDB name (e.g., XE)
         "database.url": jdbc_url,
         
-        # ========================================================================
-        # SERVER IDENTIFICATION (Kafka Topic Naming)
-        # ========================================================================
+        # ✅ CRITICAL FIX: Tell Debezium which PDB contains the tables
+        # This is THE missing piece that causes "capturing: []"
+        "database.pdb.name": pdb_name,  # e.g., XEPDB1 (or None if not PDB)
+        
+        # Server identification
         "database.server.name": server_name,
         "topic.prefix": topic_prefix,
         
-        # ========================================================================
-        # SCHEMA HISTORY (Kafka-based for reliability)
-        # ========================================================================
+        # Schema history
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
         
-        # ========================================================================
-        # SNAPSHOT CONFIGURATION
-        # ========================================================================
+        # Snapshot configuration
         "snapshot.mode": snapshot_mode,
         "snapshot.locking.mode": "none",
         "snapshot.fetch.size": "2000",
         
-        # ========================================================================
-        # LOGMINER CONFIGURATION (Oracle CDC Engine)
-        # ========================================================================
+        # LogMiner configuration
         "log.mining.strategy": "online_catalog",
-        
-        # LogMiner batch processing
         "log.mining.batch.size.default": "1000",
         "log.mining.batch.size.min": "1000",
         "log.mining.batch.size.max": "100000",
-        
-        # LogMiner polling intervals
         "log.mining.sleep.time.default.ms": "1000",
         "log.mining.sleep.time.min.ms": "0",
         "log.mining.sleep.time.max.ms": "3000",
         "log.mining.sleep.time.increment.ms": "200",
-        
-        # Archive log handling
         "log.mining.archive.log.hours": "0",
         "log.mining.archive.log.only.mode": "false",
-        
-        # LogMiner session management
         "log.mining.session.max.ms": "0",
         "log.mining.transaction.retention.hours": "0",
-        
-        # Query filtering
         "log.mining.query.filter.mode": "in",
-        
-        # ✅ FIX: Flush table configuration
-        # Specify the flush table name explicitly to use user's default tablespace
-        # Format: SCHEMA.TABLE_NAME or just TABLE_NAME (uses default tablespace)
         "log.mining.flush.table.name": "LOG_MINING_FLUSH",
         
-        # ========================================================================
-        # INCREMENTAL SNAPSHOTS (Kafka Signals)
-        # ========================================================================
+        # Incremental snapshots
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
         
+        # Kafka signals
         "signal.enabled.channels": "kafka",
         "signal.kafka.topic": f"{topic_prefix}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         
-        # ========================================================================
-        # SCHEMA FILTERING - ✅ CRITICAL FIX
-        # ========================================================================
-        # Use schema name WITHOUT C## prefix
-        "schema.include.list": schema_name,
+        # ✅ CRITICAL: Schema filter (WITHOUT C## prefix)
+        "schema.include.list": schema_name,  # e.g., "CDCUSER"
         
-        # ========================================================================
-        # DATA TYPE HANDLING
-        # ========================================================================
+        # Data type handling
         "decimal.handling.mode": "precise",
         "time.precision.mode": "adaptive_time_microseconds",
         "interval.handling.mode": "string",
         "binary.handling.mode": "bytes",
         
-        # ========================================================================
-        # CHANGE EVENT CONFIGURATION
-        # ========================================================================
+        # Other settings
         "tombstones.on.delete": "true",
         "include.schema.changes": "true",
         
-        # ========================================================================
-        # PERFORMANCE TUNING
-        # ========================================================================
+        # Performance
         "max.queue.size": "8192",
         "max.batch.size": "2048",
         "poll.interval.ms": "1000",
         
-        # ========================================================================
-        # CONNECTION SETTINGS
-        # ========================================================================
+        # Connection adapter
         "database.connection.adapter": "logminer",
         "database.jdbc.driver": "oracle.jdbc.OracleDriver",
         
-        # ========================================================================
-        # HEARTBEAT
-        # ========================================================================
+        # Heartbeat
         "heartbeat.interval.ms": "10000",
         "heartbeat.action.query": "SELECT 1 FROM DUAL",
         
-        # ========================================================================
-        # ERROR HANDLING
-        # ========================================================================
+        # Error handling
         "errors.tolerance": "none",
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
     }
     
+    # Remove None values
+    config = {k: v for k, v in config.items() if v is not None}
+    
     # ============================================================================
-    # STEP 4: TABLE WHITELIST - ✅ CRITICAL FIX
+    # STEP 5: Format table.include.list
     # ============================================================================
     if tables_whitelist:
-        # ✅ Oracle format: SCHEMA.TABLE (use actual schema name without C## prefix)
         formatted_tables = []
+        
         for table in tables_whitelist:
-            if '.' not in table:
-                # No schema prefix - add it
-                formatted_table = f"{schema_name}.{table.upper()}"
+            table_upper = table.upper()
+            
+            if '.' not in table_upper:
+                # Add schema prefix
+                formatted_table = f"{schema_name}.{table_upper}"
             else:
                 # Already has schema
-                parts = table.split('.')
-                # If schema part has C##, remove it
-                schema_part = parts[0].upper()
-                if schema_part.startswith('C##'):
-                    schema_part = schema_part[3:]
-                formatted_table = f"{schema_part}.{parts[1].upper()}"
+                parts = table_upper.split('.', 1)
+                table_schema = parts[0]
+                table_name = parts[1]
+                
+                # Remove C## prefix if present
+                if table_schema.startswith('C##'):
+                    table_schema = table_schema[3:]
+                
+                formatted_table = f"{table_schema}.{table_name}"
             
             formatted_tables.append(formatted_table)
         
         config["table.include.list"] = ",".join(formatted_tables)
         
-        logger.info(f"✅ Table filter configured ({len(formatted_tables)} tables):")
+        logger.info("=" * 80)
+        logger.info(f"✅ TABLE FILTER CONFIGURED ({len(formatted_tables)} tables):")
+        logger.info("=" * 80)
         for table in formatted_tables:
-            expected_topic = f"{topic_prefix}.{table}"
-            logger.info(f"   • {table} → {expected_topic}")
-    else:
-        logger.warning("⚠️  No table whitelist - will monitor ALL tables in schema")
+            # Extract table name for topic
+            table_name_only = table.split('.')[1]
+            expected_topic = f"{topic_prefix}.{table_name_only}"
+            logger.info(f"   • {table}")
+            logger.info(f"     → Kafka Topic: {expected_topic}")
+        logger.info("=" * 80)
     
-    # ============================================================================
-    # STEP 5: APPLY CUSTOM CONFIGURATION
-    # ============================================================================
+    # Apply custom config
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
-            logger.info(f"🔄 Snapshot mode overridden: {replication_config.snapshot_mode}")
         
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
-            custom_keys = list(replication_config.custom_config.keys())
             config.update(replication_config.custom_config)
-            logger.info(f"🔧 Applied custom config: {', '.join(custom_keys)}")
     
     # ============================================================================
-    # STEP 6: FINAL VALIDATION AND LOGGING
+    # FINAL SUMMARY
     # ============================================================================
     logger.info("=" * 80)
-    logger.info("CONFIGURATION SUMMARY - FIXED")
+    logger.info("ORACLE CONNECTOR CONFIGURATION SUMMARY")
     logger.info("=" * 80)
     logger.info(f"✅ Connector: {connector_name}")
-    logger.info(f"✅ Database: {db_config.database_name} ({oracle_mode} mode)")
-    logger.info(f"✅ Username: {raw_username}")
-    logger.info(f"✅ Schema filter: {schema_name} (WITHOUT C## prefix)")
+    logger.info(f"✅ Connection DB (CDB): {connection_db}")
+    if pdb_name:
+        logger.info(f"✅ PDB Name: {pdb_name} (WHERE TABLES LIVE)")
     logger.info(f"✅ JDBC URL: {jdbc_url}")
+    logger.info(f"✅ Username: {raw_username}")
+    logger.info(f"✅ Schema filter: {schema_name}")
     logger.info(f"✅ Topic prefix: {topic_prefix}")
-    logger.info(f"✅ Flush table: LOG_MINING_FLUSH (in default tablespace)")
-    logger.info(f"✅ LogMiner strategy: {config['log.mining.strategy']}")
-    logger.info(f"✅ Snapshot mode: {config['snapshot.mode']}")
-    logger.info(f"✅ Incremental snapshots: ENABLED (Kafka signals)")
     
     if tables_whitelist:
-        logger.info(f"✅ Table filter: {len(formatted_tables)} table(s)")
-    else:
-        logger.warning(f"⚠️  Table filter: NONE (all tables)")
+        logger.info(f"✅ Tables to replicate: {len(formatted_tables)}")
+        if formatted_tables:
+            logger.info(f"   Format example: {formatted_tables[0]}")
+        logger.info(f"   ⚠️  NOTE: Kafka topics will NOT include schema prefix")
+        if formatted_tables:
+            example_table = formatted_tables[0].split('.')[1]
+            logger.info(f"   Example: {formatted_tables[0]} → Topic: {topic_prefix}.{example_table}")
     
-    logger.info("=" * 80)
-    
-    # ============================================================================
-    # KEY FIXES APPLIED
-    # ============================================================================
-    logger.info("🔧 KEY FIXES APPLIED:")
-    logger.info("   1. ✅ Schema filter uses '{schema_name}' (no C## prefix)")
-    logger.info("   2. ✅ Table filter uses '{schema_name}.TABLE' format")
-    logger.info("   3. ✅ Flush table explicitly configured")
-    logger.info("   4. ✅ User has CREATE TABLE privilege")
-    logger.info("   5. ✅ User has QUOTA on USERS tablespace")
-    logger.info("=" * 80)
-    
-    # ============================================================================
-    # TROUBLESHOOTING NOTES
-    # ============================================================================
-    logger.warning("⚠️  IF CONNECTOR STILL FAILS:")
-    logger.warning("   1. Verify: SELECT * FROM dba_sys_privs WHERE grantee = '{raw_username}';")
-    logger.warning("   2. Verify: SELECT username, default_tablespace FROM dba_users WHERE username = '{raw_username}';")
-    logger.warning("   3. Check flush table: SELECT * FROM {raw_username}.LOG_MINING_FLUSH;")
-    logger.warning("   4. Test LogMiner: EXEC DBMS_LOGMNR.START_LOGMNR();")
-    logger.warning("   5. Review: docker logs kafka-connect --tail=100")
     logger.info("=" * 80)
     
     return config

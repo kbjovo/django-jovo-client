@@ -28,6 +28,7 @@ from sqlalchemy import text
 import logging
 import json
 import time 
+from typing import List
 
 from client.models.client import Client
 from client.models.database import ClientDatabase
@@ -59,17 +60,34 @@ from client.tasks import (
 logger = logging.getLogger(__name__)
 
 
-"""
-Complete helper methods for cdc_views.py
-Add these functions at the top of your cdc_views.py file (after imports)
-"""
 
-import logging
-from typing import List
-from client.models.database import ClientDatabase
-from client.models.replication import ReplicationConfig, TableMapping
+def get_oracle_cdb_name(pdb_name: str) -> str:
+    """
+    Convert PDB name to CDB root name
+    
+    Examples:
+        XEPDB1 → XE
+        ORCLPDB1 → ORCL
+        FREEPDB1 → FREE
+    """
+    pdb_upper = pdb_name.upper()
+    
+    # Common patterns
+    if pdb_upper.endswith('PDB1'):
+        return pdb_upper[:-4]  # Remove 'PDB1'
+    elif pdb_upper.endswith('PDB'):
+        return pdb_upper[:-3]  # Remove 'PDB'
+    
+    # If no PDB suffix, return as-is (might already be CDB)
+    return pdb_name
 
-logger = logging.getLogger(__name__)
+
+def is_oracle_pdb(database_name: str) -> bool:
+    """
+    Check if database name indicates a Pluggable Database
+    """
+    db_upper = database_name.upper()
+    return 'PDB' in db_upper or db_upper.endswith('PDB1')
 
 def normalize_sql_server_table_name(table_name: str, db_type: str) -> str:
     if db_type.lower() != 'mssql':
@@ -97,24 +115,7 @@ def generate_target_table_name(source_db_name: str, source_table_name: str, db_t
     return f"{safe_db_name}_{safe_table_name}"
 
 
-def get_kafka_topics_for_tables(db_config: ClientDatabase, replication_config: ReplicationConfig, table_mappings) -> List[str]:
-    """
-    Generate correct Kafka topic names based on database type
-    
-    CRITICAL: Different databases have different topic naming conventions:
-    - MySQL:      {prefix}.{database}.{table}
-    - PostgreSQL: {prefix}.{schema}.{table}
-    - SQL Server: {prefix}.{database}.{schema}.{table}
-    - Oracle:     {prefix}.{schema}.{table}
-    
-    Args:
-        db_config: ClientDatabase instance
-        replication_config: ReplicationConfig instance
-        table_mappings: QuerySet of TableMapping objects
-    
-    Returns:
-        List[str]: List of Kafka topic names
-    """
+def get_kafka_topics_for_tables(db_config, replication_config, table_mappings):
     client = db_config.client
     topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
     db_type = db_config.db_type.lower()
@@ -129,75 +130,63 @@ def get_kafka_topics_for_tables(db_config: ClientDatabase, replication_config: R
         source_table = tm.source_table
         
         if db_type == 'mssql':
-            # ✅ SQL Server format: {prefix}.{database}.{schema}.{table}
-            # SQL Server uses 3-part naming: database.schema.table
-            
+            # ✅ SQL Server: {prefix}.{database}.{schema}.{table}
             if '.' in source_table:
-                # Format: 'dbo.Customers' or 'schema.table'
                 parts = source_table.split('.')
                 if len(parts) == 2:
                     schema, table = parts
                 else:
-                    # Weird case with multiple dots - take last as table
                     schema = parts[-2]
                     table = parts[-1]
             else:
-                # Format: 'Customers' - use default schema
                 schema = 'dbo'
                 table = source_table
             
-            # SQL Server topic format includes database name
             topic_name = f"{topic_prefix}.{db_config.database_name}.{schema}.{table}"
-            
-            logger.info(f"   ✓ SQL Server topic: {source_table} → {topic_name}")
+            logger.info(f"   ✓ SQL Server: {source_table} → {topic_name}")
             
         elif db_type == 'postgresql':
-            # PostgreSQL format: {prefix}.{schema}.{table}
-            # PostgreSQL uses 2-part naming: schema.table
-            
-            schema = 'public'  # Default schema
+            # ✅ PostgreSQL: {prefix}.{schema}.{table}
             if '.' in source_table:
                 schema, table = source_table.rsplit('.', 1)
             else:
+                schema = 'public'
                 table = source_table
             
             topic_name = f"{topic_prefix}.{schema}.{table}"
-            
-            logger.info(f"   ✓ PostgreSQL topic: {source_table} → {topic_name}")
+            logger.info(f"   ✓ PostgreSQL: {source_table} → {topic_name}")
             
         elif db_type == 'mysql':
-            # MySQL format: {prefix}.{database}.{table}
-            # MySQL doesn't use schemas (or schema = database)
-            
+            # ✅ MySQL: {prefix}.{database}.{table}
             table = source_table.split('.')[-1] if '.' in source_table else source_table
             topic_name = f"{topic_prefix}.{db_config.database_name}.{table}"
-            
-            logger.info(f"   ✓ MySQL topic: {source_table} → {topic_name}")
+            logger.info(f"   ✓ MySQL: {source_table} → {topic_name}")
             
         elif db_type == 'oracle':
-            # Oracle format: {prefix}.{schema}.{table}
-            # Oracle uses schema.table naming
-            
+            # ✅ CRITICAL FIX: Oracle topics INCLUDE schema
             if '.' in source_table:
                 schema, table = source_table.rsplit('.', 1)
+                schema = schema.upper()
+                table = table.upper()
             else:
-                schema = db_config.username.upper()  # Default to user schema
-                table = source_table
+                username = db_config.username.upper()
+                schema = username[3:] if username.startswith('C##') else username
+                table = source_table.upper()
             
+            # ✅ FIX: KEEP schema in topic name
             topic_name = f"{topic_prefix}.{schema}.{table}"
-            
-            logger.info(f"   ✓ Oracle topic: {source_table} → {topic_name}")
+            logger.info(f"   ✓ Oracle: {source_table} → {topic_name}")
             
         else:
-            # Generic fallback format
+            # Generic fallback
             topic_name = f"{topic_prefix}.{db_config.database_name}.{source_table}"
-            
             logger.warning(f"   ⚠️ Unknown DB type '{db_type}', using generic format: {topic_name}")
         
         topics.append(topic_name)
     
     logger.info(f"✅ Generated {len(topics)} Kafka topic names")
     return topics
+
 
 
 def generate_consumer_group_id(replication_config: ReplicationConfig) -> str:
@@ -394,400 +383,414 @@ def validate_topic_subscription(db_config: ClientDatabase, replication_config: R
 
 def cdc_discover_tables(request, database_pk):
     """
-    Discover all tables from source database - FIXED for Oracle with better error handling
-    Returns list of tables with metadata including totals
-    Supports: MySQL, PostgreSQL, SQL Server, Oracle, SQLite
+    ✅ COMPLETE FIXED: Oracle table discovery with multi-schema support
     
-    ✅ MySQL: WORKING
-    ✅ PostgreSQL: WORKING
-    ✅ SQL Server: WORKING
-    ✅ Oracle: FIXED (unquoted identifiers for case-insensitive matching)
+    Handles:
+    1. Common users (C##CDCUSER) accessing local user tables (CDCUSER)
+    2. Tables owned by current user
+    3. Tables accessible via grants
+    4. Tables accessible via synonyms
+    5. Proper schema qualification
     """
+    from django.shortcuts import render, get_object_or_404, redirect
+    from django.contrib import messages
+    from client.models.database import ClientDatabase
+    from client.utils.database_utils import (
+        get_database_engine, 
+        get_table_schema,
+        check_oracle_logminer
+    )
+    from sqlalchemy import text
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
     if request.method == "POST":
-        # User selected tables to replicate
         selected_tables = request.POST.getlist('selected_tables')
         
         if not selected_tables:
             messages.error(request, 'Please select at least one table')
             return redirect('cdc_discover_tables', database_pk=database_pk)
         
-        # Store in session and redirect to configuration
         request.session['selected_tables'] = selected_tables
         request.session['database_pk'] = database_pk
         
         return redirect('cdc_configure_tables', database_pk=database_pk)
     
+    # ========================================================================
     # GET: Discover tables
+    # ========================================================================
     try:
-        # ================================================================
-        # STEP 1: Check prerequisites based on database type
-        # ================================================================
-        if db_config.db_type.lower() == 'mysql':
-            # Check if binary logging is enabled (required for MySQL CDC)
-            is_enabled, log_format = check_binary_logging(db_config)
-            if not is_enabled:
-                messages.warning(
-                    request, 
-                    'Binary logging is not enabled on this MySQL database. CDC requires binary logging to be enabled.'
-                )
-
-        elif db_config.db_type.lower() == 'oracle':
-            logger.info(f"🔍 Oracle CDC Discovery Started")
-            logger.info(f"   Username: {db_config.username}")
+        # Check Oracle LogMiner prerequisites
+        if db_config.db_type.lower() == 'oracle':
+            logger.info("=" * 80)
+            logger.info("🔍 ORACLE CDC DISCOVERY STARTED")
+            logger.info("=" * 80)
             logger.info(f"   Database: {db_config.database_name}")
-            logger.info(f"   Host: {db_config.host}")
+            logger.info(f"   Username: {db_config.username}")
             
-            # ✅ FIX: Make LogMiner check optional - don't fail if no permissions
             try:
                 is_enabled, info = check_oracle_logminer(db_config)
                 if not is_enabled:
                     warnings = []
                     if not info.get('supplemental_logging'):
-                        warnings.append("Supplemental logging is not enabled. Run: ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;")
+                        warnings.append("⚠️ Supplemental logging not enabled. Run: ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;")
                     if not info.get('archive_log_mode'):
-                        warnings.append("Archive log mode is not enabled. Required for CDC.")
+                        warnings.append("⚠️ Archive log mode not enabled.")
                     if not info.get('logminer_available'):
-                        warnings.append("LogMiner is not available. Check Oracle installation.")
+                        warnings.append("⚠️ LogMiner not available.")
                     
                     for warning in warnings:
                         messages.warning(request, warning)
             except Exception as e:
-                # ✅ Don't fail - just show warning
-                logger.warning(f"⚠️  Could not check LogMiner status (may lack permissions): {e}")
-                messages.info(
-                    request,
-                    f"⚠️  Could not verify LogMiner configuration. "
-                    f"This may be due to insufficient privileges on V$ views. "
-                    f"CDC setup can continue, but ensure LogMiner is properly configured."
-                )
-
-                    
-        elif db_config.db_type.lower() == 'mssql':
-            # Check if SQL Server Agent is running (required for CDC)
+                logger.warning(f"⚠️ Could not check LogMiner status: {e}")
+        
+        # ====================================================================
+        # ORACLE-SPECIFIC TABLE DISCOVERY
+        # ====================================================================
+        tables = []
+        
+        if db_config.db_type.lower() == 'oracle':
             engine = get_database_engine(db_config)
-            with engine.connect() as conn:
-                try:
-                    # Check if CDC is enabled at database level
-                    cdc_check = text("""
-                        SELECT is_cdc_enabled, name 
-                        FROM sys.databases 
-                        WHERE name = :db_name
-                    """)
-                    result = conn.execute(cdc_check, {"db_name": db_config.database_name})
-                    row = result.fetchone()
-                    
-                    if row and not row[0]:
-                        messages.warning(
-                            request,
-                            f'CDC is not enabled on database "{db_config.database_name}". '
-                            f'Run: EXEC sys.sp_cdc_enable_db to enable CDC.'
-                        )
-                    
-                    # Check if SQL Server Agent is running
-                    agent_check = text("""
-                        SELECT dss.[status], dss.[status_desc]
-                        FROM sys.dm_server_services dss
-                        WHERE dss.[servicename] LIKE N'SQL Server Agent (%';
-                    """)
-                    result = conn.execute(agent_check)
-                    agent_row = result.fetchone()
-                    
-                    if agent_row and agent_row[0] != 4:  # 4 = Running
-                        messages.warning(
-                            request,
-                            f'SQL Server Agent is not running (Status: {agent_row[1]}). '
-                            f'CDC requires SQL Server Agent to be running.'
-                        )
-                except Exception as e:
-                    logger.warning(f"Could not check SQL Server CDC prerequisites: {e}")
-            
-            engine.dispose()
-        
-        # ================================================================
-        # STEP 2: Get list of tables - ENHANCED FOR ORACLE
-        # ================================================================
-        logger.info(f"📋 Fetching table list for {db_config.db_type}...")
-        
-        try:
-            tables = get_table_list(db_config)
-            logger.info(f"✅ Found {len(tables)} tables via get_table_list()")
-            
-            if tables:
-                logger.info(f"   Sample tables: {tables[:5]}")
-        except Exception as e:
-            logger.error(f"❌ get_table_list() failed: {e}", exc_info=True)
-            tables = []
-        
-        # ================================================================
-        # ORACLE FALLBACK: Direct query if get_table_list() returns empty
-        # ================================================================
-        if not tables and db_config.db_type.lower() == 'oracle':
-            logger.warning(f"⚠️  No tables found via get_table_list(), trying direct Oracle query...")
             
             try:
-                engine = get_database_engine(db_config)
                 with engine.connect() as conn:
-                    # Try multiple approaches to find tables
+                    # ========================================================
+                    # STEP 1: Get current user
+                    # ========================================================
+                    current_user_result = conn.execute(text("SELECT USER FROM DUAL"))
+                    current_user = current_user_result.scalar()
                     
-                    # Approach 1: user_tables (tables owned by current user)
-                    logger.info(f"🔍 Trying user_tables...")
-                    oracle_query = text("""
-                        SELECT table_name 
+                    logger.info(f"✅ Connected as: {current_user}")
+                    
+                    # ========================================================
+                    # STEP 2: Determine target schema (remove C## prefix)
+                    # ========================================================
+                    username_upper = current_user.upper()
+                    if username_upper.startswith('C##'):
+                        target_schema = username_upper[3:]  # Remove C##
+                        logger.info(f"🔐 Common user detected: {username_upper}")
+                        logger.info(f"   Target schema: {target_schema}")
+                    else:
+                        target_schema = username_upper
+                        logger.info(f"🔐 Local user detected: {username_upper}")
+                    
+                    # ========================================================
+                    # STEP 3: Find ALL accessible tables
+                    # ========================================================
+                    discovered_tables = {}  # Use dict to deduplicate
+                    
+                    # --------------------------------------------------------
+                    # Method 1: Tables owned by current user
+                    # --------------------------------------------------------
+                    logger.info(f"📋 Method 1: Checking user_tables...")
+                    
+                    user_tables_query = text("""
+                        SELECT table_name
                         FROM user_tables 
+                        WHERE table_name NOT LIKE 'LOG_MINING%'
+                          AND table_name NOT LIKE 'DEBEZIUM%'
+                          AND table_name NOT LIKE 'SYS_%'
+                          AND table_name NOT LIKE 'MLOG$%'
+                          AND table_name NOT LIKE 'RUPD$%'
+                          AND table_name NOT LIKE 'BIN$%'
                         ORDER BY table_name
                     """)
                     
-                    result = conn.execute(oracle_query)
-                    oracle_tables = [row[0] for row in result.fetchall()]
+                    result = conn.execute(user_tables_query)
+                    user_owned = [row[0] for row in result.fetchall()]
                     
-                    if oracle_tables:
-                        logger.info(f"✅ Found {len(oracle_tables)} tables via user_tables")
-                        logger.info(f"   Tables: {oracle_tables[:10]}")
-                        tables = oracle_tables
-                    else:
-                        logger.warning(f"⚠️  No tables in user_tables")
-                        
-                        # Approach 2: all_tables filtered by username (case-insensitive)
-                        logger.info(f"🔍 Trying all_tables with owner = '{db_config.username.upper()}'...")
-                        all_tables_query = text("""
-                            SELECT table_name, owner
-                            FROM all_tables 
-                            WHERE owner = UPPER(:username)
-                            ORDER BY table_name
-                        """)
-                        
-                        result = conn.execute(all_tables_query, {"username": db_config.username})
-                        all_oracle_tables = result.fetchall()
-                        
-                        if all_oracle_tables:
-                            logger.info(f"✅ Found {len(all_oracle_tables)} tables in all_tables")
-                            logger.info(f"   Owner: {all_oracle_tables[0][1]}")
-                            logger.info(f"   Tables: {[row[0] for row in all_oracle_tables[:10]]}")
-                            tables = [row[0] for row in all_oracle_tables]
-                        else:
-                            logger.warning(f"⚠️  No tables found for owner = '{db_config.username.upper()}'")
-                            
-                            # Approach 3: Show all accessible tables (any owner)
-                            logger.info(f"🔍 Trying all accessible tables...")
-                            accessible_query = text("""
-                                SELECT owner, table_name, COUNT(*) OVER() as total_count
-                                FROM all_tables 
-                                WHERE owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'XDB', 
-                                                    'CTXSYS', 'MDSYS', 'OLAPSYS', 'WMSYS',
-                                                    'APPQOSSYS', 'AUDSYS', 'DBSFWUSER', 'GSMADMIN_INTERNAL',
-                                                    'GSMCATUSER', 'GSMROOTUSER', 'GSMUSER',
-                                                    'DIP', 'DVF', 'DVSYS', 'GGSYS', 'ANONYMOUS',
-                                                    'DGPDB_INT', 'CDC_USER')
-                                ORDER BY owner, table_name
-                            """)
-                            
-                            result = conn.execute(accessible_query)
-                            accessible_tables = result.fetchall()
-                            
-                            if accessible_tables:
-                                # Group by owner
-                                from collections import defaultdict
-                                tables_by_owner = defaultdict(list)
-                                
-                                for owner, table_name, total in accessible_tables:
-                                    tables_by_owner[owner].append(table_name)
-                                
-                                logger.info(f"✅ Found {len(accessible_tables)} accessible tables from {len(tables_by_owner)} schemas:")
-                                for owner, table_list in sorted(tables_by_owner.items()):
-                                    logger.info(f"   {owner}: {len(table_list)} tables - {table_list[:5]}")
-                                
-                                # Use tables from the username's schema (if exists) or show all
-                                username_upper = db_config.username.upper()
-                                if username_upper in tables_by_owner:
-                                    logger.info(f"📋 Using tables from {username_upper} schema")
-                                    tables = tables_by_owner[username_upper]
-                                else:
-                                    # Show warning and use all accessible tables
-                                    logger.warning(f"⚠️  No tables in {username_upper} schema, showing all accessible tables")
-                                    messages.warning(
-                                        request,
-                                        f"No tables found in schema '{username_upper}'. "
-                                        f"Showing all accessible tables. "
-                                        f"Available schemas: {', '.join(sorted(tables_by_owner.keys()))}"
-                                    )
-                                    # Flatten all tables with schema prefix
-                                    tables = [f"{owner}.{table}" for owner, table_list in tables_by_owner.items() for table in table_list]
+                    for table_name in user_owned:
+                        # Store with schema prefix
+                        qualified_name = f"{username_upper}.{table_name}"
+                        discovered_tables[qualified_name] = {
+                            'owner': username_upper,
+                            'table': table_name,
+                            'source': 'owned'
+                        }
+                    
+                    logger.info(f"   ✅ Found {len(user_owned)} owned tables")
+                    
+                    # --------------------------------------------------------
+                    # Method 2: Tables accessible via grants (all_tables)
+                    # --------------------------------------------------------
+                    logger.info(f"📋 Method 2: Checking all_tables (granted access)...")
+                    
+                    all_tables_query = text("""
+                        SELECT owner, table_name
+                        FROM all_tables
+                        WHERE owner = :target_schema
+                          AND table_name NOT LIKE 'LOG_MINING%'
+                          AND table_name NOT LIKE 'DEBEZIUM%'
+                          AND table_name NOT LIKE 'SYS_%'
+                          AND table_name NOT LIKE 'MLOG$%'
+                          AND table_name NOT LIKE 'RUPD$%'
+                          AND table_name NOT LIKE 'BIN$%'
+                        ORDER BY table_name
+                    """)
+                    
+                    result = conn.execute(all_tables_query, {"target_schema": target_schema})
+                    granted_tables = [(row[0], row[1]) for row in result.fetchall()]
+                    
+                    for owner, table_name in granted_tables:
+                        qualified_name = f"{owner}.{table_name}"
+                        if qualified_name not in discovered_tables:
+                            discovered_tables[qualified_name] = {
+                                'owner': owner,
+                                'table': table_name,
+                                'source': 'granted'
+                            }
+                    
+                    logger.info(f"   ✅ Found {len(granted_tables)} accessible tables in schema '{target_schema}'")
+                    
+                    # --------------------------------------------------------
+                    # Method 3: Tables accessible via synonyms
+                    # --------------------------------------------------------
+                    logger.info(f"📋 Method 3: Checking all_synonyms...")
+                    
+                    synonyms_query = text("""
+                        SELECT 
+                            synonym_name,
+                            table_owner,
+                            table_name
+                        FROM all_synonyms
+                        WHERE owner = :current_user
+                          AND table_name NOT LIKE 'LOG_MINING%'
+                          AND table_name NOT LIKE 'DEBEZIUM%'
+                          AND table_name NOT LIKE 'SYS_%'
+                        ORDER BY synonym_name
+                    """)
+                    
+                    result = conn.execute(synonyms_query, {"current_user": username_upper})
+                    synonyms = [(row[0], row[1], row[2]) for row in result.fetchall()]
+                    
+                    for synonym_name, table_owner, table_name in synonyms:
+                        # Use the actual table owner and name
+                        qualified_name = f"{table_owner}.{table_name}"
+                        if qualified_name not in discovered_tables:
+                            discovered_tables[qualified_name] = {
+                                'owner': table_owner,
+                                'table': table_name,
+                                'source': 'synonym',
+                                'synonym': synonym_name
+                            }
+                    
+                    logger.info(f"   ✅ Found {len(synonyms)} accessible synonyms")
+                    
+                    # ========================================================
+                    # STEP 4: Build final table list
+                    # ========================================================
+                    logger.info("=" * 80)
+                    logger.info(f"📊 DISCOVERY SUMMARY")
+                    logger.info("=" * 80)
+                    logger.info(f"Total unique tables found: {len(discovered_tables)}")
+                    
+                    if discovered_tables:
+                        logger.info(f"\nAccessible tables:")
+                        for qualified_name, info in discovered_tables.items():
+                            source_type = info['source']
+                            if source_type == 'synonym':
+                                logger.info(f"   • {qualified_name} (via synonym: {info['synonym']})")
                             else:
-                                logger.error(f"❌ No tables found at all!")
-                                messages.error(
-                                    request,
-                                    f'No tables found in Oracle database. '
-                                    f'User "{db_config.username}" may not have SELECT privileges on any tables.'
-                                )
+                                logger.info(f"   • {qualified_name} ({source_type})")
+                        
+                        # Extract table names for processing
+                        tables = list(discovered_tables.keys())
+                    else:
+                        logger.error(f"❌ No accessible tables found!")
+                        logger.error(f"\nTroubleshooting:")
+                        logger.error(f"   1. Verify tables exist in schema: {target_schema}")
+                        logger.error(f"   2. Check grants for user: {username_upper}")
+                        logger.error(f"   3. Verify synonyms are created")
+                        
+                        # Show what schemas have tables
+                        debug_query = text("""
+                            SELECT owner, COUNT(*) as table_count
+                            FROM all_tables
+                            GROUP BY owner
+                            ORDER BY table_count DESC
+                        """)
+                        result = conn.execute(debug_query)
+                        schemas_with_tables = [(row[0], row[1]) for row in result.fetchall()[:10]]
+                        
+                        logger.error(f"\nTop schemas with tables:")
+                        for schema, count in schemas_with_tables:
+                            logger.error(f"   • {schema}: {count} tables")
+                        
+                        messages.error(
+                            request,
+                            f"No accessible tables found for user '{username_upper}'. "
+                            f"Please verify grants or create synonyms. "
+                            f"Target schema: {target_schema}"
+                        )
+                        return redirect('client_detail', pk=db_config.client.pk)
+                    
+                    logger.info("=" * 80)
                 
                 engine.dispose()
                 
             except Exception as e:
-                logger.error(f"❌ Oracle direct query failed: {e}", exc_info=True)
+                logger.error(f"❌ Oracle table discovery failed: {e}", exc_info=True)
                 messages.error(request, f'Failed to discover Oracle tables: {str(e)}')
+                return redirect('client_detail', pk=db_config.client.pk)
         
+        # ====================================================================
+        # OTHER DATABASES (MySQL, PostgreSQL, SQL Server)
+        # ====================================================================
+        else:
+            from client.utils.database_utils import get_table_list
+            try:
+                tables = get_table_list(db_config)
+                logger.info(f"✅ Found {len(tables)} tables via get_table_list()")
+            except Exception as e:
+                logger.error(f"❌ get_table_list() failed: {e}", exc_info=True)
+                tables = []
+        
+        # ====================================================================
+        # VALIDATE: We have tables
+        # ====================================================================
         if not tables:
             logger.error(f"❌ No tables found in database!")
             messages.error(
                 request,
-                f'No tables found in {db_config.db_type} database. '
-                f'Please check database connection and user permissions.'
+                f'No tables found. Please check database connection and permissions.'
             )
             return redirect('client_detail', pk=db_config.client.pk)
         
-        logger.info(f"Found {len(tables)} tables in database")
+        logger.info(f"✅ Found {len(tables)} accessible tables total")
         
-        # ================================================================
-        # STEP 3: Get table details (row count, size, columns)
-        # ================================================================
+        # ====================================================================
+        # GET TABLE DETAILS (row counts, columns, PKs)
+        # ====================================================================
         tables_with_info = []
         engine = get_database_engine(db_config)
         
         with engine.connect() as conn:
             for table_name in tables:
-                logger.info(f"🔍 Processing table: {table_name}")
+                logger.info(f"📊 Processing table: {table_name}")
                 row_count = 0
                 columns = []
                 primary_keys = []
                 error_msg = None
                 
                 try:
-                    # ============================================================
-                    # 1. Get row count - database-specific queries
-                    # ============================================================
-                    count_success = False
-                    
-                    if db_config.db_type.lower() == 'mysql':
-                        count_query = text(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+                    # ========================================================
+                    # Validate: Try to query the table
+                    # ========================================================
+                    if db_config.db_type.lower() == 'oracle':
+                        # Oracle: Use unquoted SCHEMA.TABLE format
+                        if '.' in table_name:
+                            schema_part, table_part = table_name.rsplit('.', 1)
+                            test_query = text(f'SELECT 1 FROM {schema_part}.{table_part} WHERE ROWNUM = 1')
+                            count_query = text(f'SELECT COUNT(*) as cnt FROM {schema_part}.{table_part}')
+                        else:
+                            test_query = text(f'SELECT 1 FROM {table_name} WHERE ROWNUM = 1')
+                            count_query = text(f'SELECT COUNT(*) as cnt FROM {table_name}')
+                        
+                        # Test access
+                        conn.execute(test_query)
+                        logger.info(f"   ✅ Table is accessible")
+                        
+                        # Get row count
                         result = conn.execute(count_query)
                         row = result.fetchone()
                         row_count = row[0] if row else 0
-                        count_success = True
+                    
+                    elif db_config.db_type.lower() == 'mysql':
+                        test_query = text(f"SELECT 1 FROM `{table_name}` LIMIT 1")
+                        count_query = text(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+                        conn.execute(test_query)
+                        result = conn.execute(count_query)
+                        row = result.fetchone()
+                        row_count = row[0] if row else 0
                     
                     elif db_config.db_type.lower() == 'postgresql':
+                        test_query = text(f'SELECT 1 FROM "{table_name}" LIMIT 1')
                         count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
+                        conn.execute(test_query)
                         result = conn.execute(count_query)
                         row = result.fetchone()
                         row_count = row[0] if row else 0
-                        count_success = True
                     
                     elif db_config.db_type.lower() == 'mssql':
-                        schema_name = 'dbo'
-                        actual_table = table_name
                         if '.' in table_name:
                             schema_name, actual_table = table_name.split('.', 1)
-                        
-                        count_query = text(f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{actual_table}]")
-                        result = conn.execute(count_query)
-                        row = result.fetchone()
-                        row_count = row[0] if row else 0
-                        count_success = True
-                    
-                    elif db_config.db_type.lower() == 'oracle':
-                        # ✅ CRITICAL FIX: Oracle requires UNQUOTED identifiers
-                        # Oracle stores table names in UPPERCASE in data dictionary
-                        # Quoted identifiers are case-sensitive and won't match
-                        
-                        if '.' in table_name:
-                            schema_name, actual_table = table_name.rsplit('.', 1)
-                            
-                            # Try unquoted query (case-insensitive, matches UPPERCASE)
-                            try:
-                                count_query = text(f'SELECT COUNT(*) as cnt FROM {schema_name}.{actual_table}')
-                                result = conn.execute(count_query)
-                                row = result.fetchone()
-                                row_count = row[0] if row else 0
-                                count_success = True
-                                logger.info(f"   ✅ Row count: {row_count}")
-                            except Exception as e1:
-                                logger.warning(f"   ⚠️  Unquoted query failed: {e1}")
-                                error_msg = f"Count query failed: {str(e1)}"
+                            test_query = text(f"SELECT TOP 1 1 FROM [{schema_name}].[{actual_table}]")
+                            count_query = text(f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{actual_table}]")
                         else:
-                            # No schema prefix - use current user's schema
-                            try:
-                                # Try unquoted query (case-insensitive)
-                                count_query = text(f'SELECT COUNT(*) as cnt FROM {table_name}')
-                                result = conn.execute(count_query)
-                                row = result.fetchone()
-                                row_count = row[0] if row else 0
-                                count_success = True
-                                logger.info(f"   ✅ Row count: {row_count}")
-                            except Exception as e1:
-                                logger.warning(f"   ⚠️  Unquoted query failed: {e1}")
-                                error_msg = f"Count query failed: {str(e1)}"
-                    
-                    else:
-                        # Generic fallback
-                        count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
+                            test_query = text(f"SELECT TOP 1 1 FROM [dbo].[{table_name}]")
+                            count_query = text(f"SELECT COUNT(*) as cnt FROM [dbo].[{table_name}]")
+                        
+                        conn.execute(test_query)
                         result = conn.execute(count_query)
                         row = result.fetchone()
                         row_count = row[0] if row else 0
-                        count_success = True
                     
-                    # ============================================================
-                    # 2. Get table schema (columns, types, primary keys)
-                    # ============================================================
+                    # ========================================================
+                    # Get table schema (columns, PKs, types)
+                    # ========================================================
                     try:
                         schema = get_table_schema(db_config, table_name)
                         columns = schema.get('columns', [])
                         primary_keys = schema.get('primary_keys', [])
                         
                         logger.info(f"   ✅ Schema: {len(columns)} columns, PKs: {primary_keys}")
-                        
-                        if not columns:
-                            logger.warning(f"   ⚠️  No columns found for table {table_name}")
-                            if not error_msg:
-                                error_msg = "No columns found - table may not exist or user lacks permissions"
-                    
                     except Exception as e:
                         logger.error(f"   ❌ get_table_schema() failed: {e}", exc_info=True)
                         if not error_msg:
                             error_msg = f"Schema query failed: {str(e)}"
                     
-                    # ============================================================
-                    # 3. Check if table has timestamp column (for incremental sync)
-                    # ============================================================
+                    # ========================================================
+                    # Check for timestamp column
+                    # ========================================================
                     has_timestamp = any(
                         'timestamp' in str(col.get('type', '')).lower() or 
                         'datetime' in str(col.get('type', '')).lower() or
                         'date' in str(col.get('type', '')).lower() or
-                        str(col.get('name', '')).endswith('_at') or
-                        str(col.get('name', '')).endswith('_date')
+                        str(col.get('name', '')).upper().endswith('_AT') or
+                        str(col.get('name', '')).upper().endswith('_DATE')
                         for col in columns
                     )
                     
-                    # ============================================================
-                    # 4. Generate consistent target table name
-                    # ============================================================
+                    # ========================================================
+                    # Generate target table name
+                    # ========================================================
+                    # Note: generate_target_table_name is defined at the top of cdc_views.py
+                    # Just use it directly since we're already in that file
+                    
                     source_db_name = db_config.database_name
                     
-                    # Normalize table name based on database type
+                    # Generate safe target table name
+                    safe_db_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in source_db_name)
+                    
                     if db_config.db_type.lower() == 'oracle':
-                        # Oracle: Keep schema.table format or add username as schema
-                        if '.' not in table_name:
-                            normalized_table = f"{db_config.username.upper()}.{table_name}"
+                        # Oracle: table_name is already SCHEMA.TABLE format
+                        if '.' in table_name:
+                            table_only = table_name.split('.', 1)[1]  # Get table part after schema
                         else:
-                            normalized_table = table_name
+                            table_only = table_name
+                        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_only)
+                    elif db_config.db_type.lower() == 'mssql':
+                        if '.' in table_name:
+                            table_only = table_name.split('.', 1)[1]
+                        else:
+                            table_only = table_name
+                        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_only)
                     else:
-                        normalized_table = normalize_sql_server_table_name(table_name, db_config.db_type)
+                        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_name)
                     
-                    # Generate consistent target name
-                    target_table_name = generate_target_table_name(
-                        source_db_name, 
-                        normalized_table, 
-                        db_config.db_type
-                    )
+                    target_table_name = f"{safe_db_name}_{safe_table_name}"
                     
-                    # Display name (short form for UI)
-                    display_table_name = normalized_table.split('.')[-1] if '.' in normalized_table else normalized_table
+                    # Display name (strip schema for UI)
+                    display_table_name = table_name.split('.')[-1] if '.' in table_name else table_name
                     
-                    # ============================================================
-                    # 5. Add to results
-                    # ============================================================
+                    # ========================================================
+                    # Add to results
+                    # ========================================================
                     table_info = {
-                        'name': normalized_table,
+                        'name': table_name,  # SCHEMA.TABLE for Oracle/PG/MSSQL
                         'display_name': display_table_name,
                         'target_name': target_table_name,
                         'row_count': row_count,
@@ -796,74 +799,39 @@ def cdc_discover_tables(request, database_pk):
                         'primary_keys': primary_keys,
                     }
                     
-                    # Add error message if any issues occurred
                     if error_msg:
                         table_info['error'] = error_msg
-                        logger.warning(f"   ⚠️  Table added with error: {error_msg}")
                     
                     tables_with_info.append(table_info)
-                    
                     logger.info(f"   ✅ Added: {display_table_name} ({row_count} rows, {len(columns)} cols)")
                     
                 except Exception as e:
-                    # Catastrophic failure for this table
                     logger.error(f"   ❌ FAILED to process table {table_name}: {str(e)}", exc_info=True)
-                    
-                    # Still add table with error info
-                    source_db_name = db_config.database_name
-                    
-                    if db_config.db_type.lower() == 'oracle':
-                        if '.' not in table_name:
-                            normalized_table = f"{db_config.username.upper()}.{table_name}"
-                        else:
-                            normalized_table = table_name
-                    else:
-                        normalized_table = normalize_sql_server_table_name(table_name, db_config.db_type)
-                    
-                    display_table_name = normalized_table.split('.')[-1] if '.' in normalized_table else normalized_table
-                    target_table_name = generate_target_table_name(source_db_name, normalized_table, db_config.db_type)
-                    
-                    tables_with_info.append({
-                        'name': normalized_table,
-                        'display_name': display_table_name,
-                        'target_name': target_table_name,
-                        'row_count': 0,
-                        'column_count': 0,
-                        'has_timestamp': False,
-                        'primary_keys': [],
-                        'error': str(e)
-                    })
+                    # Skip inaccessible tables
+                    continue
         
         engine.dispose()
         
-        # ================================================================
-        # STEP 4: Calculate totals and statistics
-        # ================================================================
+        # ====================================================================
+        # Calculate totals
+        # ====================================================================
         total_rows = sum(t['row_count'] for t in tables_with_info)
         total_cols = sum(t['column_count'] for t in tables_with_info)
         
-        # Count tables with errors
         tables_with_errors = [t for t in tables_with_info if 'error' in t]
         
         if tables_with_errors:
-            logger.warning(f"⚠️  {len(tables_with_errors)} table(s) had errors:")
-            for t in tables_with_errors:
-                logger.warning(f"   - {t['name']}: {t['error']}")
-            
+            logger.warning(f"⚠️ {len(tables_with_errors)} table(s) had errors")
             messages.warning(
                 request,
-                f"{len(tables_with_errors)} table(s) could not be fully analyzed. "
-                f"Check server logs for details. This may be due to permissions or invalid table metadata."
+                f"{len(tables_with_errors)} table(s) could not be fully analyzed."
             )
         
         logger.info(
-            f"Discovery complete: {len(tables_with_info)} tables, "
-            f"{total_rows} total rows, {total_cols} total columns"
+            f"✅ Discovery complete: {len(tables_with_info)} tables, "
+            f"{total_rows} total rows"
         )
         
-        # ================================================================
-        # STEP 5: Render template
-        # ================================================================
         context = {
             'db_config': db_config,
             'client': db_config.client,
@@ -885,8 +853,13 @@ def cdc_discover_tables(request, database_pk):
 @require_http_methods(["GET", "POST"])
 def cdc_configure_tables(request, database_pk):
     """
-    Configure selected tables with column selection and mapping
-    FIXED: Proper Oracle table name handling
+    ✅ COMPLETE FIXED VERSION - Configure selected tables with column selection and mapping
+    
+    CRITICAL FIXES FOR ORACLE:
+    1. ✅ Preserves SCHEMA.TABLE format from discovery
+    2. ✅ Correct schema name handling (no C## prefix)
+    3. ✅ Proper UPPERCASE handling
+    4. ✅ Case-insensitive column matching
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
@@ -896,6 +869,9 @@ def cdc_configure_tables(request, database_pk):
         messages.error(request, 'No tables selected')
         return redirect('cdc_discover_tables', database_pk=database_pk)
     
+    # ============================================================================
+    # POST: Save configuration
+    # ============================================================================
     if request.method == "POST":
         try:
             # VALIDATE BEFORE CREATING
@@ -922,9 +898,11 @@ def cdc_configure_tables(request, database_pk):
                     created_by=request.user if request.user.is_authenticated else None
                 )
 
-                logger.info(f"Created ReplicationConfig: {replication_config.id}")
+                logger.info(f"✅ Created ReplicationConfig: {replication_config.id}")
                 
+                # ================================================================
                 # Create TableMappings for each table
+                # ================================================================
                 for table_name in selected_tables:
                     sync_type = request.POST.get(f'sync_type_{table_name}', '')
                     if not sync_type:
@@ -933,30 +911,67 @@ def cdc_configure_tables(request, database_pk):
                     incremental_col = request.POST.get(f'incremental_col_{table_name}', '')
                     conflict_resolution = request.POST.get(f'conflict_resolution_{table_name}', 'source_wins')
 
+                    # ============================================================
                     # ✅ FIX: Normalize table name based on database type
-                    if db_config.db_type.lower() == 'oracle':
-                        # Oracle: Keep schema.table format or add username as schema
+                    # ============================================================
+                    db_type = db_config.db_type.lower()
+                    
+                    if db_type == 'oracle':
+                        # ✅ Oracle: Keep schema.table format or add username as schema
+                        if '.' in table_name:
+                            # Already has schema prefix - ensure UPPERCASE
+                            parts = table_name.split('.', 1)
+                            normalized_source = f"{parts[0].upper()}.{parts[1].upper()}"
+                            logger.info(f"Oracle: Table already qualified: {table_name} → {normalized_source}")
+                        else:
+                            # Table without schema - add username as schema
+                            username = db_config.username.upper()
+                            # Remove C## prefix if present
+                            schema_name = username[3:] if username.startswith('C##') else username
+                            normalized_source = f"{schema_name}.{table_name.upper()}"
+                            logger.info(f"Oracle: Added schema prefix: {table_name} → {normalized_source}")
+                    
+                    elif db_type == 'mssql':
+                        # SQL Server: Ensure schema.table format (default: dbo)
+                        normalized_source = normalize_sql_server_table_name(table_name, db_type)
+                        logger.info(f"SQL Server: Normalized to: {normalized_source}")
+                    
+                    elif db_type == 'postgresql':
+                        # PostgreSQL: Ensure schema.table format (default: public)
                         if '.' not in table_name:
-                            normalized_source = f"{db_config.username.upper()}.{table_name}"
+                            normalized_source = f"public.{table_name}"
+                            logger.info(f"PostgreSQL: Added schema prefix: {table_name} → {normalized_source}")
                         else:
                             normalized_source = table_name
-                    else:
-                        normalized_source = normalize_sql_server_table_name(table_name, db_config.db_type)
+                            logger.info(f"PostgreSQL: Table already qualified: {normalized_source}")
                     
+                    else:
+                        # MySQL: No schema concept (database.table handled by connector)
+                        normalized_source = table_name
+                        logger.info(f"MySQL: Using table name as-is: {normalized_source}")
+                    
+                    # ============================================================
                     # Get target table name
+                    # ============================================================
                     target_table_name = request.POST.get(f'target_table_name_{table_name}', '')
                     if not target_table_name:
                         source_db_name = db_config.database_name
                         target_table_name = generate_target_table_name(
                             source_db_name,
                             normalized_source,
-                            db_config.db_type
+                            db_type
                         )
 
+                    logger.info(f"✅ Creating TableMapping:")
+                    logger.info(f"   Source: {normalized_source}")
+                    logger.info(f"   Target: {target_table_name}")
+
+                    # ============================================================
                     # Create TableMapping
+                    # ============================================================
                     table_mapping = TableMapping.objects.create(
                         replication_config=replication_config,
-                        source_table=normalized_source,
+                        source_table=normalized_source,  # ✅ Now includes schema for Oracle/PostgreSQL/SQL Server
                         target_table=target_table_name,
                         is_enabled=True,
                         sync_type=sync_type,
@@ -965,12 +980,17 @@ def cdc_configure_tables(request, database_pk):
                         conflict_resolution=conflict_resolution,
                     )
                     
-                    logger.info(f"Created TableMapping: {normalized_source} -> {target_table_name}")
+                    logger.info(f"✅ Created TableMapping: {normalized_source} -> {target_table_name}")
                     
+                    # ============================================================
                     # Get selected columns
+                    # ============================================================
                     selected_columns = request.POST.getlist(f'selected_columns_{table_name}')
                     
                     if selected_columns:
+                        # User selected specific columns
+                        logger.info(f"Creating column mappings for selected columns: {len(selected_columns)}")
+                        
                         for source_column in selected_columns:
                             target_column = request.POST.get(
                                 f'column_mapping_{table_name}_{source_column}', 
@@ -980,10 +1000,16 @@ def cdc_configure_tables(request, database_pk):
                             try:
                                 schema = get_table_schema(db_config, table_name)
                                 columns = schema.get('columns', [])
-                                column_info = next(
-                                    (col for col in columns if col.get('name') == source_column), 
-                                    None
-                                )
+                                
+                                # ✅ CRITICAL FIX: Case-insensitive column lookup for Oracle
+                                column_info = None
+                                for col in columns:
+                                    if col.get('name', '').upper() == source_column.upper():
+                                        column_info = col
+                                        break
+                                
+                                if not column_info:
+                                    logger.warning(f"Column {source_column} not found in schema, using VARCHAR")
                                 
                                 source_type = str(column_info.get('type', 'VARCHAR')) if column_info else 'VARCHAR'
                                 
@@ -996,6 +1022,8 @@ def cdc_configure_tables(request, database_pk):
                                     is_enabled=True,
                                 )
                                 
+                                logger.debug(f"   ✅ Mapped column: {source_column} -> {target_column or source_column}")
+                                
                             except Exception as e:
                                 logger.error(f"Error creating column mapping for {source_column}: {e}")
                     else:
@@ -1003,6 +1031,8 @@ def cdc_configure_tables(request, database_pk):
                         try:
                             schema = get_table_schema(db_config, table_name)
                             columns = schema.get('columns', [])
+                            
+                            logger.info(f"Creating {len(columns)} column mappings for {table_name}")
                             
                             for col in columns:
                                 col_name = col.get('name')
@@ -1021,21 +1051,27 @@ def cdc_configure_tables(request, database_pk):
                                     target_type=col_type,
                                     is_enabled=True,
                                 )
+                            
+                            logger.info(f"   ✅ Created {len(columns)} default column mappings")
+                            
                         except Exception as e:
                             logger.error(f"Error creating default column mappings: {e}")
                 
+                # ================================================================
                 # Auto-create tables if enabled
+                # ================================================================
                 if replication_config.auto_create_tables:
                     try:
                         from client.utils.table_creator import create_target_tables
                         create_target_tables(replication_config)
-                        messages.success(request, 'Target tables created successfully!')
+                        messages.success(request, '✅ Target tables created successfully!')
                     except Exception as e:
                         logger.error(f"Failed to create target tables: {e}")
                         messages.warning(request, f'Configuration saved, but failed to create target tables: {str(e)}')
                 
-                messages.success(request, 'CDC configuration saved successfully!')
+                messages.success(request, '✅ CDC configuration saved successfully!')
                 
+                # Clean up session
                 request.session.pop('selected_tables', None)
                 request.session.pop('database_pk', None)
                 
@@ -1046,16 +1082,17 @@ def cdc_configure_tables(request, database_pk):
             messages.error(request, f'Failed to save configuration: {str(e)}')
     
     # ============================================================================
-    # GET: Show configuration form - FIXED FOR ORACLE
+    # GET: Show configuration form
     # ============================================================================
     tables_with_columns = []
     
     for table_name in selected_tables:
         try:
-            logger.info(f"🔍 Getting schema for Oracle table: {table_name}")
+            logger.info(f"🔍 Getting schema for table: {table_name}")
             
+            # ================================================================
             # ✅ FIX: Oracle table names may need special handling
-            # The table_name from session should already be in correct format from discovery
+            # ================================================================
             schema = get_table_schema(db_config, table_name)
             columns = schema.get('columns', [])
             
@@ -1072,9 +1109,11 @@ def cdc_configure_tables(request, database_pk):
                         schema = get_table_schema(db_config, table_upper)
                         columns = schema.get('columns', [])
                     
-                    # Try with schema prefix
+                    # Try with schema prefix if not present
                     if not columns and '.' not in table_name:
-                        table_with_schema = f"{db_config.username.upper()}.{table_name}"
+                        username = db_config.username.upper()
+                        schema_name = username[3:] if username.startswith('C##') else username
+                        table_with_schema = f"{schema_name}.{table_name}"
                         logger.info(f"   Trying with schema: {table_with_schema}")
                         schema = get_table_schema(db_config, table_with_schema)
                         columns = schema.get('columns', [])
@@ -1086,7 +1125,9 @@ def cdc_configure_tables(request, database_pk):
             
             logger.info(f"✅ Found {len(columns)} columns for {table_name}")
             
+            # ================================================================
             # Find incremental candidates
+            # ================================================================
             incremental_candidates = [
                 col for col in columns
                 if 'timestamp' in str(col.get('type', '')).lower() or
@@ -1098,27 +1139,48 @@ def cdc_configure_tables(request, database_pk):
                     'int' in str(col.get('type', '')).lower())
             ]
             
-            # ✅ Generate consistent target table name
-            if db_config.db_type.lower() == 'oracle':
+            # ================================================================
+            # ✅ Generate consistent target table name based on DB type
+            # ================================================================
+            db_type = db_config.db_type.lower()
+            
+            if db_type == 'oracle':
+                # Oracle: Ensure schema.table format (already done in discovery)
+                if '.' in table_name:
+                    parts = table_name.split('.', 1)
+                    normalized_table = f"{parts[0].upper()}.{parts[1].upper()}"
+                else:
+                    username = db_config.username.upper()
+                    schema_name = username[3:] if username.startswith('C##') else username
+                    normalized_table = f"{schema_name}.{table_name.upper()}"
+            elif db_type == 'mssql':
+                # SQL Server: Ensure schema.table format (default: dbo)
+                normalized_table = normalize_sql_server_table_name(table_name, db_type)
+            elif db_type == 'postgresql':
+                # PostgreSQL: Ensure schema.table format (default: public)
                 if '.' not in table_name:
-                    normalized_table = f"{db_config.username.upper()}.{table_name}"
+                    normalized_table = f"public.{table_name}"
                 else:
                     normalized_table = table_name
             else:
-                normalized_table = normalize_sql_server_table_name(table_name, db_config.db_type)
+                # MySQL: No schema normalization
+                normalized_table = table_name
             
             source_db_name = db_config.database_name
-            target_table_name = generate_target_table_name(source_db_name, normalized_table, db_config.db_type)
+            target_table_name = generate_target_table_name(source_db_name, normalized_table, db_type)
 
             tables_with_columns.append({
-                'name': normalized_table,
+                'name': normalized_table,  # ✅ Now includes schema for Oracle/PostgreSQL/SQL Server
                 'target_name': target_table_name,
                 'columns': columns,
                 'primary_keys': schema.get('primary_keys', []),
                 'incremental_candidates': incremental_candidates,
             })
             
-            logger.debug(f"Added table {normalized_table}: {len(columns)} columns, {len(incremental_candidates)} incremental candidates")
+            logger.debug(
+                f"Added table {normalized_table}: "
+                f"{len(columns)} columns, {len(incremental_candidates)} incremental candidates"
+            )
             
         except Exception as e:
             logger.error(f"Error getting schema for {table_name}: {e}", exc_info=True)
@@ -1127,6 +1189,8 @@ def cdc_configure_tables(request, database_pk):
     if not tables_with_columns:
         messages.error(request, 'Could not load schema for any selected tables. Please check database permissions.')
         return redirect('cdc_discover_tables', database_pk=database_pk)
+    
+    logger.info(f"✅ Loaded {len(tables_with_columns)} tables for configuration")
     
     context = {
         'db_config': db_config,
@@ -2142,10 +2206,6 @@ def manage_postgresql_publication(db_config, replication_config, table_names):
         logger.error(f"❌ {error_msg}", exc_info=True)
         return False, error_msg
 
-"""
-Complete cdc_edit_config POST handler with all fixes
-Replace the POST section in your cdc_edit_config function (starting around line 1700)
-"""
 
 @require_http_methods(["GET", "POST"])
 def cdc_edit_config(request, config_pk):

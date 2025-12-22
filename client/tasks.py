@@ -16,18 +16,23 @@ from client.utils.notification_utils import send_error_notification
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================================
-# HELPER FUNCTIONS - Add these at the top after imports
-# ============================================================================
-
 def get_kafka_topics_for_replication(replication_config):
     """
-    Generate correct Kafka topic names based on database type
+    ✅ FIXED: Generate correct Kafka topic names for consumer subscription
     
-    Returns:
-        list: List of Kafka topic names to subscribe to
+    CRITICAL FIX FOR ORACLE:
+    - OLD (WRONG): client_1_db_5.CUSTOMERS (schema stripped)
+    - NEW (CORRECT): client_1_db_5.CDCUSER.CUSTOMERS (schema included)
+    
+    Oracle Debezium behavior:
+    - table.include.list: "CDCUSER.CUSTOMERS" (with schema)
+    - Actual topic: "client_1_db_5.CDCUSER.CUSTOMERS" (with schema)
+    - This is DIFFERENT from the old assumption!
     """
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
     config = replication_config
     db_config = config.client_database
     db_type = db_config.db_type.lower()
@@ -80,15 +85,32 @@ def get_kafka_topics_for_replication(replication_config):
             logger.info(f"   ✓ MySQL: {source_table} → {topic_name}")
             
         elif db_type == 'oracle':
-            # ✅ Oracle: {prefix}.{schema}.{table}
-            if '.' in source_table:
-                schema, table = source_table.rsplit('.', 1)
-            else:
-                schema = db_config.username.upper()
-                table = source_table
+            # ✅ CRITICAL FIX: Oracle INCLUDES schema in topic name
+            # 
+            # Previous assumption was WRONG:
+            # - We thought: client_1_db_5.CUSTOMERS (no schema)
+            # - Reality is: client_1_db_5.CDCUSER.CUSTOMERS (with schema)
+            #
+            # Evidence from your logs:
+            # kafka-connect | client_1_db_5.CDCUSER.CUSTOMERS=UNKNOWN_TOPIC_OR_PARTITION
+            #
+            # Why? Because table.include.list = "CDCUSER.CUSTOMERS" (with schema)
+            # Debezium uses this FULL name for the topic!
             
+            if '.' in source_table:
+                # Table is already qualified: CDCUSER.CUSTOMERS
+                schema, table = source_table.rsplit('.', 1)
+                schema = schema.upper()
+                table = table.upper()
+            else:
+                # Table without schema - add username as schema
+                username = db_config.username.upper()
+                schema = username[3:] if username.startswith('C##') else username
+                table = source_table.upper()
+            
+            # ✅ Topic format: {prefix}.{schema}.{table} - KEEP SCHEMA
             topic_name = f"{kafka_topic_prefix}.{schema}.{table}"
-            logger.info(f"   ✓ Oracle: {source_table} → {topic_name}")
+            logger.info(f"   ✓ Oracle: {source_table} → {topic_name} (schema INCLUDED)")
             
         else:
             # Generic fallback
@@ -97,7 +119,7 @@ def get_kafka_topics_for_replication(replication_config):
         
         topics.append(topic_name)
     
-    logger.info(f"✅ Generated {len(topics)} Kafka topics")
+    logger.info(f"✅ Generated {len(topics)} Kafka topic names")
     return topics
 
 
