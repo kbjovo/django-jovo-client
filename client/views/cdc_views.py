@@ -100,16 +100,56 @@ def normalize_sql_server_table_name(table_name: str, db_type: str) -> str:
 
 
 def generate_target_table_name(source_db_name: str, source_table_name: str, db_type: str) -> str:
+    """
+    Generate safe target table name from source database and table name.
+    
+    CRITICAL FOR ORACLE: Preserves schema prefix to avoid collisions
+    when multiple schemas have tables with the same name.
+    
+    Examples:
+        MySQL:      mydb + users → mydb_users
+        PostgreSQL: mydb + public.users → mydb_public_users (schema kept)
+        SQL Server: AppDB + dbo.Orders → AppDB_Orders (schema stripped)
+        Oracle:     XEPDB1 + SALES.INFO → XEPDB1_SALES_INFO (schema KEPT)
+                    XEPDB1 + HR.INFO → XEPDB1_HR_INFO (different target!)
+    
+    Args:
+        source_db_name: Source database/PDB name
+        source_table_name: Source table name (may include schema prefix)
+        db_type: Database type ('mysql', 'postgresql', 'mssql', 'oracle')
+    
+    Returns:
+        str: Safe target table name
+    """
+    # Clean database name
     safe_db_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in source_db_name)
     
-    if db_type.lower() == 'mssql':
+    db_type = db_type.lower()
+    
+    if db_type == 'oracle':
+        # ✅ ORACLE FIX: KEEP FULL SCHEMA.TABLE FORMAT
+        # This prevents collisions when multiple schemas have same table names
+        # "SALES.INFO" → "SALES_INFO"
+        # "HR.INFO" → "HR_INFO"
+        # Final: "XEPDB1_SALES_INFO" vs "XEPDB1_HR_INFO" ✅
+        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in source_table_name)
+        
+    elif db_type == 'mssql':
+        # SQL Server: Strip schema (already in DB name context)
         if '.' in source_table_name:
             table_only = source_table_name.split('.', 1)[1]
         else:
             table_only = source_table_name
-        
         safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_only)
+        
+    elif db_type == 'postgresql':
+        # PostgreSQL: Keep schema to avoid collisions between schemas
+        # "public.users" → "public_users"
+        # "audit.users" → "audit_users"
+        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in source_table_name)
+        
     else:
+        # MySQL: No schema concept, use table name as-is
         safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in source_table_name)
     
     return f"{safe_db_name}_{safe_table_name}"
@@ -383,7 +423,7 @@ def validate_topic_subscription(db_config: ClientDatabase, replication_config: R
 
 def cdc_discover_tables(request, database_pk):
     """
-    ✅ COMPLETE FIXED: Oracle table discovery with multi-schema support
+    ✅ COMPLETE FIXED: Oracle table discovery with multi-schema support and internal table filtering
     
     Handles:
     1. Common users (C##CDCUSER) accessing local user tables (CDCUSER)
@@ -391,20 +431,8 @@ def cdc_discover_tables(request, database_pk):
     3. Tables accessible via grants
     4. Tables accessible via synonyms
     5. Proper schema qualification
+    6. ✅ AUTOMATIC FILTERING of internal/system tables
     """
-    from django.shortcuts import render, get_object_or_404, redirect
-    from django.contrib import messages
-    from client.models.database import ClientDatabase
-    from client.utils.database_utils import (
-        get_database_engine, 
-        get_table_schema,
-        check_oracle_logminer
-    )
-    from sqlalchemy import text
-    import logging
-    
-    logger = logging.getLogger(__name__)
-    
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
     if request.method == "POST":
@@ -471,14 +499,14 @@ def cdc_discover_tables(request, database_pk):
                     username_upper = current_user.upper()
                     if username_upper.startswith('C##'):
                         target_schema = username_upper[3:]  # Remove C##
-                        logger.info(f"🔐 Common user detected: {username_upper}")
+                        logger.info(f"🔍 Common user detected: {username_upper}")
                         logger.info(f"   Target schema: {target_schema}")
                     else:
                         target_schema = username_upper
-                        logger.info(f"🔐 Local user detected: {username_upper}")
+                        logger.info(f"🔍 Local user detected: {username_upper}")
                     
                     # ========================================================
-                    # STEP 3: Find ALL accessible tables
+                    # STEP 3: Find ALL accessible tables (with filtering)
                     # ========================================================
                     discovered_tables = {}  # Use dict to deduplicate
                     
@@ -487,6 +515,7 @@ def cdc_discover_tables(request, database_pk):
                     # --------------------------------------------------------
                     logger.info(f"📋 Method 1: Checking user_tables...")
                     
+                    # ✅ FILTER DURING QUERY - exclude internal tables
                     user_tables_query = text("""
                         SELECT table_name
                         FROM user_tables 
@@ -496,6 +525,13 @@ def cdc_discover_tables(request, database_pk):
                           AND table_name NOT LIKE 'MLOG$%'
                           AND table_name NOT LIKE 'RUPD$%'
                           AND table_name NOT LIKE 'BIN$%'
+                          AND table_name NOT LIKE 'ISEQ$$_%'
+                          AND table_name NOT LIKE 'DR$%'
+                          AND table_name NOT LIKE 'SCHEDULER_%'
+                          AND table_name NOT LIKE 'LOGMNR_%'
+                          AND table_name NOT LIKE 'DBMS_%'
+                          AND table_name NOT LIKE 'AQ$%'
+                          AND table_name NOT LIKE 'DEF$%'
                         ORDER BY table_name
                     """)
                     
@@ -511,13 +547,14 @@ def cdc_discover_tables(request, database_pk):
                             'source': 'owned'
                         }
                     
-                    logger.info(f"   ✅ Found {len(user_owned)} owned tables")
+                    logger.info(f"   ✅ Found {len(user_owned)} owned tables (after filtering)")
                     
                     # --------------------------------------------------------
                     # Method 2: Tables accessible via grants (all_tables)
                     # --------------------------------------------------------
                     logger.info(f"📋 Method 2: Checking all_tables (granted access)...")
                     
+                    # ✅ FILTER DURING QUERY
                     all_tables_query = text("""
                         SELECT owner, table_name
                         FROM all_tables
@@ -528,6 +565,13 @@ def cdc_discover_tables(request, database_pk):
                           AND table_name NOT LIKE 'MLOG$%'
                           AND table_name NOT LIKE 'RUPD$%'
                           AND table_name NOT LIKE 'BIN$%'
+                          AND table_name NOT LIKE 'ISEQ$$_%'
+                          AND table_name NOT LIKE 'DR$%'
+                          AND table_name NOT LIKE 'SCHEDULER_%'
+                          AND table_name NOT LIKE 'LOGMNR_%'
+                          AND table_name NOT LIKE 'DBMS_%'
+                          AND table_name NOT LIKE 'AQ$%'
+                          AND table_name NOT LIKE 'DEF$%'
                         ORDER BY table_name
                     """)
                     
@@ -543,13 +587,14 @@ def cdc_discover_tables(request, database_pk):
                                 'source': 'granted'
                             }
                     
-                    logger.info(f"   ✅ Found {len(granted_tables)} accessible tables in schema '{target_schema}'")
+                    logger.info(f"   ✅ Found {len(granted_tables)} accessible tables in schema '{target_schema}' (after filtering)")
                     
                     # --------------------------------------------------------
                     # Method 3: Tables accessible via synonyms
                     # --------------------------------------------------------
                     logger.info(f"📋 Method 3: Checking all_synonyms...")
                     
+                    # ✅ FILTER DURING QUERY
                     synonyms_query = text("""
                         SELECT 
                             synonym_name,
@@ -560,6 +605,11 @@ def cdc_discover_tables(request, database_pk):
                           AND table_name NOT LIKE 'LOG_MINING%'
                           AND table_name NOT LIKE 'DEBEZIUM%'
                           AND table_name NOT LIKE 'SYS_%'
+                          AND table_name NOT LIKE 'ISEQ$$_%'
+                          AND table_name NOT LIKE 'DR$%'
+                          AND table_name NOT LIKE 'SCHEDULER_%'
+                          AND table_name NOT LIKE 'LOGMNR_%'
+                          AND table_name NOT LIKE 'DBMS_%'
                         ORDER BY synonym_name
                     """)
                     
@@ -577,7 +627,7 @@ def cdc_discover_tables(request, database_pk):
                                 'synonym': synonym_name
                             }
                     
-                    logger.info(f"   ✅ Found {len(synonyms)} accessible synonyms")
+                    logger.info(f"   ✅ Found {len(synonyms)} accessible synonyms (after filtering)")
                     
                     # ========================================================
                     # STEP 4: Build final table list
@@ -585,10 +635,10 @@ def cdc_discover_tables(request, database_pk):
                     logger.info("=" * 80)
                     logger.info(f"📊 DISCOVERY SUMMARY")
                     logger.info("=" * 80)
-                    logger.info(f"Total unique tables found: {len(discovered_tables)}")
+                    logger.info(f"Total unique business tables found: {len(discovered_tables)}")
                     
                     if discovered_tables:
-                        logger.info(f"\nAccessible tables:")
+                        logger.info(f"\nAccessible business tables:")
                         for qualified_name, info in discovered_tables.items():
                             source_type = info['source']
                             if source_type == 'synonym':
@@ -599,7 +649,7 @@ def cdc_discover_tables(request, database_pk):
                         # Extract table names for processing
                         tables = list(discovered_tables.keys())
                     else:
-                        logger.error(f"❌ No accessible tables found!")
+                        logger.error(f"❌ No accessible business tables found!")
                         logger.error(f"\nTroubleshooting:")
                         logger.error(f"   1. Verify tables exist in schema: {target_schema}")
                         logger.error(f"   2. Check grants for user: {username_upper}")
@@ -621,7 +671,7 @@ def cdc_discover_tables(request, database_pk):
                         
                         messages.error(
                             request,
-                            f"No accessible tables found for user '{username_upper}'. "
+                            f"No accessible business tables found for user '{username_upper}'. "
                             f"Please verify grants or create synonyms. "
                             f"Target schema: {target_schema}"
                         )
@@ -640,10 +690,33 @@ def cdc_discover_tables(request, database_pk):
         # OTHER DATABASES (MySQL, PostgreSQL, SQL Server)
         # ====================================================================
         else:
-            from client.utils.database_utils import get_table_list
             try:
                 tables = get_table_list(db_config)
                 logger.info(f"✅ Found {len(tables)} tables via get_table_list()")
+                
+                # ✅ ALSO FILTER FOR OTHER DATABASES
+                if tables:
+                    EXCLUDED_PATTERNS = [
+                        'DEBEZIUM_SIGNAL',
+                        'LOG_MINING_FLUSH',
+                        'sys_',           # System tables
+                        'information_schema',  # PostgreSQL/MySQL system schema
+                        'pg_',            # PostgreSQL system tables
+                        'sql_',           # SQL Server system tables
+                    ]
+                    
+                    filtered_tables = []
+                    for table in tables:
+                        table_lower = table.lower()
+                        if not any(pattern.lower() in table_lower for pattern in EXCLUDED_PATTERNS):
+                            filtered_tables.append(table)
+                    
+                    excluded_count = len(tables) - len(filtered_tables)
+                    if excluded_count > 0:
+                        logger.info(f"✅ Filtered out {excluded_count} system/internal tables")
+                    
+                    tables = filtered_tables
+                
             except Exception as e:
                 logger.error(f"❌ get_table_list() failed: {e}", exc_info=True)
                 tables = []
@@ -652,14 +725,14 @@ def cdc_discover_tables(request, database_pk):
         # VALIDATE: We have tables
         # ====================================================================
         if not tables:
-            logger.error(f"❌ No tables found in database!")
+            logger.error(f"❌ No business tables found in database!")
             messages.error(
                 request,
-                f'No tables found. Please check database connection and permissions.'
+                f'No business tables found. Please check database connection and permissions.'
             )
             return redirect('client_detail', pk=db_config.client.pk)
         
-        logger.info(f"✅ Found {len(tables)} accessible tables total")
+        logger.info(f"✅ Found {len(tables)} business tables total (after filtering)")
         
         # ====================================================================
         # GET TABLE DETAILS (row counts, columns, PKs)
@@ -757,31 +830,11 @@ def cdc_discover_tables(request, database_pk):
                     # ========================================================
                     # Generate target table name
                     # ========================================================
-                    # Note: generate_target_table_name is defined at the top of cdc_views.py
-                    # Just use it directly since we're already in that file
-                    
-                    source_db_name = db_config.database_name
-                    
-                    # Generate safe target table name
-                    safe_db_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in source_db_name)
-                    
-                    if db_config.db_type.lower() == 'oracle':
-                        # Oracle: table_name is already SCHEMA.TABLE format
-                        if '.' in table_name:
-                            table_only = table_name.split('.', 1)[1]  # Get table part after schema
-                        else:
-                            table_only = table_name
-                        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_only)
-                    elif db_config.db_type.lower() == 'mssql':
-                        if '.' in table_name:
-                            table_only = table_name.split('.', 1)[1]
-                        else:
-                            table_only = table_name
-                        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_only)
-                    else:
-                        safe_table_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in table_name)
-                    
-                    target_table_name = f"{safe_db_name}_{safe_table_name}"
+                    target_table_name = generate_target_table_name(
+                        db_config.database_name,
+                        table_name,
+                        db_config.db_type
+                    )
                     
                     # Display name (strip schema for UI)
                     display_table_name = table_name.split('.')[-1] if '.' in table_name else table_name
@@ -850,6 +903,7 @@ def cdc_discover_tables(request, database_pk):
         return redirect('client_detail', pk=db_config.client.pk)
 
 
+
 @require_http_methods(["GET", "POST"])
 def cdc_configure_tables(request, database_pk):
     """
@@ -860,6 +914,7 @@ def cdc_configure_tables(request, database_pk):
     2. ✅ Correct schema name handling (no C## prefix)
     3. ✅ Proper UPPERCASE handling
     4. ✅ Case-insensitive column matching
+    5. ✅ KEEPS SCHEMA IN TARGET NAME to prevent collisions
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
@@ -951,14 +1006,16 @@ def cdc_configure_tables(request, database_pk):
                         logger.info(f"MySQL: Using table name as-is: {normalized_source}")
                     
                     # ============================================================
-                    # Get target table name
+                    # ✅ FIX: Get target table name - KEEP SCHEMA FOR ORACLE
                     # ============================================================
                     target_table_name = request.POST.get(f'target_table_name_{table_name}', '')
                     if not target_table_name:
                         source_db_name = db_config.database_name
+                        
+                        # ✅ CRITICAL: Pass full SCHEMA.TABLE for Oracle to prevent collisions
                         target_table_name = generate_target_table_name(
                             source_db_name,
-                            normalized_source,
+                            normalized_source,  # ✅ Includes schema for Oracle (e.g., "SALES.INFO")
                             db_type
                         )
 
@@ -1167,11 +1224,17 @@ def cdc_configure_tables(request, database_pk):
                 normalized_table = table_name
             
             source_db_name = db_config.database_name
-            target_table_name = generate_target_table_name(source_db_name, normalized_table, db_type)
+            
+            # ✅ CRITICAL: Pass full schema.table for Oracle to generate unique target names
+            target_table_name = generate_target_table_name(
+                source_db_name, 
+                normalized_table,  # ✅ Includes schema for Oracle (e.g., "SALES.INFO")
+                db_type
+            )
 
             tables_with_columns.append({
                 'name': normalized_table,  # ✅ Now includes schema for Oracle/PostgreSQL/SQL Server
-                'target_name': target_table_name,
+                'target_name': target_table_name,  # ✅ Will be unique: XEPDB1_SALES_INFO vs XEPDB1_HR_INFO
                 'columns': columns,
                 'primary_keys': schema.get('primary_keys', []),
                 'incremental_candidates': incremental_candidates,
@@ -1199,7 +1262,6 @@ def cdc_configure_tables(request, database_pk):
     }
     
     return render(request, 'client/cdc/configure_tables.html', context)
-
 
 @require_http_methods(["GET", "POST"])
 def cdc_create_connector(request, config_pk):
@@ -2206,11 +2268,10 @@ def manage_postgresql_publication(db_config, replication_config, table_names):
         logger.error(f"❌ {error_msg}", exc_info=True)
         return False, error_msg
 
-
 @require_http_methods(["GET", "POST"])
 def cdc_edit_config(request, config_pk):
     """
-    Edit replication configuration - FIXED for SQL Server consistency
+    Edit replication configuration - FIXED to show ALL accessible tables (owned, granted, synonyms)
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     db_config = replication_config.client_database
@@ -2230,7 +2291,7 @@ def cdc_edit_config(request, config_pk):
                 selected_table_names = request.POST.getlist('selected_tables')
                 logger.info(f"Selected tables: {selected_table_names}")
 
-                # ✅ FIX: Build normalized mapping lookup
+                # Build normalized mapping lookup
                 existing_mappings = {}
                 for tm in replication_config.table_mappings.all():
                     normalized = normalize_sql_server_table_name(tm.source_table, db_config.db_type)
@@ -2308,24 +2369,27 @@ def cdc_edit_config(request, config_pk):
                         topic_manager = KafkaTopicManager()
                         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
 
-                        # ✅ FIX: Correct topic names based on DB type
                         if db_config.db_type.lower() == 'mssql':
-                            # SQL Server keeps schema.table format for topics
                             topic_results = topic_manager.create_cdc_topics_for_tables(
                                 server_name=topic_prefix,
                                 database=db_config.database_name,
                                 table_names=newly_added_tables
                             )
                         elif db_config.db_type.lower() == 'postgresql':
-                            # PostgreSQL uses schema name
                             table_names_stripped = [t.split('.')[-1] for t in newly_added_tables]
                             topic_results = topic_manager.create_cdc_topics_for_tables(
                                 server_name=topic_prefix,
                                 database='public',
                                 table_names=table_names_stripped
                             )
+                        elif db_config.db_type.lower() == 'oracle':
+                            table_names_stripped = [t.split('.')[-1] for t in newly_added_tables]
+                            topic_results = topic_manager.create_cdc_topics_for_tables(
+                                server_name=topic_prefix,
+                                database=db_config.database_name,
+                                table_names=table_names_stripped
+                            )
                         else:
-                            # MySQL
                             topic_results = topic_manager.create_cdc_topics_for_tables(
                                 server_name=topic_prefix,
                                 database=db_config.database_name,
@@ -2380,9 +2444,7 @@ def cdc_edit_config(request, config_pk):
                 restart_connector = request.POST.get('restart_connector') == 'on'
                 messages.success(request, '✅ Configuration updated successfully!')
 
-                # ========================================================================
                 # CONNECTOR UPDATE
-                # ========================================================================
                 if replication_config.connector_name:
                     try:
                         manager = DebeziumConnectorManager()
@@ -2400,9 +2462,6 @@ def cdc_edit_config(request, config_pk):
                                 replication_config.is_active = False
                                 replication_config.save()
                             else:
-                                # ================================================================
-                                # ✅ FIX: Handle table changes based on database type
-                                # ================================================================
                                 if newly_added_tables or removed_table_names:
                                     logger.info(f"🔧 Updating connector (added: {len(newly_added_tables)}, removed: {len(removed_table_names)})")
 
@@ -2420,13 +2479,11 @@ def cdc_edit_config(request, config_pk):
                                             if not success:
                                                 raise Exception(f"Publication management failed: {message}")
                                             
-                                            # Clear slot connections
                                             slot_name = f"debezium_{client.id}_{db_config.id}"
                                             term_success, term_msg = terminate_active_slot_connections(db_config, slot_name)
                                             if term_success:
                                                 time.sleep(2)
                                             
-                                            # Restart connector
                                             restart_success, restart_error = manager.restart_connector(
                                                 replication_config.connector_name
                                             )
@@ -2440,25 +2497,33 @@ def cdc_edit_config(request, config_pk):
                                         if not current_config:
                                             raise Exception("Failed to retrieve connector configuration")
 
-                                        # ✅ FIX: Format table list correctly based on DB type
+                                        # Format table list correctly based on DB type
                                         if db_type == 'postgresql':
-                                            # PostgreSQL: schema.table (e.g., 'public.users')
                                             schema_name = 'public'
                                             tables_full = [f"{schema_name}.{t.split('.')[-1]}" for t in tables_list]
                                         elif db_type == 'mssql':
-                                            # SQL Server: database.schema.table (e.g., 'AppDB.dbo.Customers')
                                             tables_full = [f"{db_config.database_name}.{t}" for t in tables_list]
+                                        elif db_type == 'oracle':
+                                            tables_full = []
+                                            for t in tables_list:
+                                                if '.' in t:
+                                                    tables_full.append(t)
+                                                else:
+                                                    username = db_config.username.upper()
+                                                    schema_name = username[3:] if username.startswith('C##') else username
+                                                    tables_full.append(f"{schema_name}.{t}")
                                         else:
-                                            # MySQL: database.table (e.g., 'mydb.users')
                                             tables_full = [f"{db_config.database_name}.{t}" for t in tables_list]
+                                        
+                                        logger.info(f"✅ Formatted tables for connector update:")
+                                        for fmt_table in tables_full:
+                                            logger.info(f"   - {fmt_table}")
                                         
                                         current_config['table.include.list'] = ','.join(tables_full)
 
-                                        # Change snapshot mode for new tables
                                         if newly_added_tables and current_config.get('snapshot.mode') == 'initial':
                                             current_config['snapshot.mode'] = 'when_needed'
 
-                                        # Update connector config
                                         update_success, update_error = manager.update_connector_config(
                                             replication_config.connector_name,
                                             current_config
@@ -2467,9 +2532,8 @@ def cdc_edit_config(request, config_pk):
                                         if not update_success:
                                             raise Exception(f"Failed to update config: {update_error}")
 
-                                        time.sleep(3)  # Wait for auto-restart
+                                        time.sleep(3)
 
-                                        # Wait for connector to stabilize
                                         wait_success = wait_for_connector_running(
                                             manager, 
                                             replication_config.connector_name,
@@ -2480,23 +2544,16 @@ def cdc_edit_config(request, config_pk):
                                         if not wait_success:
                                             messages.warning(request, 'Configuration updated. Connector may still be starting.')
                                         
-                                        # ================================================================
-                                        # ✅ FIX: Handle snapshots based on database type
-                                        # ================================================================
+                                        # Handle snapshots based on database type
                                         if newly_added_tables:
                                             if db_type == 'mssql':
-                                                # SQL Server: Kafka signals DON'T work for read-only DBs
-                                                # Solution: Restart connector (already done above)
                                                 logger.info(f"✅ SQL Server: {len(newly_added_tables)} table(s) added!")
-                                                logger.info(f"   Snapshot will occur via connector restart")
                                                 messages.success(
                                                     request,
-                                                    f'✅ {len(newly_added_tables)} table(s) added! '
-                                                    f'Snapshot in progress (connector restart).'
+                                                    f'✅ {len(newly_added_tables)} table(s) added! Snapshot in progress.'
                                                 )
-                                            else:
-                                                # MySQL/PostgreSQL: Use Kafka signals
-                                                logger.info(f"📡 Sending incremental snapshot signal...")
+                                            elif db_type == 'oracle':
+                                                logger.info(f"📡 Oracle: Sending incremental snapshot signal...")
                                                 
                                                 try:
                                                     from client.utils.kafka_signal_sender import KafkaSignalSender
@@ -2504,7 +2561,39 @@ def cdc_edit_config(request, config_pk):
                                                     
                                                     signal_sender = KafkaSignalSender()
                                                     
-                                                    # Strip schema for signal payload
+                                                    username = db_config.username.upper()
+                                                    schema_name = username[3:] if username.startswith('C##') else username
+                                                    
+                                                    success, message = signal_sender.send_incremental_snapshot_signal(
+                                                        topic_prefix=topic_prefix,
+                                                        database_name=db_config.database_name,
+                                                        table_names=newly_added_tables,
+                                                        schema_name=schema_name,
+                                                        db_type='oracle'
+                                                    )
+                                                    
+                                                    signal_sender.close()
+                                                    
+                                                    if success:
+                                                        messages.success(
+                                                            request,
+                                                            f'✅ {len(newly_added_tables)} table(s) added! Incremental snapshot in progress.'
+                                                        )
+                                                    else:
+                                                        messages.warning(request, f'Snapshot signal failed: {message}')
+                                                        
+                                                except Exception as e:
+                                                    logger.error(f"Snapshot signal failed: {e}", exc_info=True)
+                                                    messages.warning(request, f'Snapshot signal failed: {str(e)}')
+                                            else:
+                                                # MySQL/PostgreSQL
+                                                logger.info(f"📡 Sending incremental snapshot signal...")
+                                                
+                                                try:
+                                                    from client.utils.kafka_signal_sender import KafkaSignalSender
+                                                    topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+                                                    
+                                                    signal_sender = KafkaSignalSender()
                                                     tables_for_signal = [t.split('.')[-1] for t in newly_added_tables]
                                                     
                                                     if db_type == 'postgresql':
@@ -2515,7 +2604,7 @@ def cdc_edit_config(request, config_pk):
                                                             schema_name='public',
                                                             db_type='postgresql'
                                                         )
-                                                    else:  # MySQL
+                                                    else:
                                                         success, message = signal_sender.send_incremental_snapshot_signal(
                                                             topic_prefix=topic_prefix,
                                                             database_name=db_config.database_name,
@@ -2557,7 +2646,6 @@ def cdc_edit_config(request, config_pk):
                                         messages.error(request, f'Failed to update connector: {str(e)}')
                                         
                                 elif restart_connector:
-                                    # No table changes, just restart if requested
                                     if db_config.db_type.lower() == 'postgresql':
                                         slot_name = f"debezium_{client.id}_{db_config.id}"
                                         terminate_active_slot_connections(db_config, slot_name)
@@ -2584,27 +2672,181 @@ def cdc_edit_config(request, config_pk):
             messages.error(request, f'Failed to update configuration: {str(e)}')
 
     # ========================================================================
-    # GET: Show edit form
+    # GET: FIXED TABLE DISCOVERY - Show ALL accessible tables
     # ========================================================================
     try:
-        all_table_names = get_table_list(db_config)
+        all_table_names = []
         
-        # ✅ FIX: Normalize discovered table names
+        if db_config.db_type.lower() == 'oracle':
+            # ORACLE: Use comprehensive discovery (owned, granted, synonyms)
+            logger.info("=" * 80)
+            logger.info("🔍 ORACLE TABLE DISCOVERY FOR EDIT")
+            logger.info("=" * 80)
+            
+            engine = get_database_engine(db_config)
+            
+            try:
+                with engine.connect() as conn:
+                    # Get current user
+                    current_user_result = conn.execute(text("SELECT USER FROM DUAL"))
+                    current_user = current_user_result.scalar()
+                    logger.info(f"✅ Connected as: {current_user}")
+                    
+                    # Determine target schema
+                    username_upper = current_user.upper()
+                    if username_upper.startswith('C##'):
+                        target_schema = username_upper[3:]
+                        logger.info(f"🔍 Common user: {username_upper} -> Target schema: {target_schema}")
+                    else:
+                        target_schema = username_upper
+                        logger.info(f"🔍 Local user: {username_upper}")
+                    
+                    discovered_tables = {}
+                    
+                    # Method 1: Tables owned by current user
+                    logger.info(f"📋 Method 1: Checking user_tables...")
+                    
+                    user_tables_query = text("""
+                        SELECT table_name
+                        FROM user_tables 
+                        WHERE table_name NOT LIKE 'LOG_MINING%'
+                          AND table_name NOT LIKE 'DEBEZIUM%'
+                          AND table_name NOT LIKE 'SYS_%'
+                          AND table_name NOT LIKE 'MLOG$%'
+                          AND table_name NOT LIKE 'RUPD$%'
+                          AND table_name NOT LIKE 'BIN$%'
+                        ORDER BY table_name
+                    """)
+                    
+                    result = conn.execute(user_tables_query)
+                    user_owned = [row[0] for row in result.fetchall()]
+                    
+                    for table_name in user_owned:
+                        qualified_name = f"{username_upper}.{table_name}"
+                        discovered_tables[qualified_name] = {
+                            'owner': username_upper,
+                            'table': table_name,
+                            'source': 'owned'
+                        }
+                    
+                    logger.info(f"   ✅ Found {len(user_owned)} owned tables")
+                    
+                    # Method 2: Tables accessible via grants
+                    logger.info(f"📋 Method 2: Checking all_tables (granted access)...")
+                    
+                    all_tables_query = text("""
+                        SELECT owner, table_name
+                        FROM all_tables
+                        WHERE owner = :target_schema
+                          AND table_name NOT LIKE 'LOG_MINING%'
+                          AND table_name NOT LIKE 'DEBEZIUM%'
+                          AND table_name NOT LIKE 'SYS_%'
+                          AND table_name NOT LIKE 'MLOG$%'
+                          AND table_name NOT LIKE 'RUPD$%'
+                          AND table_name NOT LIKE 'BIN$%'
+                        ORDER BY table_name
+                    """)
+                    
+                    result = conn.execute(all_tables_query, {"target_schema": target_schema})
+                    granted_tables = [(row[0], row[1]) for row in result.fetchall()]
+                    
+                    for owner, table_name in granted_tables:
+                        qualified_name = f"{owner}.{table_name}"
+                        if qualified_name not in discovered_tables:
+                            discovered_tables[qualified_name] = {
+                                'owner': owner,
+                                'table': table_name,
+                                'source': 'granted'
+                            }
+                    
+                    logger.info(f"   ✅ Found {len(granted_tables)} accessible tables in schema '{target_schema}'")
+                    
+                    # Method 3: Tables accessible via synonyms
+                    logger.info(f"📋 Method 3: Checking all_synonyms...")
+                    
+                    synonyms_query = text("""
+                        SELECT 
+                            synonym_name,
+                            table_owner,
+                            table_name
+                        FROM all_synonyms
+                        WHERE owner = :current_user
+                          AND table_name NOT LIKE 'LOG_MINING%'
+                          AND table_name NOT LIKE 'DEBEZIUM%'
+                          AND table_name NOT LIKE 'SYS_%'
+                        ORDER BY synonym_name
+                    """)
+                    
+                    result = conn.execute(synonyms_query, {"current_user": username_upper})
+                    synonyms = [(row[0], row[1], row[2]) for row in result.fetchall()]
+                    
+                    for synonym_name, table_owner, table_name in synonyms:
+                        qualified_name = f"{table_owner}.{table_name}"
+                        if qualified_name not in discovered_tables:
+                            discovered_tables[qualified_name] = {
+                                'owner': table_owner,
+                                'table': table_name,
+                                'source': 'synonym',
+                                'synonym': synonym_name
+                            }
+                    
+                    logger.info(f"   ✅ Found {len(synonyms)} accessible synonyms")
+                    
+                    # Build final list
+                    logger.info("=" * 80)
+                    logger.info(f"📊 DISCOVERY SUMMARY: {len(discovered_tables)} total tables")
+                    logger.info("=" * 80)
+                    
+                    if discovered_tables:
+                        for qualified_name, info in discovered_tables.items():
+                            source_type = info['source']
+                            if source_type == 'synonym':
+                                logger.info(f"   • {qualified_name} (via synonym: {info['synonym']})")
+                            else:
+                                logger.info(f"   • {qualified_name} ({source_type})")
+                        
+                        all_table_names = list(discovered_tables.keys())
+                    else:
+                        logger.error(f"❌ No accessible tables found!")
+                        messages.warning(request, f'No accessible tables found for user {username_upper}')
+                    
+                    logger.info("=" * 80)
+                
+                engine.dispose()
+                
+            except Exception as e:
+                logger.error(f"❌ Oracle table discovery failed: {e}", exc_info=True)
+                messages.warning(request, f'Failed to discover tables: {str(e)}')
+                all_table_names = []
+        
+        else:
+            # OTHER DATABASES: Use standard get_table_list
+            try:
+                all_table_names = get_table_list(db_config)
+                logger.info(f"✅ Found {len(all_table_names)} tables via get_table_list()")
+            except Exception as e:
+                logger.error(f"Failed to discover tables: {e}")
+                all_table_names = []
+        
+        # Normalize discovered table names
         if db_config.db_type.lower() == 'mssql':
             all_table_names = [
                 normalize_sql_server_table_name(t, db_config.db_type) 
                 for t in all_table_names
             ]
+        
     except Exception as e:
-        logger.error(f"Failed to discover tables: {e}")
+        logger.error(f"Failed to discover tables: {e}", exc_info=True)
         all_table_names = []
+        messages.warning(request, f'Failed to discover tables: {str(e)}')
 
-    # ✅ FIX: Build normalized mapping lookup
+    # Build normalized mapping lookup
     existing_mappings = {}
     for tm in replication_config.table_mappings.all():
         normalized = normalize_sql_server_table_name(tm.source_table, db_config.db_type)
         existing_mappings[normalized] = tm
 
+    # Build table list with details
     tables_with_columns = []
     for table_name in all_table_names:
         existing_mapping = existing_mappings.get(table_name)
@@ -2621,6 +2863,7 @@ def cdc_edit_config(request, config_pk):
                    col.get('name', '').endswith('_time')
             ]
 
+            # Get row count
             try:
                 engine = get_database_engine(db_config)
                 with engine.connect() as conn:
@@ -2629,12 +2872,17 @@ def cdc_edit_config(request, config_pk):
                     elif db_config.db_type.lower() == 'postgresql':
                         count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
                     elif db_config.db_type.lower() == 'mssql':
-                        # Handle schema.table format
                         if '.' in table_name:
                             schema_name, actual_table = table_name.split('.', 1)
                             count_query = text(f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{actual_table}]")
                         else:
                             count_query = text(f"SELECT COUNT(*) as cnt FROM [dbo].[{table_name}]")
+                    elif db_config.db_type.lower() == 'oracle':
+                        if '.' in table_name:
+                            schema_name, actual_table = table_name.split('.', 1)
+                            count_query = text(f"SELECT COUNT(*) as cnt FROM {schema_name}.{actual_table}")
+                        else:
+                            count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
                     else:
                         count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
 
@@ -2645,12 +2893,33 @@ def cdc_edit_config(request, config_pk):
             except:
                 row_count = 0
 
-            # ✅ FIX: Generate consistent default target name
+            # Generate consistent target name
+            db_type = db_config.db_type.lower()
+            
+            if db_type == 'oracle':
+                if '.' in table_name:
+                    parts = table_name.split('.', 1)
+                    normalized_table = f"{parts[0].upper()}.{parts[1].upper()}"
+                else:
+                    username = db_config.username.upper()
+                    schema_name = username[3:] if username.startswith('C##') else username
+                    normalized_table = f"{schema_name}.{table_name.upper()}"
+            elif db_type == 'mssql':
+                normalized_table = normalize_sql_server_table_name(table_name, db_type)
+            elif db_type == 'postgresql':
+                if '.' not in table_name:
+                    normalized_table = f"public.{table_name}"
+                else:
+                    normalized_table = table_name
+            else:
+                normalized_table = table_name
+            
             default_target_table_name = generate_target_table_name(
-                db_config.database_name,
-                table_name,
-                db_config.db_type
+                db_config.database_name, 
+                normalized_table,
+                db_type
             )
+
 
             table_data = {
                 'table_name': table_name,
@@ -2662,7 +2931,7 @@ def cdc_edit_config(request, config_pk):
                 'all_columns': columns_from_schema,
                 'incremental_candidates': incremental_candidates,
                 'primary_keys': schema.get('primary_keys', []),
-                'default_target_name': default_target_table_name,
+                'default_target_name': default_target_table_name,  # ✅ Will be unique: XEPDB1_SALES_INFO
             }
 
             tables_with_columns.append(table_data)
