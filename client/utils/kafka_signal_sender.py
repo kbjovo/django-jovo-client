@@ -135,6 +135,89 @@ class KafkaSignalSender:
             logger.error(f"❌ {error_msg}", exc_info=True)
             return False, error_msg
     
+    # def _build_table_identifiers(
+    #     self,
+    #     database_name: str,
+    #     table_names: List[str],
+    #     schema_name: str,
+    #     db_type: str
+    # ) -> List[str]:
+    #     """
+    #     Build database-specific table identifiers for signal payload.
+        
+    #     Different databases use different naming conventions:
+    #     - MySQL:      <database>.<table>
+    #     - PostgreSQL: <schema>.<table>
+    #     - SQL Server: <database>.<schema>.<table>
+    #     - Oracle:     <schema>.<table>
+        
+    #     Args:
+    #         database_name: Database name
+    #         table_names: List of table names
+    #         schema_name: Schema name (for PostgreSQL/Oracle)
+    #         db_type: Database type
+        
+    #     Returns:
+    #         List[str]: Formatted table identifiers
+    #     """
+    #     identifiers = []
+        
+    #     for table in table_names:
+    #         if db_type.lower() == 'mysql':
+    #             # MySQL format: database.table
+    #             if '.' in table:
+    #                 identifier = table  # Already formatted
+    #             else:
+    #                 identifier = f"{database_name}.{table}"
+            
+    #         elif db_type.lower() == 'postgresql':
+    #             # PostgreSQL format: schema.table
+    #             schema = schema_name or 'public'
+    #             if '.' in table:
+    #                 identifier = table  # Already has schema
+    #             else:
+    #                 identifier = f"{schema}.{table}"
+            
+    #         elif db_type.lower() in ['sqlserver', 'mssql']:
+    #             # SQL Server format: database.schema.table
+    #             # Input might be:
+    #             # - 'AppDB.dbo.Orders' (full path)
+    #             # - 'dbo.Orders' (schema.table)
+    #             # - 'Orders' (just table)
+                
+    #             parts = table.split('.')
+                
+    #             if len(parts) == 3:
+    #                 # Already full path: database.schema.table
+    #                 identifier = table
+    #             elif len(parts) == 2:
+    #                 # schema.table format
+    #                 schema, table_name = parts
+    #                 identifier = f"{database_name}.{schema}.{table_name}"
+    #             else:
+    #                 # Just table name
+    #                 schema = schema_name or 'dbo'
+    #                 identifier = f"{database_name}.{schema}.{table}"
+            
+    #         elif db_type.lower() == 'oracle':
+    #             # Oracle format: schema.table
+    #             schema = schema_name or database_name.upper()
+    #             if '.' in table:
+    #                 identifier = table
+    #             else:
+    #                 identifier = f"{schema}.{table}"
+            
+    #         else:
+    #             # Generic fallback
+    #             identifier = f"{database_name}.{table}"
+            
+    #         identifiers.append(identifier)
+    #         logger.debug(f"   {table} → {identifier}")
+        
+    #     return identifiers
+
+
+
     def _build_table_identifiers(
         self,
         database_name: str,
@@ -142,73 +225,39 @@ class KafkaSignalSender:
         schema_name: str,
         db_type: str
     ) -> List[str]:
-        """
-        Build database-specific table identifiers for signal payload.
-        
-        Different databases use different naming conventions:
-        - MySQL:      <database>.<table>
-        - PostgreSQL: <schema>.<table>
-        - SQL Server: <database>.<schema>.<table>
-        - Oracle:     <schema>.<table>
-        
-        Args:
-            database_name: Database name
-            table_names: List of table names
-            schema_name: Schema name (for PostgreSQL/Oracle)
-            db_type: Database type
-        
-        Returns:
-            List[str]: Formatted table identifiers
-        """
+        """Build database-specific table identifiers for signal payload."""
         identifiers = []
         
         for table in table_names:
             if db_type.lower() == 'mysql':
-                # MySQL format: database.table
-                if '.' in table:
-                    identifier = table  # Already formatted
-                else:
-                    identifier = f"{database_name}.{table}"
+                identifier = f"{database_name}.{table}" if '.' not in table else table
             
             elif db_type.lower() == 'postgresql':
-                # PostgreSQL format: schema.table
                 schema = schema_name or 'public'
-                if '.' in table:
-                    identifier = table  # Already has schema
-                else:
-                    identifier = f"{schema}.{table}"
+                identifier = table if '.' in table else f"{schema}.{table}"
             
             elif db_type.lower() in ['sqlserver', 'mssql']:
-                # SQL Server format: database.schema.table
-                # Input might be:
-                # - 'AppDB.dbo.Orders' (full path)
-                # - 'dbo.Orders' (schema.table)
-                # - 'Orders' (just table)
-                
                 parts = table.split('.')
-                
                 if len(parts) == 3:
-                    # Already full path: database.schema.table
                     identifier = table
                 elif len(parts) == 2:
-                    # schema.table format
                     schema, table_name = parts
                     identifier = f"{database_name}.{schema}.{table_name}"
                 else:
-                    # Just table name
                     schema = schema_name or 'dbo'
                     identifier = f"{database_name}.{schema}.{table}"
             
             elif db_type.lower() == 'oracle':
-                # Oracle format: schema.table
+                # ✅ Oracle format: schema.table
                 schema = schema_name or database_name.upper()
                 if '.' in table:
-                    identifier = table
+                    # Already qualified: CDCUSER.NEW_TABLE
+                    identifier = table.upper()
                 else:
-                    identifier = f"{schema}.{table}"
+                    # Add schema: NEW_TABLE → CDCUSER.NEW_TABLE
+                    identifier = f"{schema}.{table.upper()}"
             
             else:
-                # Generic fallback
                 identifier = f"{database_name}.{table}"
             
             identifiers.append(identifier)

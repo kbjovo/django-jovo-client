@@ -60,6 +60,209 @@ from client.tasks import (
 logger = logging.getLogger(__name__)
 
 
+def validate_connector_table_list(db_config: ClientDatabase, formatted_tables: List[str]):
+    """
+    ✅ PRODUCTION-READY: Validate table list before creating connector
+    
+    Prevents common errors across all database types:
+    - Oracle: Missing schema prefix (causes NullPointerException)
+    - MySQL: Missing database prefix
+    - PostgreSQL: Missing schema prefix
+    - SQL Server: Missing schema or database prefix
+    - All: Empty schema/table names, invalid format
+    
+    Args:
+        db_config: ClientDatabase instance
+        formatted_tables: List of formatted table names
+    
+    Raises:
+        ValueError: If validation fails with detailed error message
+    """
+    db_type = db_config.db_type.lower()
+    
+    logger.info("=" * 80)
+    logger.info(f"🔍 VALIDATING CONNECTOR TABLE LIST FOR {db_type.upper()}")
+    logger.info("=" * 80)
+    
+    if not formatted_tables:
+        raise ValueError("❌ No tables provided for replication")
+    
+    errors = []
+    warnings = []
+    
+    for i, table in enumerate(formatted_tables, 1):
+        table = table.strip()
+        
+        if not table:
+            errors.append(f"Table {i}: Empty table name")
+            continue
+        
+        # ================================================================
+        # ORACLE VALIDATION (STRICTEST)
+        # ================================================================
+        if db_type == 'oracle':
+            if '.' not in table:
+                errors.append(
+                    f"Table {i}: '{table}' missing schema prefix\n"
+                    f"           Required format: SCHEMA.TABLE\n"
+                    f"           Example: CDCUSER.CUSTOMERS"
+                )
+            else:
+                parts = table.split('.', 1)
+                schema = parts[0].strip()
+                tbl = parts[1].strip()
+                
+                if not schema:
+                    errors.append(
+                        f"Table {i}: '{table}' has EMPTY schema (before dot)\n"
+                        f"           This will cause NullPointerException in LogMiner!"
+                    )
+                if not tbl:
+                    errors.append(
+                        f"Table {i}: '{table}' has EMPTY table name (after dot)"
+                    )
+                
+                # Check for C## prefix (should be removed)
+                if schema.startswith('C##'):
+                    errors.append(
+                        f"Table {i}: '{table}' schema should NOT have C## prefix\n"
+                        f"           Use: {schema[3:]}.{tbl} instead"
+                    )
+                
+                # Verify uppercase (Oracle best practice)
+                if schema != schema.upper() or tbl != tbl.upper():
+                    warnings.append(
+                        f"Table {i}: '{table}' not uppercase\n"
+                        f"           Recommend: {schema.upper()}.{tbl.upper()}"
+                    )
+        
+        # ================================================================
+        # SQL SERVER VALIDATION
+        # ================================================================
+        elif db_type == 'mssql':
+            parts = table.split('.')
+            
+            if len(parts) < 2:
+                errors.append(
+                    f"Table {i}: '{table}' invalid format\n"
+                    f"           Required: schema.table OR database.schema.table\n"
+                    f"           Example: dbo.Customers OR AppDB.dbo.Customers"
+                )
+            elif len(parts) == 2:
+                # schema.table format
+                schema, tbl = parts
+                if not schema.strip():
+                    errors.append(f"Table {i}: '{table}' has empty schema")
+                if not tbl.strip():
+                    errors.append(f"Table {i}: '{table}' has empty table name")
+            elif len(parts) == 3:
+                # database.schema.table format
+                database, schema, tbl = parts
+                if not database.strip():
+                    errors.append(f"Table {i}: '{table}' has empty database name")
+                if not schema.strip():
+                    errors.append(f"Table {i}: '{table}' has empty schema")
+                if not tbl.strip():
+                    errors.append(f"Table {i}: '{table}' has empty table name")
+            else:
+                errors.append(
+                    f"Table {i}: '{table}' has too many parts ({len(parts)})\n"
+                    f"           Expected: 2 or 3 parts separated by dots"
+                )
+        
+        # ================================================================
+        # POSTGRESQL VALIDATION
+        # ================================================================
+        elif db_type == 'postgresql':
+            if '.' not in table:
+                warnings.append(
+                    f"Table {i}: '{table}' missing schema prefix\n"
+                    f"           Will default to 'public' schema\n"
+                    f"           Recommend explicit: public.{table}"
+                )
+            else:
+                parts = table.split('.', 1)
+                schema = parts[0].strip()
+                tbl = parts[1].strip()
+                
+                if not schema:
+                    errors.append(f"Table {i}: '{table}' has empty schema")
+                if not tbl:
+                    errors.append(f"Table {i}: '{table}' has empty table name")
+        
+        # ================================================================
+        # MYSQL VALIDATION
+        # ================================================================
+        elif db_type == 'mysql':
+            if '.' not in table:
+                errors.append(
+                    f"Table {i}: '{table}' missing database prefix\n"
+                    f"           Required format: database.table\n"
+                    f"           Example: mydb.users"
+                )
+            else:
+                parts = table.split('.', 1)
+                database = parts[0].strip()
+                tbl = parts[1].strip()
+                
+                if not database:
+                    errors.append(f"Table {i}: '{table}' has empty database name")
+                if not tbl:
+                    errors.append(f"Table {i}: '{table}' has empty table name")
+        
+        # ================================================================
+        # UNKNOWN DATABASE TYPE
+        # ================================================================
+        else:
+            warnings.append(
+                f"Table {i}: '{table}' - Unknown database type '{db_type}'\n"
+                f"           Skipping validation"
+            )
+    
+    # ================================================================
+    # REPORT RESULTS
+    # ================================================================
+    logger.info(f"📊 Validation Summary:")
+    logger.info(f"   Total tables: {len(formatted_tables)}")
+    logger.info(f"   Errors: {len(errors)}")
+    logger.info(f"   Warnings: {len(warnings)}")
+    
+    # Log all validated tables
+    if not errors:
+        logger.info(f"\n✅ All tables passed validation:")
+        for i, table in enumerate(formatted_tables, 1):
+            logger.info(f"   {i}. {table}")
+    
+    # Log warnings (non-fatal)
+    if warnings:
+        logger.warning(f"\n⚠️  Warnings detected:")
+        for warning in warnings:
+            logger.warning(f"   • {warning}")
+    
+    # Log errors (fatal)
+    if errors:
+        error_msg = f"\n❌ VALIDATION FAILED - {len(errors)} error(s) detected:\n\n"
+        for error in errors:
+            error_msg += f"   • {error}\n"
+        
+        error_msg += "\n" + "=" * 80 + "\n"
+        error_msg += "📋 FORMAT REQUIREMENTS BY DATABASE TYPE:\n"
+        error_msg += "=" * 80 + "\n"
+        error_msg += "   Oracle:      SCHEMA.TABLE          (e.g., CDCUSER.CUSTOMERS)\n"
+        error_msg += "   MySQL:       database.table         (e.g., mydb.users)\n"
+        error_msg += "   PostgreSQL:  schema.table           (e.g., public.users)\n"
+        error_msg += "   SQL Server:  schema.table           (e.g., dbo.Customers)\n"
+        error_msg += "             OR database.schema.table  (e.g., AppDB.dbo.Customers)\n"
+        error_msg += "=" * 80 + "\n"
+        
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    logger.info("=" * 80)
+    logger.info(f"✅ VALIDATION PASSED: All {len(formatted_tables)} tables are correctly formatted")
+    logger.info("=" * 80)
+
+
 
 def get_oracle_cdb_name(pdb_name: str) -> str:
     """
@@ -355,27 +558,165 @@ def format_table_for_connector(db_config: ClientDatabase, table_name: str, schem
 
 def get_table_list_for_connector(db_config: ClientDatabase, table_mappings) -> List[str]:
     """
-    Get formatted table list for Debezium connector configuration
+    ✅ PRODUCTION: Format table names for Debezium connector with comprehensive validation
     
-    Combines format_table_for_connector() with table mappings to generate
-    the complete table.include.list for connector configuration
+    Handles all database types:
+    - Oracle: SCHEMA.TABLE (C## prefix removed)
+    - SQL Server: database.schema.table OR schema.table
+    - PostgreSQL: schema.table
+    - MySQL: database.table
     
     Args:
         db_config: ClientDatabase instance
         table_mappings: QuerySet of TableMapping objects
     
     Returns:
-        List[str]: Formatted table names for connector config
+        List[str]: Formatted table names ready for connector config
+    
+    Raises:
+        ValueError: If any table has invalid format
     """
     formatted_tables = []
+    db_type = db_config.db_type.lower()
+    
+    logger.info("=" * 80)
+    logger.info(f"📋 FORMATTING TABLES FOR {db_type.upper()} CONNECTOR")
+    logger.info("=" * 80)
+    logger.info(f"   Total tables to process: {table_mappings.count()}")
     
     for tm in table_mappings:
-        formatted = format_table_for_connector(db_config, tm.source_table)
+        source_table = tm.source_table.strip()
+        
+        if not source_table:
+            logger.error(f"   ❌ Empty table name found in mapping ID {tm.id}")
+            raise ValueError(f"Empty table name in TableMapping {tm.id}")
+        
+        logger.info(f"   Processing: '{source_table}' (TableMapping ID: {tm.id})")
+        
+        # ============================================================
+        # ORACLE FORMATTING
+        # ============================================================
+        if db_type == 'oracle':
+            if '.' not in source_table:
+                # Add schema prefix
+                username = db_config.username.upper()
+                schema_name = username[3:] if username.startswith('C##') else username
+                
+                if not schema_name:
+                    raise ValueError(
+                        f"Could not determine schema name from username: {db_config.username}\n"
+                        f"Table: {source_table}"
+                    )
+                
+                formatted = f"{schema_name}.{source_table.upper()}"
+                logger.warning(f"   ⚠️  Added missing schema: {source_table} → {formatted}")
+            else:
+                # Validate existing format
+                parts = source_table.upper().split('.', 1)
+                schema_part = parts[0].strip()
+                table_part = parts[1].strip()
+                
+                # Remove C## prefix if present
+                if schema_part.startswith('C##'):
+                    schema_part = schema_part[3:]
+                    logger.info(f"   🔧 Removed C## prefix: C##{schema_part} → {schema_part}")
+                
+                # Validate non-empty
+                if not schema_part:
+                    raise ValueError(
+                        f"Empty schema in table: '{source_table}'\n"
+                        f"TableMapping ID: {tm.id}"
+                    )
+                if not table_part:
+                    raise ValueError(
+                        f"Empty table name in: '{source_table}'\n"
+                        f"TableMapping ID: {tm.id}"
+                    )
+                
+                formatted = f"{schema_part}.{table_part}"
+                logger.info(f"   ✅ Oracle: {source_table} → {formatted}")
+        
+        # ============================================================
+        # SQL SERVER FORMATTING
+        # ============================================================
+        elif db_type == 'mssql':
+            if '.' in source_table:
+                parts = source_table.split('.')
+                if len(parts) == 2:
+                    # schema.table → database.schema.table
+                    schema, table = parts
+                    formatted = f"{db_config.database_name}.{schema}.{table}"
+                elif len(parts) == 3:
+                    # Already database.schema.table
+                    formatted = source_table
+                else:
+                    # Invalid format
+                    schema = parts[-2] if len(parts) > 1 else 'dbo'
+                    table = parts[-1]
+                    formatted = f"{db_config.database_name}.{schema}.{table}"
+                    logger.warning(
+                        f"   ⚠️  Unusual format: {source_table} → {formatted}"
+                    )
+            else:
+                # Just table name → database.dbo.table
+                schema = 'dbo'
+                table = source_table
+                formatted = f"{db_config.database_name}.{schema}.{table}"
+                logger.warning(f"   ⚠️  Added default schema: {source_table} → {formatted}")
+            
+            logger.info(f"   ✅ SQL Server: {source_table} → {formatted}")
+        
+        # ============================================================
+        # POSTGRESQL FORMATTING
+        # ============================================================
+        elif db_type == 'postgresql':
+            if '.' in source_table:
+                # Already has schema
+                formatted = source_table
+            else:
+                # Add default schema
+                schema = 'public'
+                table = source_table
+                formatted = f"{schema}.{table}"
+                logger.warning(f"   ⚠️  Added default schema: {source_table} → {formatted}")
+            
+            logger.info(f"   ✅ PostgreSQL: {source_table} → {formatted}")
+        
+        # ============================================================
+        # MYSQL FORMATTING
+        # ============================================================
+        elif db_type == 'mysql':
+            # Extract table name if qualified
+            table = source_table.split('.')[-1] if '.' in source_table else source_table
+            formatted = f"{db_config.database_name}.{table}"
+            logger.info(f"   ✅ MySQL: {source_table} → {formatted}")
+        
+        # ============================================================
+        # UNKNOWN DATABASE TYPE
+        # ============================================================
+        else:
+            formatted = f"{db_config.database_name}.{source_table}"
+            logger.warning(
+                f"   ⚠️  Unknown DB type '{db_type}', using generic format: {formatted}"
+            )
+        
         formatted_tables.append(formatted)
     
-    logger.info(f"✅ Formatted {len(formatted_tables)} tables for connector config")
-    for original, formatted in zip([tm.source_table for tm in table_mappings], formatted_tables):
-        logger.info(f"   {original} → {formatted}")
+    # ============================================================
+    # FINAL VALIDATION SUMMARY
+    # ============================================================
+    logger.info("=" * 80)
+    logger.info(f"✅ FORMATTING COMPLETE - {len(formatted_tables)} tables")
+    logger.info("=" * 80)
+    
+    if not formatted_tables:
+        raise ValueError("No tables were formatted - result is empty!")
+    
+    logger.info(f"📋 FINAL TABLE LIST FOR CONNECTOR:")
+    for i, table in enumerate(formatted_tables, 1):
+        logger.info(f"   {i}. {table}")
+    
+    logger.info("=" * 80)
     
     return formatted_tables
 
@@ -423,7 +764,7 @@ def validate_topic_subscription(db_config: ClientDatabase, replication_config: R
 
 def cdc_discover_tables(request, database_pk):
     """
-    ✅ COMPLETE FIXED: Oracle table discovery with multi-schema support and internal table filtering
+    ✅ COMPLETE FIXED: Oracle table discovery with multi-schema support and signal table creation
     
     Handles:
     1. Common users (C##CDCUSER) accessing local user tables (CDCUSER)
@@ -432,6 +773,7 @@ def cdc_discover_tables(request, database_pk):
     4. Tables accessible via synonyms
     5. Proper schema qualification
     6. ✅ AUTOMATIC FILTERING of internal/system tables
+    7. ✅ AUTOMATIC CREATION of signal table for Oracle
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
@@ -459,6 +801,42 @@ def cdc_discover_tables(request, database_pk):
             logger.info(f"   Database: {db_config.database_name}")
             logger.info(f"   Username: {db_config.username}")
             
+            # ✅ STEP 1: Create signal table first (before table discovery)
+            # ✅ STEP 1: Create signal table AND flush table first
+            try:
+                from client.utils.connector_templates import create_oracle_signal_table, create_oracle_log_mining_flush_table
+                
+                username = db_config.username.upper()
+                schema_name = username[3:] if username.startswith('C##') else username
+                
+                logger.info("=" * 80)
+                logger.info(f"🔧 ORACLE: CREATING REQUIRED TABLES")
+                logger.info("=" * 80)
+                logger.info(f"   Schema: {schema_name}")
+                
+                # Create signal table
+                success, msg = create_oracle_signal_table(db_config, schema_name)
+                if not success:
+                    logger.warning(f"⚠️ Signal table creation failed: {msg}")
+                    messages.warning(request, f'⚠️ Signal table creation failed: {msg}')
+                else:
+                    logger.info(f"✅ Signal table: {msg}")
+                
+                # Create log mining flush table
+                success, msg = create_oracle_log_mining_flush_table(db_config, schema_name)
+                if not success:
+                    logger.warning(f"⚠️ LOG_MINING_FLUSH table creation failed: {msg}")
+                    messages.warning(request, f'⚠️ LOG_MINING_FLUSH table creation failed: {msg}')
+                else:
+                    logger.info(f"✅ LOG_MINING_FLUSH table: {msg}")
+                
+                logger.info("=" * 80)
+                    
+            except Exception as e:
+                logger.error(f"❌ Table creation failed: {e}", exc_info=True)
+                messages.warning(request, f'⚠️ Required table creation failed: {str(e)}')
+            
+            # ✅ STEP 2: Check LogMiner prerequisites
             try:
                 is_enabled, info = check_oracle_logminer(db_config)
                 if not is_enabled:
@@ -539,10 +917,10 @@ def cdc_discover_tables(request, database_pk):
                     user_owned = [row[0] for row in result.fetchall()]
                     
                     for table_name in user_owned:
-                        # Store with schema prefix
-                        qualified_name = f"{username_upper}.{table_name}"
+                        # ✅ Store with schema prefix WITHOUT C##
+                        qualified_name = f"{target_schema}.{table_name}"
                         discovered_tables[qualified_name] = {
-                            'owner': username_upper,
+                            'owner': target_schema,
                             'table': table_name,
                             'source': 'owned'
                         }
@@ -579,6 +957,10 @@ def cdc_discover_tables(request, database_pk):
                     granted_tables = [(row[0], row[1]) for row in result.fetchall()]
                     
                     for owner, table_name in granted_tables:
+                        # ✅ Remove C## prefix from owner if present
+                        if owner.startswith('C##'):
+                            owner = owner[3:]
+                        
                         qualified_name = f"{owner}.{table_name}"
                         if qualified_name not in discovered_tables:
                             discovered_tables[qualified_name] = {
@@ -617,6 +999,10 @@ def cdc_discover_tables(request, database_pk):
                     synonyms = [(row[0], row[1], row[2]) for row in result.fetchall()]
                     
                     for synonym_name, table_owner, table_name in synonyms:
+                        # ✅ Remove C## prefix from owner if present
+                        if table_owner.startswith('C##'):
+                            table_owner = table_owner[3:]
+                        
                         # Use the actual table owner and name
                         qualified_name = f"{table_owner}.{table_name}"
                         if qualified_name not in discovered_tables:
@@ -907,29 +1293,18 @@ def cdc_discover_tables(request, database_pk):
 @require_http_methods(["GET", "POST"])
 def cdc_configure_tables(request, database_pk):
     """
-    ✅ COMPLETE FIXED VERSION - Configure selected tables with column selection and mapping
-    
-    CRITICAL FIXES FOR ORACLE:
-    1. ✅ Preserves SCHEMA.TABLE format from discovery
-    2. ✅ Correct schema name handling (no C## prefix)
-    3. ✅ Proper UPPERCASE handling
-    4. ✅ Case-insensitive column matching
-    5. ✅ KEEPS SCHEMA IN TARGET NAME to prevent collisions
+    Configure tables for CDC replication with column mappings and sync settings
     """
     db_config = get_object_or_404(ClientDatabase, pk=database_pk)
     
-    # Get selected tables from session
     selected_tables = request.session.get('selected_tables', [])
     if not selected_tables:
         messages.error(request, 'No tables selected')
         return redirect('cdc_discover_tables', database_pk=database_pk)
     
-    # ============================================================================
-    # POST: Save configuration
-    # ============================================================================
     if request.method == "POST":
         try:
-            # VALIDATE BEFORE CREATING
+            # Pre-validation: Check all tables exist and have columns
             for table_name in selected_tables:
                 try:
                     schema = get_table_schema(db_config, table_name)
@@ -955,10 +1330,9 @@ def cdc_configure_tables(request, database_pk):
 
                 logger.info(f"✅ Created ReplicationConfig: {replication_config.id}")
                 
-                # ================================================================
-                # Create TableMappings for each table
-                # ================================================================
+                # Process each selected table
                 for table_name in selected_tables:
+                    # Get sync settings for this table
                     sync_type = request.POST.get(f'sync_type_{table_name}', '')
                     if not sync_type:
                         sync_type = request.POST.get('sync_type', 'realtime')
@@ -966,33 +1340,47 @@ def cdc_configure_tables(request, database_pk):
                     incremental_col = request.POST.get(f'incremental_col_{table_name}', '')
                     conflict_resolution = request.POST.get(f'conflict_resolution_{table_name}', 'source_wins')
 
-                    # ============================================================
-                    # ✅ FIX: Normalize table name based on database type
-                    # ============================================================
+                    # ====================================================================
+                    # NORMALIZE TABLE NAME BASED ON DATABASE TYPE
+                    # ====================================================================
                     db_type = db_config.db_type.lower()
                     
                     if db_type == 'oracle':
-                        # ✅ Oracle: Keep schema.table format or add username as schema
                         if '.' in table_name:
-                            # Already has schema prefix - ensure UPPERCASE
+                            # Table already has schema: CDCUSER.CUSTOMERS or C##CDCUSER.CUSTOMERS
                             parts = table_name.split('.', 1)
-                            normalized_source = f"{parts[0].upper()}.{parts[1].upper()}"
-                            logger.info(f"Oracle: Table already qualified: {table_name} → {normalized_source}")
+                            schema_part = parts[0].strip().upper()
+                            table_part = parts[1].strip().upper()
+                            
+                            # ✅ CRITICAL FIX: Remove C## prefix if present
+                            if schema_part.startswith('C##'):
+                                original_schema = schema_part
+                                schema_part = schema_part[3:]
+                                logger.info(f"Oracle: Removed C## prefix: {original_schema} → {schema_part}")
+                            
+                            if not schema_part:
+                                raise ValueError(f"Empty schema in table: '{table_name}'")
+                            if not table_part:
+                                raise ValueError(f"Empty table name in: '{table_name}'")
+                            
+                            normalized_source = f"{schema_part}.{table_part}"
+                            logger.info(f"Oracle: Table qualified: {table_name} → {normalized_source}")
                         else:
                             # Table without schema - add username as schema
                             username = db_config.username.upper()
-                            # Remove C## prefix if present
                             schema_name = username[3:] if username.startswith('C##') else username
+                            
+                            if not schema_name:
+                                raise ValueError(f"Could not determine schema name from username: {db_config.username}")
+                            
                             normalized_source = f"{schema_name}.{table_name.upper()}"
                             logger.info(f"Oracle: Added schema prefix: {table_name} → {normalized_source}")
                     
                     elif db_type == 'mssql':
-                        # SQL Server: Ensure schema.table format (default: dbo)
                         normalized_source = normalize_sql_server_table_name(table_name, db_type)
                         logger.info(f"SQL Server: Normalized to: {normalized_source}")
                     
                     elif db_type == 'postgresql':
-                        # PostgreSQL: Ensure schema.table format (default: public)
                         if '.' not in table_name:
                             normalized_source = f"public.{table_name}"
                             logger.info(f"PostgreSQL: Added schema prefix: {table_name} → {normalized_source}")
@@ -1001,21 +1389,20 @@ def cdc_configure_tables(request, database_pk):
                             logger.info(f"PostgreSQL: Table already qualified: {normalized_source}")
                     
                     else:
-                        # MySQL: No schema concept (database.table handled by connector)
+                        # MySQL
                         normalized_source = table_name
                         logger.info(f"MySQL: Using table name as-is: {normalized_source}")
                     
-                    # ============================================================
-                    # ✅ FIX: Get target table name - KEEP SCHEMA FOR ORACLE
-                    # ============================================================
+                    # ====================================================================
+                    # GENERATE TARGET TABLE NAME
+                    # ====================================================================
                     target_table_name = request.POST.get(f'target_table_name_{table_name}', '')
                     if not target_table_name:
                         source_db_name = db_config.database_name
                         
-                        # ✅ CRITICAL: Pass full SCHEMA.TABLE for Oracle to prevent collisions
                         target_table_name = generate_target_table_name(
                             source_db_name,
-                            normalized_source,  # ✅ Includes schema for Oracle (e.g., "SALES.INFO")
+                            normalized_source,
                             db_type
                         )
 
@@ -1023,12 +1410,12 @@ def cdc_configure_tables(request, database_pk):
                     logger.info(f"   Source: {normalized_source}")
                     logger.info(f"   Target: {target_table_name}")
 
-                    # ============================================================
-                    # Create TableMapping
-                    # ============================================================
+                    # ====================================================================
+                    # CREATE TABLE MAPPING
+                    # ====================================================================
                     table_mapping = TableMapping.objects.create(
                         replication_config=replication_config,
-                        source_table=normalized_source,  # ✅ Now includes schema for Oracle/PostgreSQL/SQL Server
+                        source_table=normalized_source,
                         target_table=target_table_name,
                         is_enabled=True,
                         sync_type=sync_type,
@@ -1039,13 +1426,12 @@ def cdc_configure_tables(request, database_pk):
                     
                     logger.info(f"✅ Created TableMapping: {normalized_source} -> {target_table_name}")
                     
-                    # ============================================================
-                    # Get selected columns
-                    # ============================================================
+                    # ====================================================================
+                    # CREATE COLUMN MAPPINGS
+                    # ====================================================================
                     selected_columns = request.POST.getlist(f'selected_columns_{table_name}')
                     
                     if selected_columns:
-                        # User selected specific columns
                         logger.info(f"Creating column mappings for selected columns: {len(selected_columns)}")
                         
                         for source_column in selected_columns:
@@ -1058,7 +1444,6 @@ def cdc_configure_tables(request, database_pk):
                                 schema = get_table_schema(db_config, table_name)
                                 columns = schema.get('columns', [])
                                 
-                                # ✅ CRITICAL FIX: Case-insensitive column lookup for Oracle
                                 column_info = None
                                 for col in columns:
                                     if col.get('name', '').upper() == source_column.upper():
@@ -1084,7 +1469,7 @@ def cdc_configure_tables(request, database_pk):
                             except Exception as e:
                                 logger.error(f"Error creating column mapping for {source_column}: {e}")
                     else:
-                        # Include all columns by default
+                        # No specific columns selected - map all columns
                         try:
                             schema = get_table_schema(db_config, table_name)
                             columns = schema.get('columns', [])
@@ -1114,9 +1499,9 @@ def cdc_configure_tables(request, database_pk):
                         except Exception as e:
                             logger.error(f"Error creating default column mappings: {e}")
                 
-                # ================================================================
-                # Auto-create tables if enabled
-                # ================================================================
+                # ====================================================================
+                # CREATE TARGET TABLES IF REQUESTED
+                # ====================================================================
                 if replication_config.auto_create_tables:
                     try:
                         from client.utils.table_creator import create_target_tables
@@ -1126,9 +1511,42 @@ def cdc_configure_tables(request, database_pk):
                         logger.error(f"Failed to create target tables: {e}")
                         messages.warning(request, f'Configuration saved, but failed to create target tables: {str(e)}')
                 
+                # ====================================================================
+                # CREATE ORACLE SIGNAL TABLE IF NEEDED
+                # ====================================================================
+                if db_config.db_type.lower() == 'oracle':
+                    try:
+                        from client.utils.connector_templates import create_oracle_signal_table
+                        
+                        username = db_config.username.upper()
+                        schema_name = username[3:] if username.startswith('C##') else username
+                        
+                        logger.info("=" * 80)
+                        logger.info(f"🔧 ORACLE: Creating signal table")
+                        logger.info("=" * 80)
+                        logger.info(f"   Schema: {schema_name}")
+                        logger.info(f"   Table: {schema_name}.DEBEZIUM_SIGNAL")
+                        
+                        success, msg = create_oracle_signal_table(db_config, schema_name)
+                        
+                        if not success:
+                            logger.warning(f"⚠️ Signal table creation failed: {msg}")
+                            messages.warning(
+                                request,
+                                f'⚠️ Configuration saved, but signal table creation failed. '
+                                f'Incremental snapshots may not work: {msg}'
+                            )
+                        else:
+                            logger.info(f"✅ {msg}")
+                            logger.info("=" * 80)
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Signal table creation failed: {e}", exc_info=True)
+                        messages.warning(request, f'⚠️ Signal table creation failed: {str(e)}')
+                
                 messages.success(request, '✅ CDC configuration saved successfully!')
                 
-                # Clean up session
+                # Clear session data
                 request.session.pop('selected_tables', None)
                 request.session.pop('database_pk', None)
                 
@@ -1138,18 +1556,15 @@ def cdc_configure_tables(request, database_pk):
             logger.error(f'Failed to save configuration: {e}', exc_info=True)
             messages.error(request, f'Failed to save configuration: {str(e)}')
     
-    # ============================================================================
-    # GET: Show configuration form
-    # ============================================================================
+    # ====================================================================
+    # GET: Show configuration form with table schemas
+    # ====================================================================
     tables_with_columns = []
     
     for table_name in selected_tables:
         try:
             logger.info(f"🔍 Getting schema for table: {table_name}")
             
-            # ================================================================
-            # ✅ FIX: Oracle table names may need special handling
-            # ================================================================
             schema = get_table_schema(db_config, table_name)
             columns = schema.get('columns', [])
             
@@ -1157,16 +1572,14 @@ def cdc_configure_tables(request, database_pk):
                 logger.warning(f"⚠️ No columns found for table: {table_name}")
                 logger.info(f"   Schema returned: {schema}")
                 
-                # Try alternative approaches for Oracle
+                # Try different variations for Oracle
                 if db_config.db_type.lower() == 'oracle':
-                    # Try with uppercase
                     table_upper = table_name.upper()
                     if table_upper != table_name:
                         logger.info(f"   Trying uppercase: {table_upper}")
                         schema = get_table_schema(db_config, table_upper)
                         columns = schema.get('columns', [])
                     
-                    # Try with schema prefix if not present
                     if not columns and '.' not in table_name:
                         username = db_config.username.upper()
                         schema_name = username[3:] if username.startswith('C##') else username
@@ -1182,59 +1595,63 @@ def cdc_configure_tables(request, database_pk):
             
             logger.info(f"✅ Found {len(columns)} columns for {table_name}")
             
-            # ================================================================
             # Find incremental candidates
-            # ================================================================
             incremental_candidates = [
                 col for col in columns
                 if 'timestamp' in str(col.get('type', '')).lower() or
                    'datetime' in str(col.get('type', '')).lower() or
                    'date' in str(col.get('type', '')).lower() or
-                   col.get('name', '').endswith('_at') or
-                   col.get('name', '').endswith('_time') or
-                   (col.get('name', '') in ['id', 'created_at', 'updated_at'] and 
+                   col.get('name', '').lower().endswith('_at') or
+                   col.get('name', '').lower().endswith('_time') or
+                   (col.get('name', '').lower() in ['id', 'created_at', 'updated_at'] and 
                     'int' in str(col.get('type', '')).lower())
             ]
             
-            # ================================================================
-            # ✅ Generate consistent target table name based on DB type
-            # ================================================================
+            # ====================================================================
+            # NORMALIZE TABLE NAME FOR DISPLAY
+            # ====================================================================
             db_type = db_config.db_type.lower()
             
             if db_type == 'oracle':
-                # Oracle: Ensure schema.table format (already done in discovery)
                 if '.' in table_name:
                     parts = table_name.split('.', 1)
-                    normalized_table = f"{parts[0].upper()}.{parts[1].upper()}"
+                    schema_part = parts[0].upper()
+                    table_part = parts[1].upper()
+                    
+                    # Remove C## prefix if present
+                    if schema_part.startswith('C##'):
+                        schema_part = schema_part[3:]
+                    
+                    normalized_table = f"{schema_part}.{table_part}"
                 else:
                     username = db_config.username.upper()
                     schema_name = username[3:] if username.startswith('C##') else username
                     normalized_table = f"{schema_name}.{table_name.upper()}"
+                    
             elif db_type == 'mssql':
-                # SQL Server: Ensure schema.table format (default: dbo)
                 normalized_table = normalize_sql_server_table_name(table_name, db_type)
+                
             elif db_type == 'postgresql':
-                # PostgreSQL: Ensure schema.table format (default: public)
                 if '.' not in table_name:
                     normalized_table = f"public.{table_name}"
                 else:
                     normalized_table = table_name
+                    
             else:
-                # MySQL: No schema normalization
                 normalized_table = table_name
             
+            # Generate target table name
             source_db_name = db_config.database_name
             
-            # ✅ CRITICAL: Pass full schema.table for Oracle to generate unique target names
             target_table_name = generate_target_table_name(
                 source_db_name, 
-                normalized_table,  # ✅ Includes schema for Oracle (e.g., "SALES.INFO")
+                normalized_table,
                 db_type
             )
 
             tables_with_columns.append({
-                'name': normalized_table,  # ✅ Now includes schema for Oracle/PostgreSQL/SQL Server
-                'target_name': target_table_name,  # ✅ Will be unique: XEPDB1_SALES_INFO vs XEPDB1_HR_INFO
+                'name': normalized_table,
+                'target_name': target_table_name,
                 'columns': columns,
                 'primary_keys': schema.get('primary_keys', []),
                 'incremental_candidates': incremental_candidates,
@@ -1263,11 +1680,19 @@ def cdc_configure_tables(request, database_pk):
     
     return render(request, 'client/cdc/configure_tables.html', context)
 
+
 @require_http_methods(["GET", "POST"])
 def cdc_create_connector(request, config_pk):
     """
-    Finalize replication configuration and optionally auto-start
-    FIXED: Proper SQL Server topic naming and consumer subscription
+    ✅ PRODUCTION VERSION: Finalize replication with comprehensive validation
+    
+    This view handles the final step of CDC configuration:
+    1. Validates all table formats (prevents NullPointerException in Oracle)
+    2. Checks Kafka Connect health
+    3. Creates signal tables (Oracle-specific)
+    4. Optionally auto-starts replication
+    
+    Supports: Oracle, MySQL, PostgreSQL, SQL Server
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     db_config = replication_config.client_database
@@ -1275,108 +1700,351 @@ def cdc_create_connector(request, config_pk):
 
     if request.method == "POST":
         try:
-            # Generate connector name
+            # ============================================================
+            # STEP 1: Generate connector name and get tables
+            # ============================================================
             connector_name = generate_connector_name(client, db_config)
-
-            # Get list of tables to replicate
             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
             
             if not table_mappings.exists():
                 raise Exception("No tables selected for replication")
 
-            logger.info(f"📋 Creating connector for {table_mappings.count()} tables")
+            logger.info("=" * 80)
+            logger.info(f"🚀 STARTING CONNECTOR CREATION")
+            logger.info("=" * 80)
+            logger.info(f"   Connector Name: {connector_name}")
+            logger.info(f"   Database Type: {db_config.db_type.upper()}")
+            logger.info(f"   Tables to Replicate: {table_mappings.count()}")
+            logger.info("=" * 80)
 
-            # ✅ CRITICAL: Get formatted table names for connector config
-            formatted_tables = get_table_list_for_connector(db_config, table_mappings)
+            # ============================================================
+            # STEP 2: Format table names with database-specific logic
+            # ============================================================
+            logger.info(f"📋 Formatting table names for {db_config.db_type.upper()}...")
             
-            logger.info(f"✅ Formatted tables for connector config:")
-            for fmt_table in formatted_tables:
-                logger.info(f"   - {fmt_table}")
+            try:
+                formatted_tables = get_table_list_for_connector(db_config, table_mappings)
+            except Exception as e:
+                logger.error(f"❌ Table formatting failed: {e}", exc_info=True)
+                messages.error(
+                    request,
+                    f'Failed to format table names: {str(e)}'
+                )
+                return redirect('cdc_configure_tables', database_pk=db_config.pk)
+            
+            # ============================================================
+            # STEP 3: CRITICAL VALIDATION (prevents connector failures)
+            # ============================================================
+            logger.info(f"🔍 Validating table list...")
+            
+            try:
+                validate_connector_table_list(db_config, formatted_tables)
+            except ValueError as e:
+                logger.error(f"❌ Table validation failed: {e}")
+                messages.error(
+                    request,
+                    f'Cannot create connector: Table validation failed.\n\n{str(e)}'
+                )
+                return redirect('cdc_configure_tables', database_pk=db_config.pk)
+            
+            logger.info(f"✅ Table validation passed!")
 
-            # Verify Kafka Connect is healthy
+            # ============================================================
+            # STEP 4: Verify Kafka Connect health
+            # ============================================================
             logger.info(f"🔍 Checking Kafka Connect health...")
-            manager = DebeziumConnectorManager()
-            is_healthy, health_error = manager.check_kafka_connect_health()
-            if not is_healthy:
-                raise Exception(f"Kafka Connect is not healthy: {health_error}")
             
-            logger.info(f"✅ Kafka Connect is healthy")
+            manager = DebeziumConnectorManager()
+            
+            try:
+                is_healthy, health_error = manager.check_kafka_connect_health()
+                if not is_healthy:
+                    raise Exception(f"Kafka Connect is not healthy: {health_error}")
+                
+                logger.info(f"✅ Kafka Connect is healthy and ready")
+            except Exception as e:
+                logger.error(f"❌ Kafka Connect health check failed: {e}")
+                messages.error(
+                    request,
+                    f'Kafka Connect is not available: {str(e)}'
+                )
+                return redirect('cdc_configure_tables', database_pk=db_config.pk)
 
-            # Update replication config
+            # ============================================================
+            # STEP 5: Update replication configuration
+            # ============================================================
+            logger.info(f"💾 Updating replication configuration...")
+            
             replication_config.connector_name = connector_name
             replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
             replication_config.status = 'configured'
             replication_config.is_active = False
             replication_config.save()
+            
+            logger.info(f"✅ Configuration saved:")
+            logger.info(f"   Connector: {connector_name}")
+            logger.info(f"   Topic Prefix: {replication_config.kafka_topic_prefix}")
+            logger.info(f"   Status: {replication_config.status}")
 
-            logger.info(f"✅ Configuration saved for connector: {connector_name}")
-            logger.info(f"   Tables configured: {len(formatted_tables)}")
-            logger.info(f"   Topic prefix: {replication_config.kafka_topic_prefix}")
+            # ============================================================
+            # STEP 6: Database-specific pre-flight checks
+            # ============================================================
+            db_type = db_config.db_type.lower()
+            
+            if db_type == 'oracle':
+                
+                if 'PDB' in db_config.database_name.upper():
+                    logger.info("✅ Oracle PDB detected - will use CDB+PDB configuration")
+                    
+                    # Verify signal table exists
+                    username = db_config.username.upper()
+                    schema_name = username[3:] if username.startswith('C##') else username
+                    
+                    from client.utils.connector_templates import verify_oracle_signal_table
+                    is_valid, msg = verify_oracle_signal_table(db_config, schema_name)
+                    
+                    if not is_valid:
+                        logger.warning(f"⚠️ Signal table validation: {msg}")
+                        messages.warning(request, f'Signal table may not be configured: {msg}')
 
-            # Check if user wants to auto-start
+                # Oracle: Ensure signal table exists for incremental snapshots
+                try:
+                    from client.utils.connector_templates import create_oracle_signal_table
+                    
+                    username = db_config.username.upper()
+                    schema_name = username[3:] if username.startswith('C##') else username
+                    
+                    logger.info("=" * 80)
+                    logger.info(f"🔧 ORACLE PRE-FLIGHT CHECK: Signal Table")
+                    logger.info("=" * 80)
+                    logger.info(f"   Schema: {schema_name}")
+                    logger.info(f"   Table: {schema_name}.DEBEZIUM_SIGNAL")
+                    logger.info(f"   Purpose: Required for incremental snapshots")
+                    
+                    success, msg = create_oracle_signal_table(db_config, schema_name)
+                    
+                    if not success:
+                        logger.warning(f"⚠️  Signal table creation failed: {msg}")
+                        logger.warning(f"   Connector will start, but incremental snapshots may not work")
+                        logger.warning("=" * 80)
+                        
+                        messages.warning(
+                            request,
+                            f'⚠️  Configuration saved, but signal table creation failed. '
+                            f'Incremental snapshots will NOT work without this table. Error: {msg}'
+                        )
+                    else:
+                        logger.info(f"✅ {msg}")
+                        logger.info("=" * 80)
+                        
+                except Exception as e:
+                    logger.error(f"❌ Signal table check failed: {e}", exc_info=True)
+                    messages.warning(
+                        request,
+                        f'⚠️  Signal table creation failed: {str(e)}. '
+                        f'Incremental snapshots may not work.'
+                    )
+            
+            elif db_type == 'postgresql':
+                # PostgreSQL: Log replication slot info
+                logger.info(f"ℹ️  PostgreSQL: Replication slot will be created automatically")
+                logger.info(f"   Slot name: debezium_{client.id}_{db_config.id}")
+            
+            elif db_type == 'mssql':
+                # SQL Server: Check CDC prerequisites
+                logger.info(f"ℹ️  SQL Server: Ensure CDC is enabled on database")
+                logger.info(f"   Required: EXEC sys.sp_cdc_enable_db")
+            
+            elif db_type == 'mysql':
+                # MySQL: Check binary logging
+                logger.info(f"ℹ️  MySQL: Ensure binary logging is enabled")
+                logger.info(f"   Required: log_bin=ON, binlog_format=ROW")
+
+            logger.info(f"✅ Pre-flight checks complete")
+
+            # ============================================================
+            # STEP 7: Log final configuration summary
+            # ============================================================
+            logger.info("=" * 80)
+            logger.info(f"📋 CONNECTOR CONFIGURATION SUMMARY")
+            logger.info("=" * 80)
+            logger.info(f"   Connector Name: {connector_name}")
+            logger.info(f"   Database Type: {db_type.upper()}")
+            logger.info(f"   Source Database: {db_config.database_name}")
+            logger.info(f"   Topic Prefix: {replication_config.kafka_topic_prefix}")
+            logger.info(f"   Tables Configured: {len(formatted_tables)}")
+            logger.info(f"")
+            logger.info(f"   Table List:")
+            for i, table in enumerate(formatted_tables, 1):
+                logger.info(f"      {i}. {table}")
+            logger.info("=" * 80)
+
+            # ============================================================
+            # STEP 8: Handle auto-start request
+            # ============================================================
             auto_start = request.POST.get('auto_start', 'false').lower() == 'true'
             
             if auto_start:
-                logger.info(f"🚀 Auto-starting replication for {connector_name}")
-
+                logger.info(f"🚀 AUTO-START REQUESTED")
+                logger.info(f"   Starting replication immediately...")
+                
                 from client.replication import ReplicationOrchestrator
                 orchestrator = ReplicationOrchestrator(replication_config)
 
                 success, message = orchestrator.start_replication()
 
                 if success:
-                    # ✅ CRITICAL: Validate topic subscription after connector starts
-                    kafka_topics = get_kafka_topics_for_tables(db_config, replication_config, table_mappings)
+                    # Generate expected Kafka topics for verification
+                    kafka_topics = get_kafka_topics_for_tables(
+                        db_config,
+                        replication_config,
+                        table_mappings
+                    )
                     
-                    logger.info(f"✅ Expected Kafka topics for consumer:")
-                    for topic in kafka_topics:
-                        logger.info(f"   - {topic}")
+                    logger.info(f"✅ Replication started successfully!")
+                    logger.info(f"")
+                    logger.info(f"   Expected Kafka Topics:")
+                    for i, topic in enumerate(kafka_topics, 1):
+                        logger.info(f"      {i}. {topic}")
                     
-                    # Validate topics
-                    if validate_topic_subscription(db_config, replication_config, table_mappings, kafka_topics):
+                    # Validate topic subscription
+                    if validate_topic_subscription(
+                        db_config,
+                        replication_config,
+                        table_mappings,
+                        kafka_topics
+                    ):
+                        logger.info(f"")
                         logger.info(f"✅ Topic validation passed")
                     else:
-                        logger.warning(f"⚠️ Topic validation failed - consumer may not receive messages")
+                        logger.warning(f"")
+                        logger.warning(f"⚠️  Topic validation failed - check consumer logs")
                     
                     messages.success(
                         request,
                         f'✅ Replication started successfully! '
-                        f'{len(formatted_tables)} tables are now being replicated in real-time.'
+                        f'{len(formatted_tables)} tables are now being replicated. '
+                        f'Monitor the status page for progress.'
                     )
                 else:
-                    messages.warning(request, f'⚠️ Configuration saved, but failed to start: {message}')
+                    logger.error(f"❌ Failed to start replication: {message}")
+                    messages.warning(
+                        request,
+                        f'⚠️  Configuration saved, but failed to start replication: {message}'
+                    )
             else:
-                # Just save configuration
+                logger.info(f"ℹ️  Auto-start not requested")
+                logger.info(f"   Connector configured but not started")
+                logger.info(f"   User can start manually from monitoring page")
+                
                 messages.success(
                     request,
                     f'✅ Replication configured successfully! '
-                    f'{len(formatted_tables)} tables ready. '
-                    f'Click "Start Replication" to begin.'
+                    f'{len(formatted_tables)} tables are ready for replication. '
+                    f'Click "Start Replication" on the monitoring page to begin.'
                 )
+
+            logger.info("=" * 80)
+            logger.info(f"✅ CONNECTOR CREATION COMPLETE")
+            logger.info("=" * 80)
 
             return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
 
         except Exception as e:
-            logger.error(f"❌ Failed to configure replication: {e}", exc_info=True)
-            messages.error(request, f'Failed to configure replication: {str(e)}')
-
-    # GET: Show connector creation confirmation
+            logger.error("=" * 80)
+            logger.error(f"❌ CONNECTOR CREATION FAILED")
+            logger.error("=" * 80)
+            logger.error(f"   Error: {str(e)}")
+            logger.error(f"   Type: {type(e).__name__}")
+            logger.error("=" * 80)
+            logger.error(f"Full traceback:", exc_info=True)
+            
+            messages.error(
+                request,
+                f'Failed to configure replication: {str(e)}'
+            )
+            return redirect('cdc_configure_tables', database_pk=db_config.pk)
+    
+    # ====================================================================
+    # GET REQUEST: Show preview before creating connector
+    # ====================================================================
     table_mappings = replication_config.table_mappings.filter(is_enabled=True)
     
-    # ✅ Generate preview of topics and formatted table names
-    kafka_topics = get_kafka_topics_for_tables(db_config, replication_config, table_mappings)
-    formatted_tables = get_table_list_for_connector(db_config, table_mappings)
+    # Generate preview with validation
+    try:
+        logger.info(f"🔍 Generating connector preview...")
+        
+        # Format tables
+        formatted_tables = get_table_list_for_connector(db_config, table_mappings)
+        
+        # Generate expected Kafka topics
+        kafka_topics = get_kafka_topics_for_tables(
+            db_config,
+            replication_config,
+            table_mappings
+        )
+        
+        # Build detailed preview
+        table_preview = []
+        for tm, topic, formatted in zip(table_mappings, kafka_topics, formatted_tables):
+            table_preview.append({
+                'source_table': tm.source_table,
+                'target_table': tm.target_table,
+                'formatted_name': formatted,
+                'kafka_topic': topic,
+                'enabled_columns': tm.column_mappings.filter(is_enabled=True).count(),
+                'sync_type': tm.sync_type or replication_config.sync_type,
+            })
+        
+        logger.info(f"✅ Preview generated: {len(table_preview)} tables")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to generate preview: {e}", exc_info=True)
+        table_preview = []
+        kafka_topics = []
+        messages.warning(
+            request,
+            f'Warning: Could not generate preview: {str(e)}'
+        )
+
+    # Database-specific information for template
+    db_type = db_config.db_type.lower()
     
-    # Build table preview data
-    table_preview = []
-    for tm, topic, formatted in zip(table_mappings, kafka_topics, formatted_tables):
-        table_preview.append({
-            'source_table': tm.source_table,
-            'target_table': tm.target_table,
-            'formatted_name': formatted,
-            'kafka_topic': topic,
-            'enabled_columns': tm.column_mappings.filter(is_enabled=True).count(),
-        })
+    db_info = {
+        'type': db_type.upper(),
+        'name': db_config.database_name,
+        'host': db_config.host,
+        'port': db_config.port,
+    }
+    
+    # Add database-specific notes
+    if db_type == 'oracle':
+        username = db_config.username.upper()
+        schema_name = username[3:] if username.startswith('C##') else username
+        db_info['schema'] = schema_name
+        db_info['notes'] = [
+            f"Signal table will be created: {schema_name}.DEBEZIUM_SIGNAL",
+            "LogMiner will be used for CDC",
+            "Supplemental logging must be enabled",
+        ]
+    elif db_type == 'postgresql':
+        db_info['notes'] = [
+            f"Replication slot: debezium_{client.id}_{db_config.id}",
+            "pgoutput plugin will be used",
+            "Logical replication must be enabled",
+        ]
+    elif db_type == 'mssql':
+        db_info['notes'] = [
+            "CDC must be enabled on database",
+            "SQL Server Agent must be running",
+            "Table-level CDC must be configured",
+        ]
+    elif db_type == 'mysql':
+        db_info['notes'] = [
+            "Binary logging must be enabled (log_bin=ON)",
+            "Binary log format must be ROW",
+            "GTID mode recommended for read-only databases",
+        ]
 
     context = {
         'replication_config': replication_config,
@@ -1385,11 +2053,14 @@ def cdc_create_connector(request, config_pk):
         'table_mappings': table_mappings,
         'table_preview': table_preview,
         'expected_topics': kafka_topics,
-        'db_type': db_config.db_type.upper(),
+        'db_info': db_info,
+        'total_columns': sum(
+            tm.column_mappings.filter(is_enabled=True).count()
+            for tm in table_mappings
+        ),
     }
 
     return render(request, 'client/cdc/create_connector.html', context)
-
 
 @require_http_methods(["GET"])
 def cdc_monitor_connector(request, config_pk):
@@ -2268,10 +2939,17 @@ def manage_postgresql_publication(db_config, replication_config, table_names):
         logger.error(f"❌ {error_msg}", exc_info=True)
         return False, error_msg
 
+
 @require_http_methods(["GET", "POST"])
 def cdc_edit_config(request, config_pk):
     """
-    Edit replication configuration - FIXED to show ALL accessible tables (owned, granted, synonyms)
+    ✅ PRODUCTION-READY: Edit replication configuration with Oracle fix
+    
+    CRITICAL FIX:
+    - Oracle: Creates Kafka topics with SCHEMA name (not database name)
+    - MySQL: Uses database.table format
+    - PostgreSQL: Uses schema.table format  
+    - SQL Server: Uses database.schema.table format
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     db_config = replication_config.client_database
@@ -2280,7 +2958,9 @@ def cdc_edit_config(request, config_pk):
     if request.method == "POST":
         try:
             with transaction.atomic():
+                # ============================================================
                 # Update basic configuration
+                # ============================================================
                 replication_config.sync_type = request.POST.get('sync_type', replication_config.sync_type)
                 replication_config.sync_frequency = request.POST.get('sync_frequency', replication_config.sync_frequency)
                 replication_config.auto_create_tables = request.POST.get('auto_create_tables') == 'on'
@@ -2289,7 +2969,7 @@ def cdc_edit_config(request, config_pk):
 
                 # Get selected tables
                 selected_table_names = request.POST.getlist('selected_tables')
-                logger.info(f"Selected tables: {selected_table_names}")
+                logger.info(f"📋 Selected tables: {selected_table_names}")
 
                 # Build normalized mapping lookup
                 existing_mappings = {}
@@ -2299,16 +2979,51 @@ def cdc_edit_config(request, config_pk):
 
                 newly_added_tables = []
                 removed_table_names = []
+                db_type = db_config.db_type.lower()
 
                 # Find removed tables
                 for normalized_name in existing_mappings.keys():
                     if normalized_name not in selected_table_names:
                         removed_table_names.append(normalized_name)
 
+                logger.info(f"➕ Tables to add: {len([t for t in selected_table_names if t not in existing_mappings])}")
+                logger.info(f"➖ Tables to remove: {len(removed_table_names)}")
+
+                # ============================================================
                 # Process newly added tables
+                # ============================================================
                 for table_name in selected_table_names:
-                    normalized_table = normalize_sql_server_table_name(table_name, db_config.db_type)
+                    # ✅ Normalize table name based on database type
+                    if db_type == 'oracle':
+                        if '.' not in table_name:
+                            username = db_config.username.upper()
+                            # ✅ Remove C## prefix
+                            schema_name = username[3:] if username.startswith('C##') else username
+                            normalized_table = f"{schema_name}.{table_name.upper()}"
+                            logger.warning(f"⚠️ Oracle: Added missing schema: {table_name} → {normalized_table}")
+                        else:
+                            parts = table_name.split('.', 1)
+                            schema_part = parts[0].upper()
+                            table_part = parts[1].upper()
+                            
+                            # ✅ Remove C## prefix if present
+                            if schema_part.startswith('C##'):
+                                schema_part = schema_part[3:]
+                                logger.info(f"🔧 Removed C## prefix: C##{schema_part} → {schema_part}")
+                            
+                            normalized_table = f"{schema_part}.{table_part}"
+                            logger.info(f"✅ Oracle: Table qualified: {normalized_table}")
+                    elif db_type == 'mssql':
+                        normalized_table = normalize_sql_server_table_name(table_name, db_type)
+                    elif db_type == 'postgresql':
+                        if '.' not in table_name:
+                            normalized_table = f"public.{table_name}"
+                        else:
+                            normalized_table = table_name
+                    else:
+                        normalized_table = table_name
                     
+                    # Check if it's a new table
                     if normalized_table not in existing_mappings:
                         newly_added_tables.append(normalized_table)
                         
@@ -2323,6 +3038,8 @@ def cdc_edit_config(request, config_pk):
                         sync_type = request.POST.get(f'sync_type_table_new_{table_name}', 'realtime')
                         incremental_col = request.POST.get(f'incremental_col_table_new_{table_name}', '')
                         conflict_resolution = request.POST.get(f'conflict_resolution_table_new_{table_name}', 'source_wins')
+
+                        logger.info(f"➕ Adding table: {normalized_table} → {target_table_name}")
 
                         table_mapping = TableMapping.objects.create(
                             replication_config=replication_config,
@@ -2345,14 +3062,17 @@ def cdc_edit_config(request, config_pk):
                                     table_mapping=table_mapping,
                                     source_column=column['name'],
                                     target_column=target_col_name,
-                                    source_type=str(column.get('type', 'unknown')),
-                                    target_type=str(column.get('type', 'unknown')),
+                                    source_type=str(column.get('type', 'VARCHAR')),
+                                    target_type=str(column.get('type', 'VARCHAR')),
                                     is_enabled=col_enabled
                                 )
+                            logger.info(f"   ✅ Created {len(schema.get('columns', []))} column mappings")
                         except Exception as e:
                             logger.error(f"Failed to create column mappings: {e}")
 
+                # ============================================================
                 # CREATE TARGET TABLES
+                # ============================================================
                 if newly_added_tables and replication_config.auto_create_tables:
                     try:
                         from client.utils.table_creator import create_target_tables
@@ -2362,58 +3082,161 @@ def cdc_edit_config(request, config_pk):
                         logger.error(f"Failed to create target tables: {e}")
                         messages.warning(request, f'Configuration saved, but table creation failed: {str(e)}')
 
-                # CREATE KAFKA TOPICS
+                # ============================================================
+                # ✅ CREATE KAFKA TOPICS - FIXED FOR ORACLE
+                # ============================================================
                 if newly_added_tables:
                     try:
                         from client.utils.kafka_topic_manager import KafkaTopicManager
                         topic_manager = KafkaTopicManager()
                         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
 
-                        if db_config.db_type.lower() == 'mssql':
+                        logger.info("=" * 80)
+                        logger.info(f"📡 CREATING KAFKA TOPICS FOR {db_type.upper()}")
+                        logger.info("=" * 80)
+                        logger.info(f"   Topic prefix: {topic_prefix}")
+                        logger.info(f"   New tables: {newly_added_tables}")
+
+                        if db_type == 'oracle':
+                            # ✅ STEP 1: Ensure signal table exists FIRST
+                            username = db_config.username.upper()
+                            schema_name = username[3:] if username.startswith('C##') else username
+                            
+                            logger.info("=" * 80)
+                            logger.info(f"🔧 ORACLE: PRE-FLIGHT CHECKS")
+                            logger.info("=" * 80)
+                            logger.info(f"   Schema: {schema_name}")
+                            logger.info(f"   Topic prefix: {topic_prefix}")
+                            
+                            # Create signal table if needed
+                            try:
+                                from client.utils.connector_templates import create_oracle_signal_table
+                                
+                                table_success, table_msg = create_oracle_signal_table(db_config, schema_name)
+                                
+                                if not table_success:
+                                    logger.error(f"❌ Signal table creation failed: {table_msg}")
+                                    messages.warning(
+                                        request, 
+                                        f'⚠️ Tables added but signal table creation failed. '
+                                        f'Incremental snapshots will NOT work: {table_msg}'
+                                    )
+                                else:
+                                    logger.info(f"✅ Signal table ready: {table_msg}")
+                                    
+                            except Exception as e:
+                                logger.error(f"❌ Signal table check failed: {e}", exc_info=True)
+                                messages.warning(request, f'⚠️ Signal table creation failed: {str(e)}')
+                            
+                            # ✅ STEP 2: Create Kafka topics
+                            logger.info(f"📡 Creating Kafka topics...")
+                            logger.info(f"   Format: {topic_prefix}.{schema_name}.{{table}}")
+                            
+                            topics_to_create = []
+                            for table_name in newly_added_tables:
+                                # Extract just table name (remove schema prefix if present)
+                                if '.' in table_name:
+                                    _, table_only = table_name.rsplit('.', 1)
+                                else:
+                                    table_only = table_name
+                                
+                                # Oracle topic format: {prefix}.{SCHEMA}.{table}
+                                topic_name = f"{topic_prefix}.{schema_name}.{table_only}"
+                                topics_to_create.append(topic_name)
+                                logger.info(f"   📝 Will create: {topic_name}")
+                            
+                            # ✅ Use bulk creation
+                            topic_results = topic_manager.create_topics_bulk(topics_to_create)
+                            
+                            for topic, success in topic_results.items():
+                                if success:
+                                    logger.info(f"   ✅ Created: {topic}")
+                                else:
+                                    logger.error(f"   ❌ Failed: {topic}")
+                            
+                            logger.info("=" * 80)
+
+                        elif db_type == 'mssql':
+                            # SQL Server: {prefix}.{database}.{schema}.{table}
+                            logger.info(f"   📋 SQL Server format: {topic_prefix}.{db_config.database_name}.{{schema}}.{{table}}")
+                            
                             topic_results = topic_manager.create_cdc_topics_for_tables(
                                 server_name=topic_prefix,
                                 database=db_config.database_name,
                                 table_names=newly_added_tables
                             )
-                        elif db_config.db_type.lower() == 'postgresql':
+                            
+                            for topic, success in topic_results.items():
+                                if success:
+                                    logger.info(f"   ✅ Created: {topic}")
+                                else:
+                                    logger.error(f"   ❌ Failed: {topic}")
+
+                        elif db_type == 'postgresql':
+                            # PostgreSQL: {prefix}.{schema}.{table}
+                            logger.info(f"   📋 PostgreSQL format: {topic_prefix}.{{schema}}.{{table}}")
+                            
                             table_names_stripped = [t.split('.')[-1] for t in newly_added_tables]
+                            
                             topic_results = topic_manager.create_cdc_topics_for_tables(
                                 server_name=topic_prefix,
                                 database='public',
                                 table_names=table_names_stripped
                             )
-                        elif db_config.db_type.lower() == 'oracle':
-                            table_names_stripped = [t.split('.')[-1] for t in newly_added_tables]
-                            topic_results = topic_manager.create_cdc_topics_for_tables(
-                                server_name=topic_prefix,
-                                database=db_config.database_name,
-                                table_names=table_names_stripped
-                            )
+                            
+                            for topic, success in topic_results.items():
+                                if success:
+                                    logger.info(f"   ✅ Created: {topic}")
+                                else:
+                                    logger.error(f"   ❌ Failed: {topic}")
+
                         else:
+                            # MySQL: {prefix}.{database}.{table}
+                            logger.info(f"   📋 MySQL format: {topic_prefix}.{db_config.database_name}.{{table}}")
+                            
                             topic_results = topic_manager.create_cdc_topics_for_tables(
                                 server_name=topic_prefix,
                                 database=db_config.database_name,
                                 table_names=newly_added_tables
                             )
-                    except Exception as e:
-                        logger.error(f"Error creating Kafka topics: {e}")
+                            
+                            for topic, success in topic_results.items():
+                                if success:
+                                    logger.info(f"   ✅ Created: {topic}")
+                                else:
+                                    logger.error(f"   ❌ Failed: {topic}")
 
+                        logger.info("=" * 80)
+                        logger.info(f"✅ KAFKA TOPIC CREATION COMPLETE")
+                        logger.info("=" * 80)
+
+                    except Exception as e:
+                        logger.error(f"❌ Topic creation failed: {e}", exc_info=True)
+                        messages.warning(request, f'Tables added but topic creation failed: {str(e)}')
+
+                # ============================================================
                 # Process removed tables
+                # ============================================================
                 for table_name in removed_table_names:
                     table_mapping = existing_mappings[table_name]
+                    logger.info(f"➖ Removing table: {table_name}")
                     table_mapping.delete()
 
-                # DROP REMOVED TABLES
+                # Drop removed target tables
                 if removed_table_names:
                     try:
                         from client.utils.table_creator import drop_target_tables
                         drop_target_tables(replication_config, removed_table_names)
+                        logger.info(f"✅ Dropped {len(removed_table_names)} target tables")
                     except Exception as e:
                         logger.error(f"Failed to drop tables: {e}")
 
+                # ============================================================
                 # Update existing table mappings
+                # ============================================================
                 for table_mapping in replication_config.table_mappings.all():
                     table_key = f'table_{table_mapping.id}'
+                    
                     new_target_name = request.POST.get(f'target_{table_key}')
                     if new_target_name:
                         table_mapping.target_table = new_target_name
@@ -2444,7 +3267,9 @@ def cdc_edit_config(request, config_pk):
                 restart_connector = request.POST.get('restart_connector') == 'on'
                 messages.success(request, '✅ Configuration updated successfully!')
 
+                # ============================================================
                 # CONNECTOR UPDATE
+                # ============================================================
                 if replication_config.connector_name:
                     try:
                         manager = DebeziumConnectorManager()
@@ -2456,7 +3281,7 @@ def cdc_edit_config(request, config_pk):
                             connector_exists = isinstance(connector_result, tuple) and connector_result[0]
 
                             if not connector_exists:
-                                logger.warning(f"Connector {replication_config.connector_name} doesn't exist")
+                                logger.warning(f"⚠️ Connector {replication_config.connector_name} doesn't exist")
                                 replication_config.connector_name = None
                                 replication_config.status = 'configured'
                                 replication_config.is_active = False
@@ -2466,8 +3291,6 @@ def cdc_edit_config(request, config_pk):
                                     logger.info(f"🔧 Updating connector (added: {len(newly_added_tables)}, removed: {len(removed_table_names)})")
 
                                     try:
-                                        db_type = db_config.db_type.lower()
-                                        
                                         # PostgreSQL-specific handling
                                         if db_type == 'postgresql':
                                             success, message = manage_postgresql_publication(
@@ -2491,39 +3314,30 @@ def cdc_edit_config(request, config_pk):
                                             if restart_success:
                                                 time.sleep(5)
                                         
-                                        # Update connector configuration
+                                        # Get current connector config
                                         current_config = manager.get_connector_config(replication_config.connector_name)
 
                                         if not current_config:
                                             raise Exception("Failed to retrieve connector configuration")
 
-                                        # Format table list correctly based on DB type
-                                        if db_type == 'postgresql':
-                                            schema_name = 'public'
-                                            tables_full = [f"{schema_name}.{t.split('.')[-1]}" for t in tables_list]
-                                        elif db_type == 'mssql':
-                                            tables_full = [f"{db_config.database_name}.{t}" for t in tables_list]
-                                        elif db_type == 'oracle':
-                                            tables_full = []
-                                            for t in tables_list:
-                                                if '.' in t:
-                                                    tables_full.append(t)
-                                                else:
-                                                    username = db_config.username.upper()
-                                                    schema_name = username[3:] if username.startswith('C##') else username
-                                                    tables_full.append(f"{schema_name}.{t}")
-                                        else:
-                                            tables_full = [f"{db_config.database_name}.{t}" for t in tables_list]
+                                        # Format table list for connector
+                                        formatted_tables = get_table_list_for_connector(db_config, all_enabled_tables)
                                         
-                                        logger.info(f"✅ Formatted tables for connector update:")
-                                        for fmt_table in tables_full:
-                                            logger.info(f"   - {fmt_table}")
+                                        logger.info("=" * 80)
+                                        logger.info(f"📋 UPDATING CONNECTOR TABLE LIST")
+                                        logger.info("=" * 80)
+                                        for i, table in enumerate(formatted_tables, 1):
+                                            logger.info(f"   {i}. {table}")
+                                        logger.info("=" * 80)
                                         
-                                        current_config['table.include.list'] = ','.join(tables_full)
+                                        current_config['table.include.list'] = ','.join(formatted_tables)
 
+                                        # Change snapshot mode if adding new tables
                                         if newly_added_tables and current_config.get('snapshot.mode') == 'initial':
                                             current_config['snapshot.mode'] = 'when_needed'
+                                            logger.info("✅ Changed snapshot.mode to 'when_needed'")
 
+                                        # Update connector
                                         update_success, update_error = manager.update_connector_config(
                                             replication_config.connector_name,
                                             current_config
@@ -2534,6 +3348,7 @@ def cdc_edit_config(request, config_pk):
 
                                         time.sleep(3)
 
+                                        # Wait for connector to stabilize
                                         wait_success = wait_for_connector_running(
                                             manager, 
                                             replication_config.connector_name,
@@ -2542,53 +3357,108 @@ def cdc_edit_config(request, config_pk):
                                         )
                                         
                                         if not wait_success:
-                                            messages.warning(request, 'Configuration updated. Connector may still be starting.')
+                                            messages.warning(request, '⚠️ Configuration updated. Connector may still be starting.')
                                         
-                                        # Handle snapshots based on database type
+                                        # ================================================
+                                        # Handle incremental snapshots
+                                        # ================================================
                                         if newly_added_tables:
                                             if db_type == 'mssql':
-                                                logger.info(f"✅ SQL Server: {len(newly_added_tables)} table(s) added!")
                                                 messages.success(
                                                     request,
                                                     f'✅ {len(newly_added_tables)} table(s) added! Snapshot in progress.'
                                                 )
+                                            
                                             elif db_type == 'oracle':
-                                                logger.info(f"📡 Oracle: Sending incremental snapshot signal...")
+                                                logger.info("=" * 80)
+                                                logger.info(f"🚀 ORACLE: INCREMENTAL SNAPSHOT TRIGGER")
+                                                logger.info("=" * 80)
                                                 
                                                 try:
                                                     from client.utils.kafka_signal_sender import KafkaSignalSender
-                                                    topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+                                                    from client.utils.connector_templates import verify_oracle_signal_table
                                                     
-                                                    signal_sender = KafkaSignalSender()
-                                                    
+                                                    # Get schema name (WITHOUT C## prefix)
                                                     username = db_config.username.upper()
                                                     schema_name = username[3:] if username.startswith('C##') else username
                                                     
-                                                    success, message = signal_sender.send_incremental_snapshot_signal(
-                                                        topic_prefix=topic_prefix,
-                                                        database_name=db_config.database_name,
-                                                        table_names=newly_added_tables,
-                                                        schema_name=schema_name,
-                                                        db_type='oracle'
-                                                    )
+                                                    # ✅ CRITICAL: Verify signal table exists
+                                                    logger.info(f"🔍 Verifying signal table...")
                                                     
-                                                    signal_sender.close()
+                                                    is_valid, verify_msg = verify_oracle_signal_table(db_config, schema_name)
                                                     
-                                                    if success:
-                                                        messages.success(
+                                                    if not is_valid:
+                                                        error_msg = f"Signal table verification failed: {verify_msg}"
+                                                        logger.error(f"❌ {error_msg}")
+                                                        messages.error(
                                                             request,
-                                                            f'✅ {len(newly_added_tables)} table(s) added! Incremental snapshot in progress.'
+                                                            f'❌ Cannot trigger snapshot: {error_msg}. '
+                                                            f'Please ensure {schema_name}.DEBEZIUM_SIGNAL table exists.'
                                                         )
                                                     else:
-                                                        messages.warning(request, f'Snapshot signal failed: {message}')
+                                                        logger.info(f"✅ {verify_msg}")
                                                         
+                                                        # ✅ Send incremental snapshot signal
+                                                        topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+                                                        
+                                                        signal_sender = KafkaSignalSender()
+                                                        
+                                                        # Extract table names (remove schema prefix)
+                                                        table_names_for_signal = []
+                                                        for table in newly_added_tables:
+                                                            if '.' in table:
+                                                                table_name = table.split('.', 1)[1]
+                                                                table_names_for_signal.append(table_name)
+                                                            else:
+                                                                table_names_for_signal.append(table)
+                                                        
+                                                        logger.info(f"📡 Sending incremental snapshot signal:")
+                                                        logger.info(f"   Topic prefix: {topic_prefix}")
+                                                        logger.info(f"   Schema: {schema_name}")
+                                                        logger.info(f"   Tables: {table_names_for_signal}")
+                                                        logger.info(f"   Signal will be written to: {schema_name}.DEBEZIUM_SIGNAL")
+                                                        
+                                                        success, message = signal_sender.send_incremental_snapshot_signal(
+                                                            topic_prefix=topic_prefix,
+                                                            database_name=db_config.database_name,
+                                                            table_names=table_names_for_signal,
+                                                            schema_name=schema_name,
+                                                            db_type='oracle'
+                                                        )
+                                                        
+                                                        signal_sender.close()
+                                                        
+                                                        if success:
+                                                            logger.info(f"✅ Snapshot signal sent successfully!")
+                                                            logger.info(f"   Monitor connector logs for snapshot progress")
+                                                            logger.info("=" * 80)
+                                                            
+                                                            messages.success(
+                                                                request,
+                                                                f'✅ {len(newly_added_tables)} table(s) added! '
+                                                                f'Incremental snapshot in progress. '
+                                                                f'Check connector logs for progress.'
+                                                            )
+                                                        else:
+                                                            logger.error(f"❌ Snapshot signal failed: {message}")
+                                                            logger.error("=" * 80)
+                                                            
+                                                            messages.warning(
+                                                                request, 
+                                                                f'⚠️ Tables added but snapshot signal failed: {message}'
+                                                            )
+                                                            
                                                 except Exception as e:
-                                                    logger.error(f"Snapshot signal failed: {e}", exc_info=True)
-                                                    messages.warning(request, f'Snapshot signal failed: {str(e)}')
+                                                    logger.error(f"❌ Oracle incremental snapshot error: {e}", exc_info=True)
+                                                    logger.error("=" * 80)
+                                                    
+                                                    messages.warning(
+                                                        request, 
+                                                        f'⚠️ Snapshot trigger failed: {str(e)}'
+                                                    )
+                                            
                                             else:
                                                 # MySQL/PostgreSQL
-                                                logger.info(f"📡 Sending incremental snapshot signal...")
-                                                
                                                 try:
                                                     from client.utils.kafka_signal_sender import KafkaSignalSender
                                                     topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
@@ -2642,11 +3512,12 @@ def cdc_edit_config(request, config_pk):
                                                 logger.error(f"Consumer restart failed: {e}")
 
                                     except Exception as e:
-                                        logger.error(f"Error updating connector: {e}", exc_info=True)
+                                        logger.error(f"❌ Connector update failed: {e}", exc_info=True)
                                         messages.error(request, f'Failed to update connector: {str(e)}')
                                         
                                 elif restart_connector:
-                                    if db_config.db_type.lower() == 'postgresql':
+                                    # Manual restart
+                                    if db_type == 'postgresql':
                                         slot_name = f"debezium_{client.id}_{db_config.id}"
                                         terminate_active_slot_connections(db_config, slot_name)
                                         time.sleep(2)
@@ -2655,10 +3526,10 @@ def cdc_edit_config(request, config_pk):
                                     if success:
                                         messages.success(request, '✅ Connector restarted!')
                                     else:
-                                        messages.warning(request, f'Restart failed: {error}')
+                                        messages.warning(request, f'⚠️ Restart failed: {error}')
 
                     except Exception as e:
-                        logger.error(f"Error with connector: {e}", exc_info=True)
+                        logger.error(f"❌ Connector error: {e}", exc_info=True)
                         messages.warning(request, f'Configuration saved, connector update failed: {str(e)}')
 
                 # Redirect
@@ -2668,17 +3539,17 @@ def cdc_edit_config(request, config_pk):
                     return redirect('main-dashboard')
 
         except Exception as e:
-            logger.error(f'Failed to update configuration: {e}', exc_info=True)
+            logger.error(f'❌ Update failed: {e}', exc_info=True)
             messages.error(request, f'Failed to update configuration: {str(e)}')
 
-    # ========================================================================
-    # GET: FIXED TABLE DISCOVERY - Show ALL accessible tables
-    # ========================================================================
+    # ================================================================
+    # GET: Show edit form with all accessible tables
+    # ================================================================
     try:
         all_table_names = []
         
         if db_config.db_type.lower() == 'oracle':
-            # ORACLE: Use comprehensive discovery (owned, granted, synonyms)
+            # Oracle: Comprehensive discovery
             logger.info("=" * 80)
             logger.info("🔍 ORACLE TABLE DISCOVERY FOR EDIT")
             logger.info("=" * 80)
@@ -2687,156 +3558,91 @@ def cdc_edit_config(request, config_pk):
             
             try:
                 with engine.connect() as conn:
-                    # Get current user
                     current_user_result = conn.execute(text("SELECT USER FROM DUAL"))
                     current_user = current_user_result.scalar()
-                    logger.info(f"✅ Connected as: {current_user}")
                     
-                    # Determine target schema
                     username_upper = current_user.upper()
                     if username_upper.startswith('C##'):
                         target_schema = username_upper[3:]
-                        logger.info(f"🔍 Common user: {username_upper} -> Target schema: {target_schema}")
                     else:
                         target_schema = username_upper
-                        logger.info(f"🔍 Local user: {username_upper}")
                     
                     discovered_tables = {}
                     
-                    # Method 1: Tables owned by current user
-                    logger.info(f"📋 Method 1: Checking user_tables...")
-                    
+                    # User tables
                     user_tables_query = text("""
-                        SELECT table_name
-                        FROM user_tables 
+                        SELECT table_name FROM user_tables 
                         WHERE table_name NOT LIKE 'LOG_MINING%'
                           AND table_name NOT LIKE 'DEBEZIUM%'
                           AND table_name NOT LIKE 'SYS_%'
-                          AND table_name NOT LIKE 'MLOG$%'
-                          AND table_name NOT LIKE 'RUPD$%'
-                          AND table_name NOT LIKE 'BIN$%'
                         ORDER BY table_name
                     """)
-                    
                     result = conn.execute(user_tables_query)
-                    user_owned = [row[0] for row in result.fetchall()]
+                    for row in result.fetchall():
+                        # ✅ Store without C## prefix
+                        qualified_name = f"{target_schema}.{row[0]}"
+                        discovered_tables[qualified_name] = {'source': 'owned'}
                     
-                    for table_name in user_owned:
-                        qualified_name = f"{username_upper}.{table_name}"
-                        discovered_tables[qualified_name] = {
-                            'owner': username_upper,
-                            'table': table_name,
-                            'source': 'owned'
-                        }
-                    
-                    logger.info(f"   ✅ Found {len(user_owned)} owned tables")
-                    
-                    # Method 2: Tables accessible via grants
-                    logger.info(f"📋 Method 2: Checking all_tables (granted access)...")
-                    
+                    # Granted tables
                     all_tables_query = text("""
-                        SELECT owner, table_name
-                        FROM all_tables
+                        SELECT owner, table_name FROM all_tables
                         WHERE owner = :target_schema
                           AND table_name NOT LIKE 'LOG_MINING%'
                           AND table_name NOT LIKE 'DEBEZIUM%'
-                          AND table_name NOT LIKE 'SYS_%'
-                          AND table_name NOT LIKE 'MLOG$%'
-                          AND table_name NOT LIKE 'RUPD$%'
-                          AND table_name NOT LIKE 'BIN$%'
                         ORDER BY table_name
                     """)
-                    
                     result = conn.execute(all_tables_query, {"target_schema": target_schema})
-                    granted_tables = [(row[0], row[1]) for row in result.fetchall()]
-                    
-                    for owner, table_name in granted_tables:
+                    for owner, table_name in result.fetchall():
+                        # ✅ Remove C## prefix from owner
+                        if owner.startswith('C##'):
+                            owner = owner[3:]
                         qualified_name = f"{owner}.{table_name}"
                         if qualified_name not in discovered_tables:
-                            discovered_tables[qualified_name] = {
-                                'owner': owner,
-                                'table': table_name,
-                                'source': 'granted'
-                            }
+                            discovered_tables[qualified_name] = {'source': 'granted'}
                     
-                    logger.info(f"   ✅ Found {len(granted_tables)} accessible tables in schema '{target_schema}'")
-                    
-                    # Method 3: Tables accessible via synonyms
-                    logger.info(f"📋 Method 3: Checking all_synonyms...")
-                    
+                    # Synonyms
                     synonyms_query = text("""
-                        SELECT 
-                            synonym_name,
-                            table_owner,
-                            table_name
-                        FROM all_synonyms
+                        SELECT table_owner, table_name FROM all_synonyms
                         WHERE owner = :current_user
                           AND table_name NOT LIKE 'LOG_MINING%'
                           AND table_name NOT LIKE 'DEBEZIUM%'
-                          AND table_name NOT LIKE 'SYS_%'
-                        ORDER BY synonym_name
                     """)
-                    
                     result = conn.execute(synonyms_query, {"current_user": username_upper})
-                    synonyms = [(row[0], row[1], row[2]) for row in result.fetchall()]
-                    
-                    for synonym_name, table_owner, table_name in synonyms:
+                    for table_owner, table_name in result.fetchall():
+                        # ✅ Remove C## prefix from owner
+                        if table_owner.startswith('C##'):
+                            table_owner = table_owner[3:]
                         qualified_name = f"{table_owner}.{table_name}"
                         if qualified_name not in discovered_tables:
-                            discovered_tables[qualified_name] = {
-                                'owner': table_owner,
-                                'table': table_name,
-                                'source': 'synonym',
-                                'synonym': synonym_name
-                            }
+                            discovered_tables[qualified_name] = {'source': 'synonym'}
                     
-                    logger.info(f"   ✅ Found {len(synonyms)} accessible synonyms")
-                    
-                    # Build final list
-                    logger.info("=" * 80)
-                    logger.info(f"📊 DISCOVERY SUMMARY: {len(discovered_tables)} total tables")
-                    logger.info("=" * 80)
-                    
-                    if discovered_tables:
-                        for qualified_name, info in discovered_tables.items():
-                            source_type = info['source']
-                            if source_type == 'synonym':
-                                logger.info(f"   • {qualified_name} (via synonym: {info['synonym']})")
-                            else:
-                                logger.info(f"   • {qualified_name} ({source_type})")
-                        
-                        all_table_names = list(discovered_tables.keys())
-                    else:
-                        logger.error(f"❌ No accessible tables found!")
-                        messages.warning(request, f'No accessible tables found for user {username_upper}')
-                    
-                    logger.info("=" * 80)
+                    all_table_names = list(discovered_tables.keys())
+                    logger.info(f"✅ Found {len(all_table_names)} Oracle tables")
                 
                 engine.dispose()
                 
             except Exception as e:
-                logger.error(f"❌ Oracle table discovery failed: {e}", exc_info=True)
-                messages.warning(request, f'Failed to discover tables: {str(e)}')
+                logger.error(f"❌ Oracle discovery failed: {e}", exc_info=True)
                 all_table_names = []
         
         else:
-            # OTHER DATABASES: Use standard get_table_list
+            # Other databases
             try:
                 all_table_names = get_table_list(db_config)
-                logger.info(f"✅ Found {len(all_table_names)} tables via get_table_list()")
+                logger.info(f"✅ Found {len(all_table_names)} tables")
             except Exception as e:
                 logger.error(f"Failed to discover tables: {e}")
                 all_table_names = []
         
-        # Normalize discovered table names
+        # Normalize table names
         if db_config.db_type.lower() == 'mssql':
             all_table_names = [
                 normalize_sql_server_table_name(t, db_config.db_type) 
                 for t in all_table_names
             ]
-        
+
     except Exception as e:
-        logger.error(f"Failed to discover tables: {e}", exc_info=True)
+        logger.error(f"❌ Discovery failed: {e}", exc_info=True)
         all_table_names = []
         messages.warning(request, f'Failed to discover tables: {str(e)}')
 
@@ -2920,7 +3726,6 @@ def cdc_edit_config(request, config_pk):
                 db_type
             )
 
-
             table_data = {
                 'table_name': table_name,
                 'row_count': row_count,
@@ -2931,7 +3736,7 @@ def cdc_edit_config(request, config_pk):
                 'all_columns': columns_from_schema,
                 'incremental_candidates': incremental_candidates,
                 'primary_keys': schema.get('primary_keys', []),
-                'default_target_name': default_target_table_name,  # ✅ Will be unique: XEPDB1_SALES_INFO
+                'default_target_name': default_target_table_name,
             }
 
             tables_with_columns.append(table_data)

@@ -21,13 +21,9 @@ def get_kafka_topics_for_replication(replication_config):
     ✅ FIXED: Generate correct Kafka topic names for consumer subscription
     
     CRITICAL FIX FOR ORACLE:
-    - OLD (WRONG): client_1_db_5.CUSTOMERS (schema stripped)
-    - NEW (CORRECT): client_1_db_5.CDCUSER.CUSTOMERS (schema included)
-    
-    Oracle Debezium behavior:
-    - table.include.list: "CDCUSER.CUSTOMERS" (with schema)
-    - Actual topic: "client_1_db_5.CDCUSER.CUSTOMERS" (with schema)
-    - This is DIFFERENT from the old assumption!
+    - Removes C## prefix from schema names
+    - Oracle format: {prefix}.{SCHEMA}.{TABLE} (schema included)
+    - Example: client_1_db_5.CDCUSER.CUSTOMERS (NOT client_1_db_5.CUSTOMERS)
     """
     import logging
     
@@ -59,13 +55,18 @@ def get_kafka_topics_for_replication(replication_config):
         if db_type == 'mssql':
             # ✅ SQL Server: {prefix}.{database}.{schema}.{table}
             if '.' in source_table:
-                schema, table = source_table.rsplit('.', 1)
+                parts = source_table.split('.')
+                if len(parts) == 2:
+                    schema, table = parts
+                else:
+                    schema = parts[-2]
+                    table = parts[-1]
             else:
                 schema = 'dbo'
                 table = source_table
             
             topic_name = f"{kafka_topic_prefix}.{db_config.database_name}.{schema}.{table}"
-            logger.info(f"   ✓ SQL Server: {source_table} → {topic_name}")
+            logger.info(f"   ✔ SQL Server: {source_table} → {topic_name}")
             
         elif db_type == 'postgresql':
             # ✅ PostgreSQL: {prefix}.{schema}.{table}
@@ -76,32 +77,27 @@ def get_kafka_topics_for_replication(replication_config):
                 table = source_table
             
             topic_name = f"{kafka_topic_prefix}.{schema}.{table}"
-            logger.info(f"   ✓ PostgreSQL: {source_table} → {topic_name}")
+            logger.info(f"   ✔ PostgreSQL: {source_table} → {topic_name}")
             
         elif db_type == 'mysql':
             # ✅ MySQL: {prefix}.{database}.{table}
             table = source_table.split('.')[-1] if '.' in source_table else source_table
             topic_name = f"{kafka_topic_prefix}.{db_config.database_name}.{table}"
-            logger.info(f"   ✓ MySQL: {source_table} → {topic_name}")
+            logger.info(f"   ✔ MySQL: {source_table} → {topic_name}")
             
         elif db_type == 'oracle':
             # ✅ CRITICAL FIX: Oracle INCLUDES schema in topic name
-            # 
-            # Previous assumption was WRONG:
-            # - We thought: client_1_db_5.CUSTOMERS (no schema)
-            # - Reality is: client_1_db_5.CDCUSER.CUSTOMERS (with schema)
-            #
-            # Evidence from your logs:
-            # kafka-connect | client_1_db_5.CDCUSER.CUSTOMERS=UNKNOWN_TOPIC_OR_PARTITION
-            #
-            # Why? Because table.include.list = "CDCUSER.CUSTOMERS" (with schema)
-            # Debezium uses this FULL name for the topic!
-            
             if '.' in source_table:
-                # Table is already qualified: CDCUSER.CUSTOMERS
+                # Table is already qualified: CDCUSER.CUSTOMERS or C##CDCUSER.CUSTOMERS
                 schema, table = source_table.rsplit('.', 1)
                 schema = schema.upper()
                 table = table.upper()
+                
+                # ✅ CRITICAL: Remove C## prefix if present
+                if schema.startswith('C##'):
+                    original_schema = schema
+                    schema = schema[3:]
+                    logger.info(f"   🔧 Removed C## prefix: {original_schema} → {schema}")
             else:
                 # Table without schema - add username as schema
                 username = db_config.username.upper()
@@ -110,12 +106,12 @@ def get_kafka_topics_for_replication(replication_config):
             
             # ✅ Topic format: {prefix}.{schema}.{table} - KEEP SCHEMA
             topic_name = f"{kafka_topic_prefix}.{schema}.{table}"
-            logger.info(f"   ✓ Oracle: {source_table} → {topic_name} (schema INCLUDED)")
+            logger.info(f"   ✔ Oracle: {source_table} → {topic_name} (schema: {schema})")
             
         else:
             # Generic fallback
             topic_name = f"{kafka_topic_prefix}.{db_config.database_name}.{source_table}"
-            logger.warning(f"   ⚠️ Unknown DB type, using generic: {topic_name}")
+            logger.warning(f"   ⚠️ Unknown DB type '{db_type}', using generic format: {topic_name}")
         
         topics.append(topic_name)
     

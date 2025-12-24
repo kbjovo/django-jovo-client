@@ -448,14 +448,37 @@ def get_oracle_connector_config(
     snapshot_mode: str = 'initial',
 ):
     """
-    ✅ FIXED: Oracle connector with PDB support
+    ✅ PRODUCTION: Oracle Debezium connector with proper CDB+PDB handling
+    
+    CRITICAL FIX:
+    - Connects to CDB root in JDBC URL
+    - Uses database.pdb.name to tell Debezium which PDB to query
+    - This ensures 2-part table names (SCHEMA.TABLE), not 3-part (PDB.SCHEMA.TABLE)
+    - Prevents NullPointerException in LogMiner
+    
+    Args:
+        client: Client instance
+        db_config: ClientDatabase instance
+        replication_config: ReplicationConfig instance (optional)
+        tables_whitelist: List of table names to replicate
+        kafka_bootstrap_servers: Kafka bootstrap servers
+        schema_registry_url: Schema registry URL
+        snapshot_mode: Debezium snapshot mode ('initial', 'when_needed', etc.)
+    
+    Returns:
+        dict: Debezium connector configuration
+    
+    Raises:
+        ValueError: If table validation fails or configuration is invalid
     """
     import logging
     import random
     
     logger = logging.getLogger(__name__)
     
-    # Generate connector name
+    # ====================================================================
+    # Generate connector name with version
+    # ====================================================================
     def generate_connector_name(client, db_config, version=None):
         client_name = client.name.lower().replace(' ', '_').replace('-', '_')
         client_name = ''.join(c for c in client_name if c.isalnum() or c == '_')
@@ -469,43 +492,80 @@ def get_oracle_connector_config(
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
     
-    # ============================================================================
-    # STEP 1: Handle PDB to CDB conversion
-    # ============================================================================
+    logger.info("=" * 80)
+    logger.info("🔧 ORACLE CONNECTOR CONFIGURATION")
+    logger.info("=" * 80)
+    logger.info(f"   Connector: {connector_name}")
+    
+    # ====================================================================
+    # STEP 1: Handle PDB detection and determine connection strategy
+    # ====================================================================
     database_name_from_config = db_config.database_name
     
     def is_oracle_pdb(database_name: str) -> bool:
+        """Check if database name indicates a Pluggable Database"""
         db_upper = database_name.upper()
         return 'PDB' in db_upper or db_upper.endswith('PDB1')
     
     def get_oracle_cdb_name(pdb_name: str) -> str:
+        """Convert PDB name to CDB root name"""
         pdb_upper = pdb_name.upper()
         if pdb_upper.endswith('PDB1'):
-            return pdb_upper[:-4]
+            return pdb_upper[:-4]  # Remove 'PDB1'
         elif pdb_upper.endswith('PDB'):
-            return pdb_upper[:-3]
+            return pdb_upper[:-3]  # Remove 'PDB'
         return pdb_name
     
     is_pdb = is_oracle_pdb(database_name_from_config)
     
     if is_pdb:
         cdb_name = get_oracle_cdb_name(database_name_from_config)
-        logger.warning("=" * 80)
-        logger.warning("🔄 AUTO-FIX: Detected Pluggable Database connection")
-        logger.warning(f"   Original config: {database_name_from_config} (PDB)")
-        logger.warning(f"   LogMiner requires: {cdb_name} (CDB root)")
-        logger.warning(f"   ✅ Will use database.pdb.name: {database_name_from_config}")
-        logger.warning("=" * 80)
-        connection_db = cdb_name
         pdb_name = database_name_from_config
+        
+        logger.warning("=" * 80)
+        logger.warning("✅ PDB DETECTED - Using CDB+PDB Strategy")
+        logger.warning("=" * 80)
+        logger.warning(f"   PDB Name: {pdb_name}")
+        logger.warning(f"   CDB Root: {cdb_name}")
+        logger.warning(f"   JDBC connects to: {cdb_name}")
+        logger.warning(f"   database.pdb.name: {pdb_name}")
+        logger.warning(f"   ✅ This prevents ORA-65040 error")
+        logger.warning("=" * 80)
+        
+        connection_db = cdb_name  # ✅ Connect to CDB root
+        
     else:
         logger.info(f"✅ Detected Container Database: {database_name_from_config}")
         connection_db = database_name_from_config
         pdb_name = None
     
-    # ============================================================================
+    is_pdb = is_oracle_pdb(database_name_from_config)
+    
+    # ✅ CRITICAL FIX: Always connect to CDB, use database.pdb.name for PDB
+    if is_pdb:
+        cdb_name = get_oracle_cdb_name(database_name_from_config)
+        pdb_name = database_name_from_config
+        
+        logger.warning("=" * 80)
+        logger.warning("✅ PDB DETECTED - Using CDB+PDB Strategy")
+        logger.warning("=" * 80)
+        logger.warning(f"   PDB Name: {pdb_name}")
+        logger.warning(f"   CDB Root: {cdb_name}")
+        logger.warning(f"   JDBC connects to: {cdb_name}")
+        logger.warning(f"   database.pdb.name: {pdb_name}")
+        logger.warning(f"   ✅ This ensures 2-part table names (SCHEMA.TABLE)")
+        logger.warning("=" * 80)
+        
+        connection_db = cdb_name  # ✅ Connect to CDB root
+        
+    else:
+        logger.info(f"✅ Detected Container Database: {database_name_from_config}")
+        connection_db = database_name_from_config
+        pdb_name = None
+    
+    # ====================================================================
     # STEP 2: Extract schema name (remove C## prefix if present)
-    # ============================================================================
+    # ====================================================================
     raw_username = db_config.username.upper()
     
     if raw_username.startswith('C##'):
@@ -517,38 +577,42 @@ def get_oracle_connector_config(
         logger.info(f"🔍 Local user detected: {raw_username}")
         logger.info(f"   Schema filter: {schema_name}")
     
+    # ====================================================================
+    # STEP 3: Build identifiers
+    # ====================================================================
     topic_prefix = f"client_{client.id}_db_{db_config.id}"
     server_name = connector_name.replace('_connector', '')
     
-    # ============================================================================
-    # STEP 3: Build JDBC URL
-    # ============================================================================
+    logger.info(f"📋 Configuration:")
+    logger.info(f"   Topic Prefix: {topic_prefix}")
+    logger.info(f"   Server Name: {server_name}")
+    
+    # ====================================================================
+    # STEP 4: Build JDBC URL to CDB
+    # ====================================================================
     oracle_mode = db_config.oracle_connection_mode or 'service'
     
     if oracle_mode == 'sid':
         jdbc_url = f"jdbc:oracle:thin:@{db_config.host}:{db_config.port}:{connection_db}"
-        logger.info(f"🔌 Connection: SID mode - {jdbc_url}")
     else:
         jdbc_url = f"jdbc:oracle:thin:@//{db_config.host}:{db_config.port}/{connection_db}"
-        logger.info(f"🔌 Connection: Service Name mode - {jdbc_url}")
     
-    # ============================================================================
-    # STEP 4: Build connector configuration
-    # ============================================================================
+    if pdb_name:
+        logger.info(f"   ✅ Will query PDB: {pdb_name} (via database.pdb.name)")
+    
+    # ====================================================================
+    # STEP 5: Build connector configuration
+    # ====================================================================
     config = {
         "connector.class": "io.debezium.connector.oracle.OracleConnector",
         
-        # Database connection
+        # Database connection to CDB
         "database.hostname": db_config.host,
         "database.port": str(db_config.port),
         "database.user": db_config.username,  # Keep C## prefix for connection
         "database.password": db_config.get_decrypted_password(),
         "database.dbname": connection_db,  # ✅ CDB name (e.g., XE)
         "database.url": jdbc_url,
-        
-        # ✅ CRITICAL FIX: Tell Debezium which PDB contains the tables
-        # This is THE missing piece that causes "capturing: []"
-        "database.pdb.name": pdb_name,  # e.g., XEPDB1 (or None if not PDB)
         
         # Server identification
         "database.server.name": server_name,
@@ -577,18 +641,19 @@ def get_oracle_connector_config(
         "log.mining.session.max.ms": "0",
         "log.mining.transaction.retention.hours": "0",
         "log.mining.query.filter.mode": "in",
-        "log.mining.flush.table.name": "LOG_MINING_FLUSH",
+        # "log.mining.flush.table.name": "LOG_MINING_FLUSH",
+        "log.mining.flush.table.name": f"{schema_name}.LOG_MINING_FLUSH",
         
-        # Incremental snapshots
+        # ✅ CRITICAL: Incremental snapshots configuration
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
         
-        # Kafka signals
-        "signal.enabled.channels": "kafka",
+        # ✅ CRITICAL: Signal configuration (BOTH channels required for Oracle)
+        "signal.enabled.channels": "source,kafka",  # Must have BOTH
         "signal.kafka.topic": f"{topic_prefix}.signals",
-        "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,        
+        "signal.data.collection": f"{schema_name}.DEBEZIUM_SIGNAL",
         
-        # ✅ CRITICAL: Schema filter (WITHOUT C## prefix)
         "schema.include.list": schema_name,  # e.g., "CDCUSER"
         
         # Data type handling
@@ -620,49 +685,82 @@ def get_oracle_connector_config(
         "errors.log.include.messages": "true",
     }
     
+    # ✅ CRITICAL: Add PDB name parameter if detected
+    if pdb_name:
+        config["database.pdb.name"] = pdb_name
+        logger.info(f"✅ Added database.pdb.name: {pdb_name}")
+    
     # Remove None values
     config = {k: v for k, v in config.items() if v is not None}
     
-    # ============================================================================
-    # STEP 5: Format table.include.list
-    # ============================================================================
+    # ====================================================================
+    # STEP 6: Format and VALIDATE table.include.list
+    # ====================================================================
     if tables_whitelist:
         formatted_tables = []
         
         for table in tables_whitelist:
             table_upper = table.upper()
             
+            logger.info(f"   Processing table: '{table}'")
+            
             if '.' not in table_upper:
                 # Add schema prefix
                 formatted_table = f"{schema_name}.{table_upper}"
+                logger.warning(f"      ⚠️ Added schema: {table} → {formatted_table}")
             else:
                 # Already has schema
                 parts = table_upper.split('.', 1)
-                table_schema = parts[0]
-                table_name = parts[1]
+                table_schema = parts[0].strip()
+                table_name = parts[1].strip()
                 
                 # Remove C## prefix if present
                 if table_schema.startswith('C##'):
                     table_schema = table_schema[3:]
+                    logger.info(f"      🔧 Removed C## prefix: C##{table_schema} → {table_schema}")
                 
                 formatted_table = f"{table_schema}.{table_name}"
+                logger.info(f"      ✅ Formatted: {formatted_table}")
             
             formatted_tables.append(formatted_table)
         
+        # ✅ CRITICAL VALIDATION
+        logger.info("=" * 80)
+        logger.info(f"🛡️ ORACLE TABLE VALIDATION")
+        logger.info("=" * 80)
+        
+        for i, table in enumerate(formatted_tables, 1):
+            if '.' not in table:
+                raise ValueError(
+                    f"❌ Table {i}: '{table}' is missing schema prefix!\n"
+                    f"   This will cause NullPointerException in LogMiner.\n"
+                    f"   Required format: SCHEMA.TABLE"
+                )
+            
+            parts = table.split('.', 1)
+            if not parts[0].strip():
+                raise ValueError(f"❌ Table {i}: '{table}' has empty schema (before dot)")
+            if not parts[1].strip():
+                raise ValueError(f"❌ Table {i}: '{table}' has empty table name (after dot)")
+        
+        logger.info(f"✅ All {len(formatted_tables)} tables validated successfully")
+        logger.info("=" * 80)
+        
         config["table.include.list"] = ",".join(formatted_tables)
         
+        logger.info(f"✅ Validation passed: All {len(formatted_tables)} tables are valid")
         logger.info("=" * 80)
-        logger.info(f"✅ TABLE FILTER CONFIGURED ({len(formatted_tables)} tables):")
+        logger.info(f"📋 TABLE FILTER CONFIGURED:")
         logger.info("=" * 80)
-        for table in formatted_tables:
+        for i, table in enumerate(formatted_tables, 1):
             # Extract table name for topic
             table_name_only = table.split('.')[1]
-            expected_topic = f"{topic_prefix}.{table_name_only}"
+            expected_topic = f"{topic_prefix}.{schema_name}.{table_name_only}"
             logger.info(f"   • {table}")
             logger.info(f"     → Kafka Topic: {expected_topic}")
         logger.info("=" * 80)
     
-    # Apply custom config
+    # Apply custom config from ReplicationConfig
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
@@ -670,11 +768,11 @@ def get_oracle_connector_config(
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
     
-    # ============================================================================
+    # ====================================================================
     # FINAL SUMMARY
-    # ============================================================================
+    # ====================================================================
     logger.info("=" * 80)
-    logger.info("ORACLE CONNECTOR CONFIGURATION SUMMARY")
+    logger.info("📊 ORACLE CONNECTOR CONFIGURATION SUMMARY")
     logger.info("=" * 80)
     logger.info(f"✅ Connector: {connector_name}")
     logger.info(f"✅ Connection DB (CDB): {connection_db}")
@@ -684,20 +782,310 @@ def get_oracle_connector_config(
     logger.info(f"✅ Username: {raw_username}")
     logger.info(f"✅ Schema filter: {schema_name}")
     logger.info(f"✅ Topic prefix: {topic_prefix}")
+    logger.info(f"✅ Signal table: {schema_name}.DEBEZIUM_SIGNAL")
+    logger.info(f"✅ Signal channels: source,kafka")
+    logger.info(f"✅ Snapshot mode: {config.get('snapshot.mode', 'initial')}")
     
     if tables_whitelist:
         logger.info(f"✅ Tables to replicate: {len(formatted_tables)}")
         if formatted_tables:
             logger.info(f"   Format example: {formatted_tables[0]}")
-        logger.info(f"   ⚠️  NOTE: Kafka topics will NOT include schema prefix")
+        logger.info(f"   ⚠️ NOTE: Kafka topics INCLUDE schema prefix for Oracle")
         if formatted_tables:
             example_table = formatted_tables[0].split('.')[1]
-            logger.info(f"   Example: {formatted_tables[0]} → Topic: {topic_prefix}.{example_table}")
+            logger.info(f"   Example: {formatted_tables[0]} → Topic: {topic_prefix}.{schema_name}.{example_table}")
     
     logger.info("=" * 80)
     
     return config
 
+
+def create_oracle_signal_table(db_config, schema_name=None):
+    """
+    Create DEBEZIUM_SIGNAL table in Oracle database for incremental snapshots.
+    
+    ✅ CRITICAL: Oracle incremental snapshots REQUIRE this table in the database.
+    This is non-negotiable due to LogMiner architecture.
+    
+    The signal table stores incremental snapshot state during execution.
+    Without it, you'll get: "sinalling data collection is not provided"
+    
+    Args:
+        db_config: ClientDatabase instance
+        schema_name: Schema name (optional, will auto-detect from username)
+    
+    Returns:
+        tuple: (success: bool, message: str)
+        
+    Example:
+        success, msg = create_oracle_signal_table(db_config)
+        if not success:
+            raise Exception(f"Signal table creation failed: {msg}")
+    """
+    import logging
+    from sqlalchemy import text
+    from client.utils.database_utils import get_database_engine
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Determine schema name
+        if not schema_name:
+            username = db_config.username.upper()
+            # Remove C## prefix if present (common user)
+            schema_name = username[3:] if username.startswith('C##') else username
+        
+        logger.info("=" * 80)
+        logger.info(f"🔧 ORACLE SIGNAL TABLE CHECK")
+        logger.info("=" * 80)
+        logger.info(f"   Database: {db_config.database_name}")
+        logger.info(f"   Schema: {schema_name}")
+        logger.info(f"   Table: DEBEZIUM_SIGNAL")
+        logger.info(f"   Purpose: Required for incremental snapshots")
+        
+        engine = get_database_engine(db_config)
+        
+        with engine.connect() as conn:
+            # ================================================================
+            # Check if table already exists
+            # ================================================================
+            check_query = text("""
+                SELECT COUNT(*) as cnt
+                FROM all_tables 
+                WHERE owner = :schema_name
+                  AND table_name = 'DEBEZIUM_SIGNAL'
+            """)
+            
+            result = conn.execute(check_query, {"schema_name": schema_name})
+            exists = result.scalar() > 0
+            
+            if exists:
+                logger.info(f"✅ Signal table already exists: {schema_name}.DEBEZIUM_SIGNAL")
+                
+                # Verify table structure
+                col_query = text("""
+                    SELECT column_name, data_type, data_length
+                    FROM all_tab_columns
+                    WHERE owner = :schema_name
+                      AND table_name = 'DEBEZIUM_SIGNAL'
+                    ORDER BY column_id
+                """)
+                
+                cols = conn.execute(col_query, {"schema_name": schema_name}).fetchall()
+                
+                logger.info(f"   Columns found:")
+                for col in cols:
+                    logger.info(f"      • {col[0]} ({col[1]})")
+                
+                # Verify we have the required columns
+                col_names = [c[0].upper() for c in cols]
+                required_cols = ['ID', 'TYPE', 'DATA']
+                missing_cols = [c for c in required_cols if c not in col_names]
+                
+                if missing_cols:
+                    logger.error(f"   ❌ Missing columns: {missing_cols}")
+                    return False, f"Signal table exists but missing columns: {missing_cols}"
+                
+                logger.info("=" * 80)
+                return True, f"Signal table verified: {schema_name}.DEBEZIUM_SIGNAL"
+            
+            # ================================================================
+            # Create signal table (doesn't exist)
+            # ================================================================
+            logger.info(f"🔨 Creating signal table...")
+            logger.info(f"   Location: {schema_name}.DEBEZIUM_SIGNAL")
+            
+            create_query = text(f"""
+                CREATE TABLE {schema_name}.DEBEZIUM_SIGNAL (
+                    id VARCHAR2(100) PRIMARY KEY,
+                    type VARCHAR2(100) NOT NULL,
+                    data CLOB
+                )
+            """)
+            
+            conn.execute(create_query)
+            conn.commit()
+            
+            logger.info(f"✅ Successfully created signal table!")
+            logger.info(f"   Table: {schema_name}.DEBEZIUM_SIGNAL")
+            logger.info(f"   Columns:")
+            logger.info(f"      • id (VARCHAR2(100), PRIMARY KEY)")
+            logger.info(f"      • type (VARCHAR2(100), NOT NULL)")
+            logger.info(f"      • data (CLOB)")
+            logger.info(f"   ")
+            logger.info(f"   This table will be used by Debezium to:")
+            logger.info(f"      1. Track incremental snapshot progress")
+            logger.info(f"      2. Store window boundaries during snapshot")
+            logger.info(f"      3. Coordinate with LogMiner for data extraction")
+            logger.info("=" * 80)
+            
+            return True, f"Created signal table: {schema_name}.DEBEZIUM_SIGNAL"
+        
+    except Exception as e:
+        error_msg = f"Failed to create Oracle signal table: {str(e)}"
+        logger.error("=" * 80)
+        logger.error(f"❌ ORACLE SIGNAL TABLE CREATION FAILED")
+        logger.error("=" * 80)
+        logger.error(f"   Error: {error_msg}")
+        logger.error(f"   ")
+        logger.error(f"   Possible causes:")
+        logger.error(f"      1. User lacks CREATE TABLE permission")
+        logger.error(f"      2. Insufficient tablespace quota")
+        logger.error(f"      3. Schema name incorrect")
+        logger.error(f"   ")
+        logger.error(f"   Required SQL permission:")
+        logger.error(f"      GRANT CREATE TABLE TO {schema_name};")
+        logger.error("=" * 80)
+        logger.error(error_msg, exc_info=True)
+        return False, error_msg
+    
+    finally:
+        if 'engine' in locals():
+            engine.dispose()
+
+
+def create_oracle_log_mining_flush_table(db_config, schema_name=None):
+    """
+    Create LOG_MINING_FLUSH table in Oracle database for LogMiner.
+    
+    This table is used by Debezium to manage LogMiner state.
+    
+    Args:
+        db_config: ClientDatabase instance
+        schema_name: Schema name (optional, will auto-detect from username)
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    import logging
+    from sqlalchemy import text
+    from client.utils.database_utils import get_database_engine
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Determine schema name
+        if not schema_name:
+            username = db_config.username.upper()
+            schema_name = username[3:] if username.startswith('C##') else username
+        
+        logger.info("=" * 80)
+        logger.info(f"🔧 ORACLE LOG_MINING_FLUSH TABLE CHECK")
+        logger.info("=" * 80)
+        logger.info(f"   Schema: {schema_name}")
+        logger.info(f"   Table: LOG_MINING_FLUSH")
+        
+        engine = get_database_engine(db_config)
+        
+        with engine.connect() as conn:
+            # Check if table exists
+            check_query = text("""
+                SELECT COUNT(*) as cnt
+                FROM all_tables 
+                WHERE owner = :schema_name
+                  AND table_name = 'LOG_MINING_FLUSH'
+            """)
+            
+            result = conn.execute(check_query, {"schema_name": schema_name})
+            exists = result.scalar() > 0
+            
+            if exists:
+                logger.info(f"✅ LOG_MINING_FLUSH table already exists")
+                logger.info("=" * 80)
+                return True, f"LOG_MINING_FLUSH table verified: {schema_name}.LOG_MINING_FLUSH"
+            
+            # Create the table
+            logger.info(f"🔨 Creating LOG_MINING_FLUSH table...")
+            
+            create_query = text(f"""
+                CREATE TABLE {schema_name}.LOG_MINING_FLUSH (
+                    id NUMBER(19) PRIMARY KEY
+                )
+            """)
+            
+            conn.execute(create_query)
+            conn.commit()
+            
+            logger.info(f"✅ Successfully created LOG_MINING_FLUSH table!")
+            logger.info("=" * 80)
+            
+            return True, f"Created LOG_MINING_FLUSH table: {schema_name}.LOG_MINING_FLUSH"
+        
+    except Exception as e:
+        error_msg = f"Failed to create LOG_MINING_FLUSH table: {str(e)}"
+        logger.error(f"❌ {error_msg}", exc_info=True)
+        return False, error_msg
+    
+    finally:
+        if 'engine' in locals():
+            engine.dispose()
+
+def verify_oracle_signal_table(db_config, schema_name=None):
+    """
+    Verify Oracle signal table exists and has correct structure.
+    
+    Use this before starting replication to ensure incremental snapshots will work.
+    
+    Args:
+        db_config: ClientDatabase instance
+        schema_name: Schema name (optional)
+        
+    Returns:
+        tuple: (is_valid: bool, message: str)
+    """
+    import logging
+    from sqlalchemy import text
+    from client.utils.database_utils import get_database_engine
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        if not schema_name:
+            username = db_config.username.upper()
+            schema_name = username[3:] if username.startswith('C##') else username
+        
+        engine = get_database_engine(db_config)
+        
+        with engine.connect() as conn:
+            # Check existence
+            check_query = text("""
+                SELECT COUNT(*) as cnt
+                FROM all_tables 
+                WHERE owner = :schema_name
+                  AND table_name = 'DEBEZIUM_SIGNAL'
+            """)
+            
+            result = conn.execute(check_query, {"schema_name": schema_name})
+            exists = result.scalar() > 0
+            
+            if not exists:
+                return False, f"Signal table does not exist: {schema_name}.DEBEZIUM_SIGNAL"
+            
+            # Check structure
+            col_query = text("""
+                SELECT column_name
+                FROM all_tab_columns
+                WHERE owner = :schema_name
+                  AND table_name = 'DEBEZIUM_SIGNAL'
+            """)
+            
+            cols = conn.execute(col_query, {"schema_name": schema_name}).fetchall()
+            col_names = [c[0].upper() for c in cols]
+            
+            required = ['ID', 'TYPE', 'DATA']
+            missing = [c for c in required if c not in col_names]
+            
+            if missing:
+                return False, f"Signal table missing columns: {missing}"
+            
+            return True, f"Signal table valid: {schema_name}.DEBEZIUM_SIGNAL"
+        
+    except Exception as e:
+        return False, f"Verification failed: {str(e)}"
+    
+    finally:
+        if 'engine' in locals():
+            engine.dispose()
 
 def get_connector_config_for_database(
     db_config: ClientDatabase,

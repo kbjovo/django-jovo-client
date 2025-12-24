@@ -260,6 +260,45 @@ class KafkaTopicManager:
         logger.info(f"Creating {len(topic_names)} CDC topics for {server_name}.{database}")
 
         return self.create_topics_bulk(topic_names)
+    
+
+    def create_topic(self, topic_name: str, num_partitions: int = None, replication_factor: int = None) -> Tuple[bool, Optional[str]]:
+        """
+        Create a single Kafka topic (convenience wrapper around create_topics_bulk)
+        
+        Args:
+            topic_name: Name of the topic to create
+            num_partitions: Number of partitions (uses default from config if None)
+            replication_factor: Replication factor (uses default from config if None)
+        
+        Returns:
+            Tuple[bool, Optional[str]]: (success, error_message)
+        """
+        try:
+            # Use defaults from config if not specified
+            if num_partitions is None:
+                num_partitions = self.config['PARTITIONS']
+            if replication_factor is None:
+                replication_factor = self.config['REPLICATION_FACTOR']
+            
+            logger.info(f"Creating single topic: {topic_name} (partitions={num_partitions}, replication={replication_factor})")
+            
+            # Use bulk creation method
+            result = self.create_topics_bulk([topic_name])
+            success = result.get(topic_name, False)
+            
+            if success:
+                logger.info(f"✅ Successfully created topic: {topic_name}")
+                return True, None
+            else:
+                error_msg = f"Failed to create topic: {topic_name}"
+                logger.error(f"❌ {error_msg}")
+                return False, error_msg
+                
+        except Exception as e:
+            error_msg = f"Error creating topic '{topic_name}': {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return False, error_msg
 
     def create_signal_topic(self, topic_prefix: str) -> Tuple[bool, Optional[str]]:
         """
