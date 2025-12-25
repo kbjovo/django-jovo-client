@@ -1,16 +1,21 @@
 """
 Kafka Signal Sender for Debezium Incremental Snapshots
 
-Sends control signals to Debezium connectors via Kafka topics.
+Sends control signals to Debezium connectors via Kafka topics or database signal tables.
 Supports incremental snapshots for MySQL, PostgreSQL, and SQL Server.
+
+For SQL Server, supports dual-channel signaling:
+1. Kafka topic (standard approach)
+2. Database signal table (more reliable for MS SQL)
 """
 
 import json
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from confluent_kafka import Producer
 import uuid
 from datetime import datetime
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +140,87 @@ class KafkaSignalSender:
             logger.error(f"❌ {error_msg}", exc_info=True)
             return False, error_msg
     
+    def send_incremental_snapshot_signal_via_db(
+        self,
+        engine,
+        database_name: str,
+        table_names: List[str],
+        schema_name: str = 'dbo',
+        signal_table: str = 'dbo.debezium_signal'
+    ) -> Tuple[bool, str]:
+        """
+        Send incremental snapshot signal via SQL Server signal table.
+
+        This is the RECOMMENDED approach for MS SQL Server as it's more reliable
+        than Kafka topic signals. Debezium monitors both channels, but database
+        signals are processed more consistently for SQL Server.
+
+        Args:
+            engine: SQLAlchemy engine for the source database
+            database_name: Source database name
+            table_names: List of table names to snapshot
+            schema_name: Schema name (default: 'dbo')
+            signal_table: Signal table name (default: 'dbo.debezium_signal')
+
+        Returns:
+            Tuple[bool, str]: (success, message)
+        """
+        try:
+            signal_id = str(uuid.uuid4())
+
+            # Build table identifiers for MS SQL: database.schema.table
+            table_identifiers = []
+            for table in table_names:
+                parts = table.split('.')
+                if len(parts) == 3:
+                    # Already full path
+                    identifier = table
+                elif len(parts) == 2:
+                    # schema.table format
+                    identifier = f"{database_name}.{table}"
+                else:
+                    # Just table name
+                    identifier = f"{database_name}.{schema_name}.{table}"
+                table_identifiers.append(identifier)
+
+            # Build signal data JSON
+            signal_data = {
+                "data-collections": table_identifiers,
+                "type": "INCREMENTAL"
+            }
+
+            signal_data_json = json.dumps(signal_data)
+
+            logger.info(f"📡 Sending incremental snapshot signal via DATABASE:")
+            logger.info(f"   Database: {database_name} (SQLSERVER)")
+            logger.info(f"   Signal Table: {signal_table}")
+            logger.info(f"   Identifiers: {table_identifiers}")
+
+            # Insert signal into database signal table
+            with engine.connect() as conn:
+                sql = text(f"""
+                    INSERT INTO {signal_table} (id, type, data)
+                    VALUES (:signal_id, 'execute-snapshot', :signal_data)
+                """)
+
+                conn.execute(sql, {
+                    'signal_id': signal_id,
+                    'signal_data': signal_data_json
+                })
+                conn.commit()
+
+            logger.info(f"✅ Incremental snapshot signal sent successfully!")
+            logger.info(f"   Signal ID: {signal_id}")
+            logger.info(f"   Tables: {', '.join(table_identifiers)}")
+            logger.info(f"   Method: DATABASE TABLE (recommended for MS SQL)")
+
+            return True, f"Incremental snapshot initiated for {len(table_names)} table(s) via database signal"
+
+        except Exception as e:
+            error_msg = f"Failed to send incremental snapshot signal via database: {str(e)}"
+            logger.error(f"❌ {error_msg}", exc_info=True)
+            return False, error_msg
+
     def _build_table_identifiers(
         self,
         database_name: str,
@@ -179,23 +265,27 @@ class KafkaSignalSender:
                     identifier = f"{schema}.{table}"
             
             elif db_type.lower() in ['sqlserver', 'mssql']:
-                # SQL Server format: database.schema.table
+                # ✅ SQL Server format: database.schema.table (3-part!)
+                # CRITICAL: Must match Debezium's internal schema registry format
+                # Even though table.include.list uses "dbo.Products" (2-part),
+                # Debezium's internal schema stores "AppDB.dbo.Products" (3-part)
+                # Signal payload MUST use 3-part format for schema lookup to succeed
+                #
                 # Input might be:
-                # - 'AppDB.dbo.Orders' (full path)
-                # - 'dbo.Orders' (schema.table)
-                # - 'Orders' (just table)
-                
+                # - 'AppDB.dbo.Orders' (full path) → use as-is
+                # - 'dbo.Orders' (schema.table) → add database prefix
+                # - 'Orders' (just table) → add database and schema prefix
+
                 parts = table.split('.')
-                
+
                 if len(parts) == 3:
-                    # Already full path: database.schema.table
+                    # Already full path: database.schema.table - perfect!
                     identifier = table
                 elif len(parts) == 2:
-                    # schema.table format
-                    schema, table_name = parts
-                    identifier = f"{database_name}.{schema}.{table_name}"
+                    # schema.table format → add database prefix
+                    identifier = f"{database_name}.{table}"
                 else:
-                    # Just table name
+                    # Just table name → add database and schema prefix
                     schema = schema_name or 'dbo'
                     identifier = f"{database_name}.{schema}.{table}"
             

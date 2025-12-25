@@ -232,7 +232,6 @@ def get_postgresql_connector_config(
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
         
-        # ✅ CRITICAL: Change default snapshot mode to support incremental snapshots
         "snapshot.mode": "when_needed",  # NOT "initial"
         "snapshot.locking.mode": "none",
         
@@ -325,14 +324,7 @@ def get_sqlserver_connector_config(
     # ✅ CRITICAL FIX: Use different values for server name and topic prefix
     server_name = f"sqlserver_{client.id}_{db_config.id}"
     topic_prefix = f"client_{client.id}_db_{db_config.id}"
-
-    logger.info(f"🔧 SQL Server connector configuration:")
-    logger.info(f"   Connector name: {connector_name}")
-    logger.info(f"   Server name (internal): {server_name}")
-    logger.info(f"   Topic prefix (Kafka): {topic_prefix}")
-    logger.info(f"   Database name: {db_config.database_name}")
-    logger.warning(f"   ⚠️  IMPORTANT: Database name is CASE-SENSITIVE!")
-    logger.info(f"   Expected topic format: {topic_prefix}.{db_config.database_name}.{schema_name}.{{table}}")
+    signal_table_full = f"{db_config.database_name}.dbo.debezium_signal"
 
     config = {
         "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
@@ -363,9 +355,10 @@ def get_sqlserver_connector_config(
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": "1024",
 
-        # ✅ CRITICAL: Watermarking strategy for incremental snapshots
-        # SQL Server requires 'insert_insert' with a signal table
-        "incremental.snapshot.watermarking.strategy": "insert_insert",
+        # ✅ FIXED: Watermarking strategy for incremental snapshots
+        # Use 'insert_delete' instead of 'insert_insert' to avoid database context issues
+        # 'insert_delete' doesn't require fully qualified table names
+        "incremental.snapshot.watermarking.strategy": "insert_delete",
 
         # ✅ CRITICAL: Signal configuration for SQL Server
         # SQL Server incremental snapshots require BOTH Kafka signals AND a database signal table
@@ -373,8 +366,10 @@ def get_sqlserver_connector_config(
         "signal.kafka.topic": f"{topic_prefix}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         
-        # ✅ NEW: Add signal table (required for SQL Server incremental snapshots)
-        "signal.data.collection": f"{db_config.database_name}.dbo.debezium_signal",
+        # ✅ CRITICAL: Signal table must include database name for watermarking queries
+        # For SQL Server incremental snapshots, the signal table requires full three-part name
+        # Format: database.schema.table (e.g., "AppDB.dbo.debezium_signal")
+        "signal.data.collection": signal_table_full,
 
         # Disable encryption (for local development)
         "database.encrypt": "false",
@@ -413,8 +408,15 @@ def get_sqlserver_connector_config(
                 # No schema: 'Customers' - add schema prefix
                 tables_full.append(f"{schema_name}.{table}")
 
+        # ✅ CRITICAL FIX: Add signal table to table.include.list
+        # This is required for incremental snapshots via Kafka signals
+        signal_table = f"{schema_name}.debezium_signal"
+        if signal_table not in tables_full:
+            tables_full.append(signal_table)
+            logger.info(f"✅ Added signal table for incremental snapshots: {signal_table}")
+
         config["table.include.list"] = ",".join(tables_full)
-        
+
         logger.info(f"✅ Table filter configured:")
         for table in tables_full:
             logger.info(f"   - {table}")
@@ -450,11 +452,6 @@ def get_oracle_connector_config(
     """
     ✅ FIXED: Oracle connector with PDB support
     """
-    import logging
-    import random
-    
-    logger = logging.getLogger(__name__)
-    
     # Generate connector name
     def generate_connector_name(client, db_config, version=None):
         client_name = client.name.lower().replace(' ', '_').replace('-', '_')

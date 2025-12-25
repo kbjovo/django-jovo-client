@@ -271,14 +271,15 @@ def format_table_for_connector(db_config: ClientDatabase, table_name: str, schem
     db_type = db_config.db_type.lower()
     
     if db_type == 'mssql':
-        # SQL Server: database.schema.table
+        # SQL Server: schema.table (database name is specified in database.names config)
+        # CRITICAL: Do NOT include database name in table.include.list for SQL Server
         if '.' in table_name:
             schema, table = table_name.rsplit('.', 1)
         else:
             schema = schema_name or 'dbo'
             table = table_name
-        
-        formatted = f"{db_config.database_name}.{schema}.{table}"
+
+        formatted = f"{schema}.{table}"
         
     elif db_type == 'postgresql':
         # PostgreSQL: schema.table
@@ -2207,6 +2208,439 @@ def manage_postgresql_publication(db_config, replication_config, table_names):
         return False, error_msg
 
 
+
+def create_sqlserver_signal_table(db_config):
+    """
+    Create the debezium_signal table in SQL Server if it doesn't exist.
+
+    Returns:
+        tuple: (success, message)
+    """
+    try:
+        from client.utils.database_utils import get_database_engine
+        from sqlalchemy import text
+
+        engine = get_database_engine(db_config)
+
+        with engine.connect() as conn:
+            # Check if signal table exists
+            check_sql = text("""
+                SELECT COUNT(*) as count
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = 'dbo'
+                AND TABLE_NAME = 'debezium_signal'
+            """)
+
+            result = conn.execute(check_sql)
+            row = result.fetchone()
+            table_exists = row[0] > 0
+
+            if table_exists:
+                logger.info("✅ Signal table already exists: dbo.debezium_signal")
+                engine.dispose()
+                return True, "Signal table exists"
+
+            # Create signal table
+            logger.info("📋 Creating signal table: dbo.debezium_signal")
+
+            create_sql = text("""
+                CREATE TABLE dbo.debezium_signal (
+                    id VARCHAR(42) PRIMARY KEY,
+                    type VARCHAR(32) NOT NULL,
+                    data VARCHAR(2048)
+                )
+            """)
+
+            conn.execute(create_sql)
+            conn.commit()
+
+            logger.info("✅ Signal table created successfully!")
+
+        engine.dispose()
+        return True, "Signal table created"
+
+    except Exception as e:
+        error_msg = f"Failed to create signal table: {str(e)}"
+        logger.error(f"❌ {error_msg}", exc_info=True)
+        return False, error_msg
+
+
+# def handle_sqlserver_new_tables_via_signal(manager, replication_config, db_config, newly_added_tables):
+#     """
+#     DEPRECATED: Handle SQL Server incremental snapshot via Kafka signals.
+
+#     ⚠️ WARNING: This method is DEPRECATED and has known issues with table name formatting.
+#     Use handle_sqlserver_new_tables_via_recovery_snapshot() instead.
+
+#     KNOWN ISSUES:
+#     - Table name format mismatch between connector config (dbo.table) and signal payload (database.dbo.table)
+#     - Debezium ignores signals due to table identifier mismatch
+
+#     REPLACEMENT:
+#     Use recovery snapshot method (snapshot.mode=recovery) which is:
+#     - More reliable and officially recommended by Debezium
+#     - Doesn't require signal tables or Kafka topics
+#     - Automatically snapshots tables without offsets
+
+#     REQUIREMENTS (if still using):
+#     1. Signal table must exist: debezium_signal (in dbo schema)
+#     2. User must have INSERT permission on signal table
+#     3. Signal table must be in connector's table.include.list
+
+#     Returns:
+#         tuple: (success, message)
+#     """
+#     logger.warning("⚠️ DEPRECATION WARNING: handle_sqlserver_new_tables_via_signal() is deprecated!")
+#     logger.warning("⚠️ Use handle_sqlserver_new_tables_via_recovery_snapshot() instead for reliable operation.")
+
+#     try:
+#         logger.info("=" * 80)
+#         logger.info("📋 SQL SERVER INCREMENTAL SNAPSHOT VIA KAFKA SIGNAL")
+#         logger.info("=" * 80)
+#         logger.info(f"Tables to snapshot: {newly_added_tables}")
+
+#         # ✅ Step 1: Ensure signal table exists
+#         logger.info("\n🔧 Step 1: Ensuring signal table exists...")
+#         signal_success, signal_msg = create_sqlserver_signal_table(db_config)
+
+#         if not signal_success:
+#             logger.warning(f"⚠️ Signal table creation failed: {signal_msg}")
+#             logger.warning("   Continuing anyway - table might already exist with different permissions")
+
+#         # Prepare parameters
+#         client_id = db_config.client.id
+#         db_id = db_config.id
+#         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client_id}_db_{db_id}"
+#         database_name = db_config.database_name
+
+#         logger.info(f"\n🔧 Step 2: Preparing signal parameters...")
+#         logger.info(f"   Topic prefix: {topic_prefix}")
+#         logger.info(f"   Database: {database_name}")
+        
+#         # Format table identifiers: database.schema.table
+#         logger.info(f"\n🔧 Step 3: Formatting table identifiers...")
+#         formatted_tables = []
+#         for table in newly_added_tables:
+#             if '.' in table:
+#                 schema, table_name = table.rsplit('.', 1)
+#                 full_identifier = f"{database_name}.{schema}.{table_name}"
+#             else:
+#                 full_identifier = f"{database_name}.dbo.{table}"
+
+#             formatted_tables.append(full_identifier)
+#             logger.info(f"   • {table} → {full_identifier}")
+
+#         # ✅ FIX: Use DATABASE TABLE signal for SQL Server (more reliable)
+#         # Reason: Database table signals are more reliable for SQL Server than Kafka topic signals
+#         # Debezium monitors both channels, but database signals are processed more consistently
+#         logger.info(f"\n🔧 Step 4: Sending incremental snapshot signal via DATABASE TABLE...")
+#         logger.info(f"   Signal table: {database_name}.dbo.debezium_signal")
+#         logger.info(f"   Reason: Database table signals are recommended for MS SQL Server")
+
+#         from client.utils.kafka_signal_sender import KafkaSignalSender
+
+#         # Get source database engine for inserting signal
+#         source_engine = get_database_engine(db_config)
+
+#         signal_sender = KafkaSignalSender()
+
+#         # Use database table method (recommended for SQL Server)
+#         success, message = signal_sender.send_incremental_snapshot_signal_via_db(
+#             engine=source_engine,
+#             database_name=database_name,
+#             table_names=newly_added_tables,
+#             schema_name='dbo',
+#             signal_table='dbo.debezium_signal'
+#         )
+
+#         signal_sender.close()
+
+#         if success:
+#             logger.info("=" * 80)
+#             logger.info("✅ DATABASE TABLE SIGNAL SENT SUCCESSFULLY")
+#             logger.info("=" * 80)
+#             logger.info(f"Tables queued for snapshot: {len(formatted_tables)}")
+#             for identifier in formatted_tables:
+#                 logger.info(f"   • {identifier}")
+#             logger.info("\n⏳ Debezium will snapshot these tables in the background")
+#             logger.info(f"   Signal inserted into: {database_name}.dbo.debezium_signal")
+#             logger.info("=" * 80)
+
+#             return True, f"Incremental snapshot initiated for {len(newly_added_tables)} table(s)"
+#         else:
+#             logger.error("=" * 80)
+#             logger.error("❌ DATABASE TABLE SIGNAL FAILED")
+#             logger.error("=" * 80)
+#             logger.error(f"Error: {message}")
+#             logger.error("\nPossible causes:")
+#             logger.error("   1. Signal table doesn't exist (dbo.debezium_signal)")
+#             logger.error("   2. Database connection failed")
+#             logger.error("   3. Insufficient permissions to insert into signal table")
+#             logger.error("\nTo fix:")
+#             logger.error("   1. Verify signal table exists in source database")
+#             logger.error("   2. Check database connectivity")
+#             logger.error("   3. Ensure user has INSERT permission on signal table")
+#             logger.error("=" * 80)
+
+#             return False, f"Kafka signal failed: {message}"
+    
+#     except Exception as e:
+#         error_msg = f"Failed to send Kafka signal: {str(e)}"
+#         logger.error(f"❌ {error_msg}", exc_info=True)
+#         return False, error_msg
+
+
+def handle_sqlserver_new_tables_via_recovery_snapshot(manager, replication_config, db_config, newly_added_tables):
+    """
+    Handle SQL Server new tables using snapshot.mode=recovery (PRODUCTION RECOMMENDED)
+
+    This is Debezium's official approach for adding tables to an existing connector.
+    It snapshots ONLY new tables that have no offset data.
+
+    Process:
+    1. Update connector config with snapshot.mode=recovery
+    2. Restart connector
+    3. Debezium snapshots ONLY tables without offsets (new tables)
+    4. Revert to snapshot.mode=when_needed after completion
+
+    REQUIREMENTS:
+    1. New tables must be in table.include.list
+    2. New tables must have CDC enabled
+    3. New tables must have a primary key
+
+    Returns:
+        tuple: (success, message)
+    """
+    try:
+        logger.info("=" * 80)
+        logger.info("📋 SQL SERVER NEW TABLES - RECOVERY SNAPSHOT (PRODUCTION METHOD)")
+        logger.info("=" * 80)
+        logger.info(f"Tables to snapshot: {newly_added_tables}")
+
+        connector_name = replication_config.connector_name
+
+        # Step 1: Get current connector config
+        logger.info("\n🔧 Step 1: Getting current connector configuration...")
+        current_config = manager.get_connector_config(connector_name)
+
+        if not current_config:
+            return False, f"Failed to get connector config for {connector_name}"
+
+        current_snapshot_mode = current_config.get('snapshot.mode', 'when_needed')
+        logger.info(f"   Current snapshot.mode: {current_snapshot_mode}")
+
+        # Step 2: Update to recovery mode
+        logger.info("\n🔧 Step 2: Updating connector to recovery mode...")
+        updated_config = current_config.copy()
+        updated_config['snapshot.mode'] = 'recovery'
+
+        logger.info("   Setting snapshot.mode=recovery")
+        logger.info("   This will snapshot ONLY tables without offset data")
+
+        success = manager.update_connector_config(connector_name, updated_config)
+
+        if not success:
+            return False, "Failed to update connector config to recovery mode"
+
+        logger.info("✅ Connector updated to recovery mode")
+
+        # Step 3: Restart connector to trigger recovery snapshot
+        logger.info("\n🔧 Step 3: Restarting connector to trigger snapshot...")
+
+        restart_success = manager.restart_connector(connector_name)
+
+        if not restart_success:
+            logger.warning("⚠️ Connector restart failed, but may still work")
+        else:
+            logger.info("✅ Connector restarted successfully")
+
+        logger.info("\n⏳ Connector will now:")
+        logger.info("   1. Resume from last CDC position for existing tables (Customers)")
+        logger.info("   2. Take INITIAL SNAPSHOT of new tables (Products)")
+        logger.info("   3. Merge both streams into Kafka topics")
+
+        logger.info("\n📊 Expected behavior:")
+        for table in newly_added_tables:
+            logger.info(f"   • {table}: Full snapshot of all existing rows")
+
+        logger.info("\n" + "=" * 80)
+        logger.info("✅ RECOVERY SNAPSHOT INITIATED")
+        logger.info("=" * 80)
+        logger.info("\nIMPORTANT:")
+        logger.info("   • Monitor connector logs for snapshot progress")
+        logger.info("   • After snapshot completes, optionally revert to snapshot.mode=when_needed")
+        logger.info("   • You can check progress via connector status API")
+        logger.info("\n⚠️ KNOWN LIMITATION:")
+        logger.info("   • Recovery snapshot may only capture SCHEMA, not DATA")
+        logger.info("   • If data is missing, use incremental snapshot signal as fallback")
+        logger.info("=" * 80)
+
+        return True, f"Recovery snapshot initiated for {len(newly_added_tables)} table(s). Monitor logs for completion."
+
+    except Exception as e:
+        error_msg = f"Failed to initiate recovery snapshot: {str(e)}"
+        logger.error(f"❌ {error_msg}", exc_info=True)
+        return False, error_msg
+
+
+def trigger_incremental_snapshot_for_mssql(replication_config, db_config, table_names):
+    """
+    Trigger incremental snapshot for MS SQL tables using Kafka signals.
+
+    ✅ FIXED: Uses correct 2-part table format (schema.table) to match connector config
+
+    This is a fallback method when recovery snapshot fails to snapshot data.
+    Common scenario: Recovery mode only snapshots schema when connector has existing offsets.
+
+    Args:
+        replication_config: ReplicationConfig instance
+        db_config: ClientDatabase instance
+        table_names: List of table names (e.g., ['dbo.Products'])
+
+    Returns:
+        tuple: (success, message)
+    """
+    try:
+        logger.info("=" * 80)
+        logger.info("📡 MS SQL INCREMENTAL SNAPSHOT VIA DATABASE TABLE (RECOMMENDED METHOD)")
+        logger.info("=" * 80)
+        logger.info(f"Tables to snapshot: {table_names}")
+
+        from client.utils.kafka_signal_sender import KafkaSignalSender
+
+        client = db_config.client
+        topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+
+        logger.info(f"Topic prefix: {topic_prefix}")
+        logger.info(f"Database: {db_config.database_name}")
+        logger.info(f"Signal table: {db_config.database_name}.dbo.debezium_signal")
+
+        # Get source database engine for inserting signal
+        source_engine = get_database_engine(db_config)
+
+        # Initialize signal sender
+        signal_sender = KafkaSignalSender(bootstrap_servers='kafka:29092')
+
+        # ✅ CRITICAL FIX: Use DATABASE TABLE method for SQL Server (more reliable)
+        # Database table signals are processed more consistently than Kafka topic signals for SQL Server
+        success, message = signal_sender.send_incremental_snapshot_signal_via_db(
+            engine=source_engine,
+            database_name=db_config.database_name,
+            table_names=table_names,  # Already in dbo.Products format
+            schema_name='dbo',
+            signal_table='dbo.debezium_signal'
+        )
+
+        signal_sender.close()
+
+        if success:
+            logger.info("=" * 80)
+            logger.info("✅ INCREMENTAL SNAPSHOT SIGNAL SENT VIA DATABASE TABLE!")
+            logger.info("=" * 80)
+            logger.info("Monitor connector logs:")
+            logger.info("  docker logs kafka-connect 2>&1 | grep -i 'snapshot'")
+            logger.info("")
+            logger.info("Check Kafka topic for data:")
+            for table in table_names:
+                topic = f"{topic_prefix}.{db_config.database_name}.{table}"
+                logger.info(f"  Topic: {topic}")
+            logger.info("")
+            logger.info("Check signal table:")
+            logger.info(f"  SELECT * FROM {db_config.database_name}.dbo.debezium_signal ORDER BY id DESC")
+            logger.info("=" * 80)
+            return True, message
+        else:
+            return False, message
+
+    except Exception as e:
+        error_msg = f"Failed to send incremental snapshot signal: {str(e)}"
+        logger.error(f"❌ {error_msg}", exc_info=True)
+        return False, error_msg
+
+
+def revert_snapshot_mode_after_recovery(manager, connector_name, original_mode='when_needed'):
+    """
+    Revert snapshot mode back to original after recovery snapshot completes.
+
+    Call this after confirming the recovery snapshot has completed.
+
+    Args:
+        manager: KafkaConnectManager instance
+        connector_name: Name of the connector
+        original_mode: Mode to revert to (default: when_needed)
+
+    Returns:
+        tuple: (success, message)
+    """
+    try:
+        logger.info("=" * 80)
+        logger.info("🔄 REVERTING SNAPSHOT MODE")
+        logger.info("=" * 80)
+
+        current_config = manager.get_connector_config(connector_name)
+
+        if not current_config:
+            return False, f"Failed to get connector config for {connector_name}"
+
+        current_mode = current_config.get('snapshot.mode', 'unknown')
+        logger.info(f"Current mode: {current_mode}")
+        logger.info(f"Reverting to: {original_mode}")
+
+        updated_config = current_config.copy()
+        updated_config['snapshot.mode'] = original_mode
+
+        success = manager.update_connector_config(connector_name, updated_config)
+
+        if success:
+            logger.info("✅ Snapshot mode reverted successfully")
+            logger.info(f"   {current_mode} → {original_mode}")
+            logger.info("=" * 80)
+            return True, f"Snapshot mode reverted to {original_mode}"
+        else:
+            return False, "Failed to update connector config"
+
+    except Exception as e:
+        error_msg = f"Failed to revert snapshot mode: {str(e)}"
+        logger.error(f"❌ {error_msg}", exc_info=True)
+        return False, error_msg
+
+
+def ensure_signal_table_in_config(current_config, db_config, db_type):
+    """
+    Ensure signal table is included in connector's table.include.list
+    """
+    if db_type.lower() != 'mssql':
+        return current_config
+    
+    try:
+        table_include_list = current_config.get('table.include.list', '')
+        
+        if not table_include_list:
+            logger.warning("⚠️ No table.include.list found")
+            return current_config
+        
+        tables = [t.strip() for t in table_include_list.split(',')]
+        signal_table = 'dbo.debezium_signal'
+        
+        if signal_table not in tables:
+            logger.info(f"➕ Adding signal table: {signal_table}")
+            tables.append(signal_table)
+            current_config['table.include.list'] = ','.join(tables)
+            
+            logger.info("✅ Updated table.include.list:")
+            for table in tables:
+                logger.info(f"   • {table}")
+        else:
+            logger.info(f"✅ Signal table already in config")
+        
+        return current_config
+    
+    except Exception as e:
+        logger.error(f"❌ Failed to update config: {e}")
+        return current_config
+
+
+
 @require_http_methods(["GET", "POST"])
 def cdc_edit_config(request, config_pk):
     """
@@ -2290,7 +2724,7 @@ def cdc_edit_config(request, config_pk):
                                 )
                         except Exception as e:
                             logger.error(f"Failed to create column mappings: {e}")
-
+    
                 # CREATE TARGET TABLES
                 if newly_added_tables and replication_config.auto_create_tables:
                     try:
@@ -2446,17 +2880,28 @@ def cdc_edit_config(request, config_pk):
                                             schema_name = 'public'
                                             tables_full = [f"{schema_name}.{t.split('.')[-1]}" for t in tables_list]
                                         elif db_type == 'mssql':
-                                            # SQL Server: database.schema.table (e.g., 'AppDB.dbo.Customers')
-                                            tables_full = [f"{db_config.database_name}.{t}" for t in tables_list]
+                                            # SQL Server: schema.table ONLY (e.g., 'dbo.Customers')
+                                            # Database name is in database.names config, NOT in table.include.list
+                                            tables_full = tables_list  # Use as-is (already formatted as dbo.table)
+
+                                            # ✅ CRITICAL: Add signal table for incremental snapshots
+                                            # MSSQL uses signal.enabled.channels="source,kafka"
+                                            # The "source" channel requires dbo.debezium_signal to be monitored
+                                            signal_table = 'dbo.debezium_signal'
+                                            if signal_table not in tables_full:
+                                                tables_full.append(signal_table)
+                                                logger.info(f"✅ Added signal table for incremental snapshots: {signal_table}")
                                         else:
                                             # MySQL: database.table (e.g., 'mydb.users')
                                             tables_full = [f"{db_config.database_name}.{t}" for t in tables_list]
-                                        
+
                                         current_config['table.include.list'] = ','.join(tables_full)
 
                                         # Change snapshot mode for new tables
+                                        # ✅ For MSSQL, don't change to 'when_needed' - handle_sqlserver_new_tables_via_recovery_snapshot will set 'recovery'
                                         if newly_added_tables and current_config.get('snapshot.mode') == 'initial':
-                                            current_config['snapshot.mode'] = 'when_needed'
+                                            if db_type != 'mssql':
+                                                current_config['snapshot.mode'] = 'when_needed'
 
                                         # Update connector config
                                         update_success, update_error = manager.update_connector_config(
@@ -2484,29 +2929,82 @@ def cdc_edit_config(request, config_pk):
                                         # ✅ FIX: Handle snapshots based on database type
                                         # ================================================================
                                         if newly_added_tables:
+                                            logger.info(f"🔍 DEBUG: db_type = '{db_type}', newly_added_tables = {newly_added_tables}")
                                             if db_type == 'mssql':
-                                                # SQL Server: Kafka signals DON'T work for read-only DBs
-                                                # Solution: Restart connector (already done above)
-                                                logger.info(f"✅ SQL Server: {len(newly_added_tables)} table(s) added!")
-                                                logger.info(f"   Snapshot will occur via connector restart")
-                                                messages.success(
-                                                    request,
-                                                    f'✅ {len(newly_added_tables)} table(s) added! '
-                                                    f'Snapshot in progress (connector restart).'
-                                                )
+                                                # ✅ SQL Server: Use recovery snapshot (production recommended)
+                                                logger.info(f"🔧 SQL Server: Processing {len(newly_added_tables)} new table(s)...")
+
+                                                try:
+                                                    # Use recovery snapshot instead of signals for reliable production use
+                                                    success, message = handle_sqlserver_new_tables_via_recovery_snapshot(
+                                                        manager=manager,
+                                                        replication_config=replication_config,
+                                                        db_config=db_config,
+                                                        newly_added_tables=newly_added_tables
+                                                    )
+
+                                                    if success:
+                                                        messages.success(request, f'✅ {message}')
+
+                                                        # ✅ CRITICAL: Auto-trigger incremental snapshot as fallback
+                                                        # Recovery snapshot often only captures schema, not data
+                                                        # Send incremental snapshot signal to ensure data is captured
+                                                        logger.info("\n🔄 Auto-triggering incremental snapshot as fallback...")
+                                                        time.sleep(5)  # Wait for recovery snapshot to complete schema phase
+
+                                                        try:
+                                                            fallback_success, fallback_msg = trigger_incremental_snapshot_for_mssql(
+                                                                replication_config=replication_config,
+                                                                db_config=db_config,
+                                                                table_names=newly_added_tables
+                                                            )
+
+                                                            if fallback_success:
+                                                                messages.success(
+                                                                    request,
+                                                                    '✅ Incremental snapshot signal sent as fallback to ensure data is captured.'
+                                                                )
+                                                                messages.info(
+                                                                    request,
+                                                                    'Monitor connector logs and verify data appears in Kafka topics. '
+                                                                    'This two-step approach ensures both schema and data are captured.'
+                                                                )
+                                                            else:
+                                                                messages.warning(
+                                                                    request,
+                                                                    f'⚠️ Fallback snapshot signal failed: {fallback_msg}. '
+                                                                    'You may need to manually trigger snapshot.'
+                                                                )
+                                                        except Exception as e:
+                                                            logger.error(f"Fallback snapshot failed: {e}")
+                                                            messages.warning(request, f'Fallback snapshot failed: {str(e)}')
+                                                    else:
+                                                        messages.error(request, f'❌ {message}')
+                                                        messages.warning(
+                                                            request,
+                                                            'Recovery snapshot failed. Check connector status and logs. '
+                                                            'Ensure new tables have CDC enabled and primary keys.'
+                                                        )
+                                                
+                                                except Exception as e:
+                                                    logger.error(f"❌ Error: {e}", exc_info=True)
+                                                    messages.error(request, f'Failed to initiate snapshot: {str(e)}')
                                             else:
                                                 # MySQL/PostgreSQL: Use Kafka signals
+                                                # NOTE: MSSQL uses recovery snapshot method (handled above)
                                                 logger.info(f"📡 Sending incremental snapshot signal...")
-                                                
+                                                logger.info(f"🔍 DEBUG: db_type = '{db_type}', newly_added_tables = {newly_added_tables}")
+
                                                 try:
                                                     from client.utils.kafka_signal_sender import KafkaSignalSender
+
                                                     topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
-                                                    
+
                                                     signal_sender = KafkaSignalSender()
-                                                    
+
                                                     # Strip schema for signal payload
                                                     tables_for_signal = [t.split('.')[-1] for t in newly_added_tables]
-                                                    
+
                                                     if db_type == 'postgresql':
                                                         success, message = signal_sender.send_incremental_snapshot_signal(
                                                             topic_prefix=topic_prefix,
@@ -2522,9 +3020,9 @@ def cdc_edit_config(request, config_pk):
                                                             table_names=tables_for_signal,
                                                             db_type='mysql'
                                                         )
-                                                    
+
                                                     signal_sender.close()
-                                                    
+
                                                     if success:
                                                         messages.success(
                                                             request,
