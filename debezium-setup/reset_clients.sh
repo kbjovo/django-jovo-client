@@ -84,6 +84,7 @@ ClientDatabase.objects.create(
     password="cdc_pass",
     database_name="XEPDB1",
     oracle_connection_mode="service",
+    )
 
 print("✔️ Client and database connectors created (Oracle skipped)")
 EOF

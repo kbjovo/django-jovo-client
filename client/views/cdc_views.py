@@ -92,11 +92,215 @@ def is_oracle_pdb(database_name: str) -> bool:
 def normalize_sql_server_table_name(table_name: str, db_type: str) -> str:
     if db_type.lower() != 'mssql':
         return table_name
-    
+
     if '.' in table_name:
         return table_name
     else:
         return f"dbo.{table_name}"
+
+
+# =============================================================================
+# CONSOLIDATED HELPER FUNCTIONS (eliminates duplications)
+# =============================================================================
+
+def get_default_schema(db_type: str, username: str = None) -> str:
+    """
+    Get default schema name for database type.
+
+    Args:
+        db_type: Database type (oracle, postgresql, mssql, mysql)
+        username: Database username (required for Oracle)
+
+    Returns:
+        Default schema name or None for MySQL
+    """
+    db_type = db_type.lower()
+    if db_type == 'oracle':
+        return username.upper() if username else None
+    elif db_type == 'postgresql':
+        return 'public'
+    elif db_type == 'mssql':
+        return 'dbo'
+    else:  # MySQL
+        return None
+
+
+def normalize_table_name_with_schema(table_name: str, db_type: str, username: str = None) -> str:
+    """
+    Normalize table name by adding default schema if missing.
+
+    Replaces multiple scattered implementations.
+
+    Args:
+        table_name: Table name (may or may not include schema)
+        db_type: Database type (oracle, postgresql, mssql, mysql)
+        username: Database username (needed for Oracle default schema)
+
+    Returns:
+        Normalized table name with schema prefix
+    """
+    db_type = db_type.lower()
+
+    # If already has schema, return as-is
+    if '.' in table_name:
+        return table_name
+
+    # Add default schema
+    default_schema = get_default_schema(db_type, username)
+
+    if default_schema:
+        return f"{default_schema}.{table_name}"
+    else:
+        # MySQL has no schema concept
+        return table_name
+
+
+def build_row_count_query(table_name: str, db_type: str) -> str:
+    """
+    Build database-specific row count query.
+
+    Consolidates query building logic from _get_table_row_count().
+
+    Args:
+        table_name: Table name (may include schema)
+        db_type: Database type
+
+    Returns:
+        SQL query string
+    """
+    db_type = db_type.lower()
+
+    if db_type == 'mysql':
+        return f"SELECT COUNT(*) as cnt FROM `{table_name}`"
+
+    elif db_type == 'postgresql':
+        return f'SELECT COUNT(*) as cnt FROM "{table_name}"'
+
+    elif db_type == 'mssql':
+        if '.' in table_name:
+            schema_name, actual_table = table_name.split('.', 1)
+            return f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{actual_table}]"
+        else:
+            return f"SELECT COUNT(*) as cnt FROM [dbo].[{table_name}]"
+
+    elif db_type == 'oracle':
+        if '.' in table_name:
+            schema_part, table_part = table_name.rsplit('.', 1)
+            return f'SELECT COUNT(*) as cnt FROM {schema_part}.{table_part}'
+        else:
+            return f'SELECT COUNT(*) as cnt FROM {table_name}'
+
+    else:
+        return f"SELECT COUNT(*) as cnt FROM {table_name}"
+
+
+def discover_tables_generic(db_config, db_type: str):
+    """
+    Generic table discovery function that works for all database types.
+
+    Consolidates:
+    - _discover_postgresql_tables()
+    - _discover_mssql_tables()
+    - _discover_mysql_tables()
+    - Partial logic from _discover_oracle_tables() (Oracle still needs custom handling)
+
+    Args:
+        db_config: ClientDatabase instance
+        db_type: Database type (postgresql, mssql, mysql)
+
+    Returns:
+        List of table names with schemas
+    """
+    db_type = db_type.lower()
+    logger.info(f"🔍 {db_type.upper()}: Discovering tables...")
+
+    try:
+        raw_tables = get_table_list(db_config)
+
+        # Apply database-specific normalization
+        if db_type == 'postgresql':
+            # Ensure schema prefix (default: public)
+            tables = []
+            for table in raw_tables:
+                if '.' not in table:
+                    tables.append(f"public.{table}")
+                else:
+                    tables.append(table)
+
+        elif db_type == 'mssql':
+            # Normalize to include schema (default: dbo)
+            tables = []
+            for table in raw_tables:
+                normalized = normalize_sql_server_table_name(table, 'mssql')
+                tables.append(normalized)
+
+        else:  # MySQL
+            # No schema concept - use tables as-is
+            tables = raw_tables
+
+        logger.info(f"   ✅ Found {len(tables)} {db_type.upper()} tables")
+        return tables
+
+    except Exception as e:
+        logger.error(f"   ❌ {db_type.upper()} discovery failed: {e}")
+        return []
+
+
+def execute_replication_action(request, config_id, action_name: str, orchestrator_method: str,
+                               success_emoji: str = "✅", action_display: str = None):
+    """
+    Generic handler for replication control actions.
+
+    Consolidates:
+    - start_replication()
+    - stop_replication()
+    - restart_replication_view()
+
+    Args:
+        request: Django request object
+        config_id: Replication config ID
+        action_name: Internal action name (for logging)
+        orchestrator_method: Method name to call on orchestrator
+        success_emoji: Emoji for success message
+        action_display: Display name for user messages (defaults to action_name)
+
+    Returns:
+        Redirect response
+    """
+    action_display = action_display or action_name
+
+    try:
+        config = get_object_or_404(ReplicationConfig, id=config_id)
+        orchestrator = ReplicationOrchestrator(config)
+
+        logger.info(f"{action_name.capitalize()} replication for config {config_id}")
+
+        # Get the orchestrator method dynamically
+        method = getattr(orchestrator, orchestrator_method)
+
+        # Handle start_replication which has force_resync parameter
+        if orchestrator_method == 'start_replication':
+            force_resync = request.POST.get('force_resync', 'false').lower() == 'true'
+            success, message = method(force_resync=force_resync)
+        else:
+            success, message = method()
+
+        if success:
+            messages.success(request, f"{success_emoji} {action_display.capitalize()} successful! {message}")
+        else:
+            messages.error(request, f"❌ Failed to {action_display}: {message}")
+
+        return redirect('cdc_config_detail', config_id=config_id)
+
+    except Exception as e:
+        logger.error(f"Failed to {action_name} replication: {e}", exc_info=True)
+        messages.error(request, f"Failed to {action_display} replication: {str(e)}")
+        return redirect('cdc_config_detail', config_id=config_id)
+
+
+# =============================================================================
+# END CONSOLIDATED HELPERS
+# =============================================================================
 
 
 def generate_target_table_name(source_db_name: str, source_table_name: str, db_type: str) -> str:
@@ -1710,122 +1914,61 @@ def cdc_connector_action(request, config_pk, action):
 
 @require_http_methods(["POST"])
 def start_replication(request, config_id):
-    """Start CDC replication for a config (NEW: Uses orchestrator)"""
+    """Start CDC replication for a config (uses consolidated action handler)"""
+    # Check if already running
     try:
         config = get_object_or_404(ReplicationConfig, id=config_id)
-
-        # Check if already running
         if config.is_active and config.status == 'active':
             messages.warning(request, "Replication is already running!")
             return redirect('cdc_config_detail', config_id=config_id)
+    except Exception:
+        pass
 
-        # Use orchestrator for simplified flow (Option A)
-        from client.replication import ReplicationOrchestrator
-
-        orchestrator = ReplicationOrchestrator(config)
-
-        # Get force_resync parameter from request (default: False)
-        force_resync = request.POST.get('force_resync', 'false').lower() == 'true'
-
-        logger.info(f"Starting replication for config {config_id} (force_resync={force_resync})")
-
-        # Start replication with new simplified flow
-        # This will:
-        # 1. Validate prerequisites
-        # 2. Perform initial SQL copy
-        # 3. Start Debezium connector (CDC-only mode)
-        # 4. Start consumer with fresh group ID
-        success, message = orchestrator.start_replication(force_resync=force_resync)
-
-        if success:
-            messages.success(
-                request,
-                f"🚀 Replication started successfully! {message}"
-            )
-        else:
-            messages.error(
-                request,
-                f"❌ Failed to start replication: {message}"
-            )
-
-        return redirect('cdc_config_detail', config_id=config_id)
-
-    except Exception as e:
-        logger.error(f"Failed to start replication: {e}", exc_info=True)
-        messages.error(request, f"Failed to start replication: {str(e)}")
-        return redirect('cdc_config_detail', config_id=config_id)
+    # Use consolidated replication action handler
+    return execute_replication_action(
+        request=request,
+        config_id=config_id,
+        action_name='start',
+        orchestrator_method='start_replication',
+        success_emoji='🚀',
+        action_display='Replication started'
+    )
 
 
 @require_http_methods(["POST"])
 def stop_replication(request, config_id):
-    """Stop CDC replication for a config (NEW: Uses orchestrator)"""
+    """Stop CDC replication for a config (uses consolidated action handler)"""
+    # Check if running
     try:
         config = get_object_or_404(ReplicationConfig, id=config_id)
-
         if not config.is_active:
             messages.warning(request, "Replication is not running!")
             return redirect('cdc_config_detail', config_id=config_id)
+    except Exception:
+        pass
 
-        # Use orchestrator to stop replication
-        from client.replication import ReplicationOrchestrator
-
-        orchestrator = ReplicationOrchestrator(config)
-
-        logger.info(f"Stopping replication for config {config_id}")
-
-        success, message = orchestrator.stop_replication()
-
-        if success:
-            messages.success(
-                request,
-                f"⏸️ Replication stopped! {message}"
-            )
-        else:
-            messages.error(
-                request,
-                f"❌ Failed to stop replication: {message}"
-            )
-
-        return redirect('cdc_config_detail', config_id=config_id)
-
-    except Exception as e:
-        logger.error(f"Failed to stop replication: {e}", exc_info=True)
-        messages.error(request, f"Failed to stop replication: {str(e)}")
-        return redirect('cdc_config_detail', config_id=config_id)
+    # Use consolidated replication action handler
+    return execute_replication_action(
+        request=request,
+        config_id=config_id,
+        action_name='stop',
+        orchestrator_method='stop_replication',
+        success_emoji='⏸️',
+        action_display='Replication stopped'
+    )
 
 
 @require_http_methods(["POST"])
 def restart_replication_view(request, config_id):
-    """Restart CDC replication for a config (NEW: Uses orchestrator)"""
-    try:
-        config = get_object_or_404(ReplicationConfig, id=config_id)
-
-        # Use orchestrator to restart replication
-        from client.replication import ReplicationOrchestrator
-
-        orchestrator = ReplicationOrchestrator(config)
-
-        logger.info(f"Restarting replication for config {config_id}")
-
-        success, message = orchestrator.restart_replication()
-
-        if success:
-            messages.success(
-                request,
-                f"🔄 Replication restarted! {message}"
-            )
-        else:
-            messages.error(
-                request,
-                f"❌ Failed to restart replication: {message}"
-            )
-
-        return redirect('cdc_config_detail', config_id=config_id)
-
-    except Exception as e:
-        logger.error(f"Failed to restart replication: {e}", exc_info=True)
-        messages.error(request, f"Failed to restart replication: {str(e)}")
-        return redirect('cdc_config_detail', config_id=config_id)
+    """Restart CDC replication for a config (uses consolidated action handler)"""
+    return execute_replication_action(
+        request=request,
+        config_id=config_id,
+        action_name='restart',
+        orchestrator_method='restart_replication',
+        success_emoji='🔄',
+        action_display='Replication restarted'
+    )
 
 
 @require_http_methods(["GET"])
@@ -2717,547 +2860,6 @@ def ensure_signal_table_in_config(current_config, db_config, db_type):
         return current_config
 
 
-
-# @require_http_methods(["GET", "POST"])
-# def cdc_edit_config(request, config_pk):
-#     """
-#     Edit replication configuration - FIXED for SQL Server consistency
-#     """
-#     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-#     db_config = replication_config.client_database
-#     client = db_config.client
-
-#     if request.method == "POST":
-#         try:
-#             with transaction.atomic():
-#                 # Update basic configuration
-#                 replication_config.sync_type = request.POST.get('sync_type', replication_config.sync_type)
-#                 replication_config.sync_frequency = request.POST.get('sync_frequency', replication_config.sync_frequency)
-#                 replication_config.auto_create_tables = request.POST.get('auto_create_tables') == 'on'
-#                 replication_config.drop_before_sync = request.POST.get('drop_before_sync') == 'on'
-#                 replication_config.save()
-
-#                 # Get selected tables
-#                 selected_table_names = request.POST.getlist('selected_tables')
-#                 logger.info(f"Selected tables: {selected_table_names}")
-
-#                 # ✅ FIX: Build normalized mapping lookup
-#                 existing_mappings = {}
-#                 for tm in replication_config.table_mappings.all():
-#                     normalized = normalize_sql_server_table_name(tm.source_table, db_config.db_type)
-#                     existing_mappings[normalized] = tm
-
-#                 newly_added_tables = []
-#                 removed_table_names = []
-
-#                 # Find removed tables
-#                 for normalized_name in existing_mappings.keys():
-#                     if normalized_name not in selected_table_names:
-#                         removed_table_names.append(normalized_name)
-
-#                 # Process newly added tables
-#                 for table_name in selected_table_names:
-#                     normalized_table = normalize_sql_server_table_name(table_name, db_config.db_type)
-                    
-#                     if normalized_table not in existing_mappings:
-#                         newly_added_tables.append(normalized_table)
-                        
-#                         target_table_name = request.POST.get(f'target_table_new_{table_name}', '')
-#                         if not target_table_name:
-#                             target_table_name = generate_target_table_name(
-#                                 db_config.database_name,
-#                                 normalized_table,
-#                                 db_config.db_type
-#                             )
-
-#                         sync_type = request.POST.get(f'sync_type_table_new_{table_name}', 'realtime')
-#                         incremental_col = request.POST.get(f'incremental_col_table_new_{table_name}', '')
-#                         conflict_resolution = request.POST.get(f'conflict_resolution_table_new_{table_name}', 'source_wins')
-
-#                         table_mapping = TableMapping.objects.create(
-#                             replication_config=replication_config,
-#                             source_table=normalized_table,
-#                             target_table=target_table_name,
-#                             is_enabled=True,
-#                             sync_type=sync_type,
-#                             incremental_column=incremental_col if incremental_col else None,
-#                             conflict_resolution=conflict_resolution
-#                         )
-
-#                         # Create column mappings
-#                         try:
-#                             schema = get_table_schema(db_config, table_name)
-#                             for column in schema.get('columns', []):
-#                                 col_enabled = request.POST.get(f'enabled_column_new_{table_name}_{column["name"]}') == 'on'
-#                                 target_col_name = request.POST.get(f'target_column_new_{table_name}_{column["name"]}', column['name'])
-                                
-#                                 ColumnMapping.objects.create(
-#                                     table_mapping=table_mapping,
-#                                     source_column=column['name'],
-#                                     target_column=target_col_name,
-#                                     source_type=str(column.get('type', 'unknown')),
-#                                     target_type=str(column.get('type', 'unknown')),
-#                                     is_enabled=col_enabled
-#                                 )
-#                         except Exception as e:
-#                             logger.error(f"Failed to create column mappings: {e}")
-    
-#                 # CREATE TARGET TABLES
-#                 if newly_added_tables and replication_config.auto_create_tables:
-#                     try:
-#                         from client.utils.table_creator import create_target_tables
-#                         create_target_tables(replication_config, specific_tables=newly_added_tables)
-#                         messages.success(request, f'✅ Created {len(newly_added_tables)} target tables!')
-#                     except Exception as e:
-#                         logger.error(f"Failed to create target tables: {e}")
-#                         messages.warning(request, f'Configuration saved, but table creation failed: {str(e)}')
-
-#                 # CREATE KAFKA TOPICS
-#                 if newly_added_tables:
-#                     try:
-#                         from client.utils.kafka_topic_manager import KafkaTopicManager
-#                         topic_manager = KafkaTopicManager()
-#                         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
-
-#                         # ✅ FIX: Correct topic names based on DB type
-#                         if db_config.db_type.lower() == 'mssql':
-#                             # SQL Server keeps schema.table format for topics
-#                             topic_results = topic_manager.create_cdc_topics_for_tables(
-#                                 server_name=topic_prefix,
-#                                 database=db_config.database_name,
-#                                 table_names=newly_added_tables
-#                             )
-#                         elif db_config.db_type.lower() == 'postgresql':
-#                             # PostgreSQL uses schema name
-#                             table_names_stripped = [t.split('.')[-1] for t in newly_added_tables]
-#                             topic_results = topic_manager.create_cdc_topics_for_tables(
-#                                 server_name=topic_prefix,
-#                                 database='public',
-#                                 table_names=table_names_stripped
-#                             )
-#                         else:
-#                             # MySQL
-#                             topic_results = topic_manager.create_cdc_topics_for_tables(
-#                                 server_name=topic_prefix,
-#                                 database=db_config.database_name,
-#                                 table_names=newly_added_tables
-#                             )
-#                     except Exception as e:
-#                         logger.error(f"Error creating Kafka topics: {e}")
-
-#                 # Process removed tables
-#                 for table_name in removed_table_names:
-#                     table_mapping = existing_mappings[table_name]
-#                     table_mapping.delete()
-
-#                 # DROP REMOVED TABLES
-#                 if removed_table_names:
-#                     try:
-#                         from client.utils.table_creator import drop_target_tables
-#                         drop_target_tables(replication_config, removed_table_names)
-#                     except Exception as e:
-#                         logger.error(f"Failed to drop tables: {e}")
-
-#                 # Update existing table mappings
-#                 for table_mapping in replication_config.table_mappings.all():
-#                     table_key = f'table_{table_mapping.id}'
-#                     new_target_name = request.POST.get(f'target_{table_key}')
-#                     if new_target_name:
-#                         table_mapping.target_table = new_target_name
-
-#                     table_sync_type = request.POST.get(f'sync_type_{table_key}')
-#                     if table_sync_type:
-#                         table_mapping.sync_type = table_sync_type
-
-#                     incremental_col = request.POST.get(f'incremental_col_{table_key}')
-#                     if incremental_col:
-#                         table_mapping.incremental_column = incremental_col
-
-#                     conflict_res = request.POST.get(f'conflict_resolution_{table_key}')
-#                     if conflict_res:
-#                         table_mapping.conflict_resolution = conflict_res
-
-#                     table_mapping.save()
-
-#                     # Update column mappings
-#                     for column_mapping in table_mapping.column_mappings.all():
-#                         column_key = f'column_{column_mapping.id}'
-#                         column_mapping.is_enabled = request.POST.get(f'enabled_{column_key}') == 'on'
-#                         new_target_col = request.POST.get(f'target_{column_key}')
-#                         if new_target_col:
-#                             column_mapping.target_column = new_target_col
-#                         column_mapping.save()
-
-#                 restart_connector = request.POST.get('restart_connector') == 'on'
-#                 messages.success(request, '✅ Configuration updated successfully!')
-
-#                 # ========================================================================
-#                 # CONNECTOR UPDATE
-#                 # ========================================================================
-#                 if replication_config.connector_name:
-#                     try:
-#                         manager = DebeziumConnectorManager()
-#                         all_enabled_tables = replication_config.table_mappings.filter(is_enabled=True)
-#                         tables_list = [tm.source_table for tm in all_enabled_tables]
-
-#                         if tables_list:
-#                             connector_result = manager.get_connector_status(replication_config.connector_name)
-#                             connector_exists = isinstance(connector_result, tuple) and connector_result[0]
-
-#                             if not connector_exists:
-#                                 logger.warning(f"Connector {replication_config.connector_name} doesn't exist")
-#                                 replication_config.connector_name = None
-#                                 replication_config.status = 'configured'
-#                                 replication_config.is_active = False
-#                                 replication_config.save()
-#                             else:
-#                                 # ================================================================
-#                                 # ✅ FIX: Handle table changes based on database type
-#                                 # ================================================================
-#                                 if newly_added_tables or removed_table_names:
-#                                     logger.info(f"🔧 Updating connector (added: {len(newly_added_tables)}, removed: {len(removed_table_names)})")
-
-#                                     try:
-#                                         db_type = db_config.db_type.lower()
-                                        
-#                                         # PostgreSQL-specific handling
-#                                         if db_type == 'postgresql':
-#                                             success, message = manage_postgresql_publication(
-#                                                 db_config, 
-#                                                 replication_config, 
-#                                                 tables_list
-#                                             )
-                                            
-#                                             if not success:
-#                                                 raise Exception(f"Publication management failed: {message}")
-                                            
-#                                             # Clear slot connections
-#                                             slot_name = f"debezium_{client.id}_{db_config.id}"
-#                                             term_success, term_msg = terminate_active_slot_connections(db_config, slot_name)
-#                                             if term_success:
-#                                                 time.sleep(2)
-                                            
-#                                             # Restart connector
-#                                             restart_success, restart_error = manager.restart_connector(
-#                                                 replication_config.connector_name
-#                                             )
-                                            
-#                                             if restart_success:
-#                                                 time.sleep(5)
-                                        
-#                                         # Update connector configuration
-#                                         current_config = manager.get_connector_config(replication_config.connector_name)
-
-#                                         if not current_config:
-#                                             raise Exception("Failed to retrieve connector configuration")
-
-#                                         # ✅ FIX: Format table list correctly based on DB type
-#                                         if db_type == 'postgresql':
-#                                             # PostgreSQL: schema.table (e.g., 'public.users')
-#                                             schema_name = 'public'
-#                                             tables_full = [f"{schema_name}.{t.split('.')[-1]}" for t in tables_list]
-#                                         elif db_type == 'mssql':
-#                                             # SQL Server: schema.table ONLY (e.g., 'dbo.Customers')
-#                                             # Database name is in database.names config, NOT in table.include.list
-#                                             tables_full = tables_list  # Use as-is (already formatted as dbo.table)
-
-#                                             # ✅ CRITICAL: Add signal table for incremental snapshots
-#                                             # MSSQL uses signal.enabled.channels="source,kafka"
-#                                             # The "source" channel requires dbo.debezium_signal to be monitored
-#                                             signal_table = 'dbo.debezium_signal'
-#                                             if signal_table not in tables_full:
-#                                                 tables_full.append(signal_table)
-#                                                 logger.info(f"✅ Added signal table for incremental snapshots: {signal_table}")
-#                                         else:
-#                                             # MySQL: database.table (e.g., 'mydb.users')
-#                                             tables_full = [f"{db_config.database_name}.{t}" for t in tables_list]
-
-#                                         current_config['table.include.list'] = ','.join(tables_full)
-
-#                                         # Change snapshot mode for new tables
-#                                         # ✅ For MSSQL, don't change to 'when_needed' - handle_sqlserver_new_tables_via_recovery_snapshot will set 'recovery'
-#                                         if newly_added_tables and current_config.get('snapshot.mode') == 'initial':
-#                                             if db_type != 'mssql':
-#                                                 current_config['snapshot.mode'] = 'when_needed'
-
-#                                         # Update connector config
-#                                         update_success, update_error = manager.update_connector_config(
-#                                             replication_config.connector_name,
-#                                             current_config
-#                                         )
-
-#                                         if not update_success:
-#                                             raise Exception(f"Failed to update config: {update_error}")
-
-#                                         time.sleep(3)  # Wait for auto-restart
-
-#                                         # Wait for connector to stabilize
-#                                         wait_success = wait_for_connector_running(
-#                                             manager, 
-#                                             replication_config.connector_name,
-#                                             timeout=90,
-#                                             interval=3
-#                                         )
-                                        
-#                                         if not wait_success:
-#                                             messages.warning(request, 'Configuration updated. Connector may still be starting.')
-                                        
-#                                         # ================================================================
-#                                         # ✅ FIX: Handle snapshots based on database type
-#                                         # ================================================================
-#                                         if newly_added_tables:
-#                                             logger.info(f"🔍 DEBUG: db_type = '{db_type}', newly_added_tables = {newly_added_tables}")
-#                                             if db_type == 'mssql':
-#                                                 # ✅ SQL Server: Use recovery snapshot (production recommended)
-#                                                 logger.info(f"🔧 SQL Server: Processing {len(newly_added_tables)} new table(s)...")
-
-#                                                 try:
-#                                                     # Use recovery snapshot instead of signals for reliable production use
-#                                                     success, message = handle_sqlserver_new_tables_via_recovery_snapshot(
-#                                                         manager=manager,
-#                                                         replication_config=replication_config,
-#                                                         db_config=db_config,
-#                                                         newly_added_tables=newly_added_tables
-#                                                     )
-
-#                                                     if success:
-#                                                         messages.success(request, f'✅ {message}')
-
-#                                                         # ✅ CRITICAL: Auto-trigger incremental snapshot as fallback
-#                                                         # Recovery snapshot often only captures schema, not data
-#                                                         # Send incremental snapshot signal to ensure data is captured
-#                                                         logger.info("\n🔄 Auto-triggering incremental snapshot as fallback...")
-#                                                         time.sleep(5)  # Wait for recovery snapshot to complete schema phase
-
-#                                                         try:
-#                                                             fallback_success, fallback_msg = trigger_incremental_snapshot_for_mssql(
-#                                                                 replication_config=replication_config,
-#                                                                 db_config=db_config,
-#                                                                 table_names=newly_added_tables
-#                                                             )
-
-#                                                             if fallback_success:
-#                                                                 messages.success(
-#                                                                     request,
-#                                                                     '✅ Incremental snapshot signal sent as fallback to ensure data is captured.'
-#                                                                 )
-#                                                                 messages.info(
-#                                                                     request,
-#                                                                     'Monitor connector logs and verify data appears in Kafka topics. '
-#                                                                     'This two-step approach ensures both schema and data are captured.'
-#                                                                 )
-#                                                             else:
-#                                                                 messages.warning(
-#                                                                     request,
-#                                                                     f'⚠️ Fallback snapshot signal failed: {fallback_msg}. '
-#                                                                     'You may need to manually trigger snapshot.'
-#                                                                 )
-#                                                         except Exception as e:
-#                                                             logger.error(f"Fallback snapshot failed: {e}")
-#                                                             messages.warning(request, f'Fallback snapshot failed: {str(e)}')
-#                                                     else:
-#                                                         messages.error(request, f'❌ {message}')
-#                                                         messages.warning(
-#                                                             request,
-#                                                             'Recovery snapshot failed. Check connector status and logs. '
-#                                                             'Ensure new tables have CDC enabled and primary keys.'
-#                                                         )
-                                                
-#                                                 except Exception as e:
-#                                                     logger.error(f"❌ Error: {e}", exc_info=True)
-#                                                     messages.error(request, f'Failed to initiate snapshot: {str(e)}')
-#                                             else:
-#                                                 # MySQL/PostgreSQL: Use Kafka signals
-#                                                 # NOTE: MSSQL uses recovery snapshot method (handled above)
-#                                                 logger.info(f"📡 Sending incremental snapshot signal...")
-#                                                 logger.info(f"🔍 DEBUG: db_type = '{db_type}', newly_added_tables = {newly_added_tables}")
-
-#                                                 try:
-#                                                     from client.utils.kafka_signal_sender import KafkaSignalSender
-
-#                                                     topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
-
-#                                                     signal_sender = KafkaSignalSender()
-
-#                                                     # Strip schema for signal payload
-#                                                     tables_for_signal = [t.split('.')[-1] for t in newly_added_tables]
-
-#                                                     if db_type == 'postgresql':
-#                                                         success, message = signal_sender.send_incremental_snapshot_signal(
-#                                                             topic_prefix=topic_prefix,
-#                                                             database_name=db_config.database_name,
-#                                                             table_names=tables_for_signal,
-#                                                             schema_name='public',
-#                                                             db_type='postgresql'
-#                                                         )
-#                                                     else:  # MySQL
-#                                                         success, message = signal_sender.send_incremental_snapshot_signal(
-#                                                             topic_prefix=topic_prefix,
-#                                                             database_name=db_config.database_name,
-#                                                             table_names=tables_for_signal,
-#                                                             db_type='mysql'
-#                                                         )
-
-#                                                     signal_sender.close()
-
-#                                                     if success:
-#                                                         messages.success(
-#                                                             request,
-#                                                             f'✅ {len(newly_added_tables)} table(s) added! Incremental snapshot in progress.'
-#                                                         )
-#                                                 except Exception as e:
-#                                                     logger.error(f"Snapshot signal failed: {e}")
-#                                                     messages.warning(request, f'Snapshot signal failed: {str(e)}')
-                                        
-#                                         # Restart consumer for new topics
-#                                         if replication_config.is_active:
-#                                             try:
-#                                                 from client.tasks import stop_kafka_consumer, start_kafka_consumer
-#                                                 stop_result = stop_kafka_consumer(replication_config.id)
-#                                                 if stop_result.get('success'):
-#                                                     time.sleep(2)
-#                                                     replication_config.refresh_from_db()
-#                                                     replication_config.is_active = True
-#                                                     replication_config.status = 'active'
-#                                                     replication_config.save()
-#                                                     start_kafka_consumer.apply_async(
-#                                                         args=[replication_config.id],
-#                                                         countdown=3
-#                                                     )
-#                                             except Exception as e:
-#                                                 logger.error(f"Consumer restart failed: {e}")
-
-#                                     except Exception as e:
-#                                         logger.error(f"Error updating connector: {e}", exc_info=True)
-#                                         messages.error(request, f'Failed to update connector: {str(e)}')
-                                        
-#                                 elif restart_connector:
-#                                     # No table changes, just restart if requested
-#                                     if db_config.db_type.lower() == 'postgresql':
-#                                         slot_name = f"debezium_{client.id}_{db_config.id}"
-#                                         terminate_active_slot_connections(db_config, slot_name)
-#                                         time.sleep(2)
-                                    
-#                                     success, error = manager.restart_connector(replication_config.connector_name)
-#                                     if success:
-#                                         messages.success(request, '✅ Connector restarted!')
-#                                     else:
-#                                         messages.warning(request, f'Restart failed: {error}')
-
-#                     except Exception as e:
-#                         logger.error(f"Error with connector: {e}", exc_info=True)
-#                         messages.warning(request, f'Configuration saved, connector update failed: {str(e)}')
-
-#                 # Redirect
-#                 if replication_config.connector_name:
-#                     return redirect('cdc_monitor_connector', config_pk=replication_config.pk)
-#                 else:
-#                     return redirect('main-dashboard')
-
-#         except Exception as e:
-#             logger.error(f'Failed to update configuration: {e}', exc_info=True)
-#             messages.error(request, f'Failed to update configuration: {str(e)}')
-
-#     # ========================================================================
-#     # GET: Show edit form
-#     # ========================================================================
-#     try:
-#         all_table_names = get_table_list(db_config)
-        
-#         # ✅ FIX: Normalize discovered table names
-#         if db_config.db_type.lower() == 'mssql':
-#             all_table_names = [
-#                 normalize_sql_server_table_name(t, db_config.db_type) 
-#                 for t in all_table_names
-#             ]
-#     except Exception as e:
-#         logger.error(f"Failed to discover tables: {e}")
-#         all_table_names = []
-
-#     # ✅ FIX: Build normalized mapping lookup
-#     existing_mappings = {}
-#     for tm in replication_config.table_mappings.all():
-#         normalized = normalize_sql_server_table_name(tm.source_table, db_config.db_type)
-#         existing_mappings[normalized] = tm
-
-#     tables_with_columns = []
-#     for table_name in all_table_names:
-#         existing_mapping = existing_mappings.get(table_name)
-
-#         try:
-#             schema = get_table_schema(db_config, table_name)
-#             columns_from_schema = schema.get('columns', [])
-
-#             incremental_candidates = [
-#                 col for col in columns_from_schema
-#                 if 'timestamp' in str(col.get('type', '')).lower() or
-#                    'datetime' in str(col.get('type', '')).lower() or
-#                    col.get('name', '').endswith('_at') or
-#                    col.get('name', '').endswith('_time')
-#             ]
-
-#             try:
-#                 engine = get_database_engine(db_config)
-#                 with engine.connect() as conn:
-#                     if db_config.db_type.lower() == 'mysql':
-#                         count_query = text(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
-#                     elif db_config.db_type.lower() == 'postgresql':
-#                         count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
-#                     elif db_config.db_type.lower() == 'mssql':
-#                         # Handle schema.table format
-#                         if '.' in table_name:
-#                             schema_name, actual_table = table_name.split('.', 1)
-#                             count_query = text(f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{actual_table}]")
-#                         else:
-#                             count_query = text(f"SELECT COUNT(*) as cnt FROM [dbo].[{table_name}]")
-#                     else:
-#                         count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
-
-#                     result = conn.execute(count_query)
-#                     row = result.fetchone()
-#                     row_count = row[0] if row else 0
-#                 engine.dispose()
-#             except:
-#                 row_count = 0
-
-#             # ✅ FIX: Generate consistent default target name
-#             default_target_table_name = generate_target_table_name(
-#                 db_config.database_name,
-#                 table_name,
-#                 db_config.db_type
-#             )
-
-#             table_data = {
-#                 'table_name': table_name,
-#                 'row_count': row_count,
-#                 'column_count': len(columns_from_schema),
-#                 'is_mapped': existing_mapping is not None,
-#                 'mapping': existing_mapping,
-#                 'columns': existing_mapping.column_mappings.all() if existing_mapping else [],
-#                 'all_columns': columns_from_schema,
-#                 'incremental_candidates': incremental_candidates,
-#                 'primary_keys': schema.get('primary_keys', []),
-#                 'default_target_name': default_target_table_name,
-#             }
-
-#             tables_with_columns.append(table_data)
-
-#         except Exception as e:
-#             logger.error(f"Error getting schema for {table_name}: {e}")
-
-#     # Sort tables: mapped first, then by name
-#     tables_with_columns.sort(key=lambda t: (not t['is_mapped'], t['table_name']))
-
-#     context = {
-#         'replication_config': replication_config,
-#         'db_config': db_config,
-#         'client': client,
-#         'tables_with_columns': tables_with_columns,
-#     }
-
-#     return render(request, 'client/cdc/edit_config.html', context)
-
-
 @require_http_methods(["GET", "POST"])
 def cdc_edit_config(request, config_pk):
     """
@@ -3498,7 +3100,7 @@ def _handle_infrastructure(request, replication_config, db_config, client, chang
     if changes['newly_added'] and replication_config.auto_create_tables:
         _create_target_tables(request, replication_config, changes['newly_added'])
     
-    # Create Kafka topics for new tables
+    # Create Kafka topics for new tables (manual creation for better control)
     if changes['newly_added']:
         _create_kafka_topics(request, replication_config, db_config, client, changes['newly_added'], db_type)
     
@@ -3524,43 +3126,72 @@ def _create_target_tables(request, replication_config, newly_added_tables):
 
 
 def _create_kafka_topics(request, replication_config, db_config, client, newly_added_tables, db_type):
-    """Create Kafka topics for new tables"""
+    """
+    Create Kafka topics for newly added tables.
+
+    Manual creation provides:
+    - Predictable timing (topics exist before snapshot starts)
+    - Immediate validation of topic names
+    - Custom topic configuration (partitions, retention, etc.)
+    """
     try:
-        logger.info(f"\n📡 Creating Kafka topics...")
-        
+        logger.info(f"\n📡 Creating Kafka topics for {len(newly_added_tables)} table(s)...")
+
         from client.utils.kafka_topic_manager import KafkaTopicManager
         topic_manager = KafkaTopicManager()
         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
-        
+
         # Database-specific topic creation
         if db_type == 'mssql':
+            # SQL Server: {prefix}.{database}.{schema}.{table}
             topic_results = topic_manager.create_cdc_topics_for_tables(
                 server_name=topic_prefix,
                 database=db_config.database_name,
                 table_names=newly_added_tables
             )
+
         elif db_type == 'postgresql':
+            # PostgreSQL: {prefix}.{schema}.{table}
             table_names_stripped = [t.split('.')[-1] for t in newly_added_tables]
             topic_results = topic_manager.create_cdc_topics_for_tables(
                 server_name=topic_prefix,
                 database='public',
                 table_names=table_names_stripped
             )
+
         elif db_type == 'oracle':
-            topic_results = topic_manager.create_cdc_topics_for_tables(
-                server_name=topic_prefix,
-                database=db_config.database_name,
-                table_names=newly_added_tables
-            )
+            # ✅ ORACLE FIX: Table names are already in SCHEMA.TABLE format
+            # Create topics: client_1_db_5.CDC_USER.ORDERS
+            # NOT: client_1_db_5.XEPDB1.CDC_USER.ORDERS
+            oracle_topics = []
+            for table in newly_added_tables:
+                if '.' in table:
+                    # Already has schema.table format (e.g., "CDC_USER.ORDERS")
+                    topic_name = f"{topic_prefix}.{table}"
+                else:
+                    # Fallback: assume CDC_USER schema
+                    topic_name = f"{topic_prefix}.CDC_USER.{table}"
+
+                oracle_topics.append(topic_name)
+                logger.info(f"   → {table} → {topic_name}")
+
+            topic_results = topic_manager.create_topics_bulk(oracle_topics)
+
         else:  # MySQL
+            # MySQL: {prefix}.{database}.{table}
             topic_results = topic_manager.create_cdc_topics_for_tables(
                 server_name=topic_prefix,
                 database=db_config.database_name,
                 table_names=newly_added_tables
             )
-        
-        logger.info(f"   ✅ Created Kafka topics for {len(newly_added_tables)} table(s)")
-        
+
+        # Log results
+        success_count = sum(1 for success in topic_results.values() if success)
+        logger.info(f"   ✅ Created {success_count}/{len(newly_added_tables)} Kafka topic(s)")
+
+        if success_count > 0:
+            messages.success(request, f'✅ Created {success_count} Kafka topic(s) for new tables')
+
     except Exception as e:
         logger.error(f"   ❌ Error creating Kafka topics: {e}", exc_info=True)
         messages.warning(request, f'Topics creation failed: {str(e)}')
@@ -3779,25 +3410,22 @@ def _update_connector_config(manager, replication_config, db_config, tables_list
 
 
 def _format_tables_for_connector(db_config, tables_list, db_type):
-    """Format table list for connector based on database type"""
-    if db_type == 'postgresql':
-        schema_name = 'public'
-        return [f"{schema_name}.{t.split('.')[-1]}" for t in tables_list]
-    
-    elif db_type == 'mssql':
-        # Add signal table for SQL Server
-        tables_full = tables_list.copy()
+    """
+    Format table list for connector based on database type.
+
+    Uses consolidated format_table_for_connector() to eliminate duplication.
+    """
+    # Format all tables using consolidated function
+    formatted_tables = [format_table_for_connector(db_config, table) for table in tables_list]
+
+    # Special handling: Add signal table for SQL Server
+    if db_type.lower() == 'mssql':
         signal_table = 'dbo.debezium_signal'
-        if signal_table not in tables_full:
-            tables_full.append(signal_table)
+        if signal_table not in formatted_tables:
+            formatted_tables.append(signal_table)
             logger.info(f"   ✅ Added signal table: {signal_table}")
-        return tables_full
-    
-    elif db_type == 'oracle':
-        return tables_list  # Already in schema.table format
-    
-    else:  # MySQL
-        return [f"{db_config.database_name}.{t}" for t in tables_list]
+
+    return formatted_tables
 
 
 def _handle_snapshots_for_new_tables(request, manager, replication_config, db_config, client, newly_added_tables, db_type):
@@ -3858,33 +3486,57 @@ def _handle_mssql_snapshots(request, manager, replication_config, db_config, new
 def _handle_kafka_signal_snapshots(request, replication_config, db_config, client, newly_added_tables, db_type):
     """MySQL/PostgreSQL/Oracle: Kafka signal-based snapshots"""
     logger.info(f"\n📡 {db_type.upper()}: Kafka signal snapshot...")
-    
+
     try:
         from client.utils.kafka_signal_sender import KafkaSignalSender
-        
+        from client.utils.debezium_manager import DebeziumConnectorManager
+
         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
         signal_sender = KafkaSignalSender()
-        
+
         # Database-specific handling
         if db_type == 'oracle':
-            # ⚠️ ORACLE CRITICAL FIX:
-            # Pass PDB name as database_name and keep tables in SCHEMA.TABLE format
-            # The signal sender will format them as PDB.SCHEMA.TABLE automatically
-            
-            # Get PDB name from database_name
+            # ✅ ORACLE FIX: Use incremental snapshot signals via Kafka
+            # The when_needed mode DOES NOT work when a previous snapshot already exists.
+            # Debezium will see the existing offset and skip snapshotting entirely.
+            #
+            # Correct approach: Send incremental snapshot signal via Kafka topic
+            # This works even when connector is already running with existing tables.
+
+            logger.info("=" * 80)
+            logger.info("🔧 ORACLE: Sending incremental snapshot signal...")
+            logger.info("=" * 80)
+
+            # Oracle tables should already be in SCHEMA.TABLE format (e.g., CDC_USER.PAYMENTS)
+            # We need to send them as XEPDB1.SCHEMA.TABLE for the signal
+            tables_for_signal = []
+
+            for table in newly_added_tables:
+                # Table is in format: CDC_USER.PAYMENTS or just PAYMENTS
+                if '.' in table:
+                    # Already has schema: CDC_USER.PAYMENTS
+                    # Signal needs: XEPDB1.CDC_USER.PAYMENTS (PDB.SCHEMA.TABLE)
+                    tables_for_signal.append(table)
+                else:
+                    # Just table name: PAYMENTS
+                    # Get schema from username
+                    username = db_config.username.upper()
+                    schema = username[3:] if username.startswith('C##') else username
+                    tables_for_signal.append(f"{schema}.{table}")
+
+            logger.info(f"   Tables to snapshot: {tables_for_signal}")
+
+            # database_name should be the PDB name (e.g., XEPDB1)
             pdb_name = db_config.database_name.upper()
-            
-            logger.info(f"   PDB Name: {pdb_name}")
-            logger.info(f"   Tables (schema.table format): {newly_added_tables}")
-            
+
             success, message = signal_sender.send_incremental_snapshot_signal(
                 topic_prefix=topic_prefix,
-                database_name=pdb_name,  # ✅ Pass PDB name (e.g., XEPDB1)
-                table_names=newly_added_tables,  # Already in CDC_USER.PRODUCTS format
-                schema_name=None,  # Not needed since tables already have schema
+                database_name=pdb_name,
+                table_names=tables_for_signal,
+                schema_name=None,  # Not needed, already in table names
                 db_type='oracle'
             )
-            
+
         elif db_type == 'postgresql':
             # Strip schema for signal payload
             tables_for_signal = [t.split('.')[-1] for t in newly_added_tables]
@@ -4213,61 +3865,18 @@ def _discover_oracle_tables(db_config):
 
 
 def _discover_postgresql_tables(db_config):
-    """PostgreSQL: Discover tables with schema"""
-    logger.info(f"🔍 PostgreSQL: Discovering tables...")
-    
-    try:
-        raw_tables = get_table_list(db_config)
-        
-        # Ensure schema prefix (default: public)
-        tables = []
-        for table in raw_tables:
-            if '.' not in table:
-                tables.append(f"public.{table}")
-            else:
-                tables.append(table)
-        
-        logger.info(f"   ✅ Found {len(tables)} PostgreSQL tables")
-        return tables
-    
-    except Exception as e:
-        logger.error(f"   ❌ PostgreSQL discovery failed: {e}")
-        return []
+    """PostgreSQL: Discover tables with schema (uses consolidated generic function)"""
+    return discover_tables_generic(db_config, 'postgresql')
 
 
 def _discover_mssql_tables(db_config):
-    """SQL Server: Discover tables with schema"""
-    logger.info(f"🔍 SQL Server: Discovering tables...")
-    
-    try:
-        raw_tables = get_table_list(db_config)
-        
-        # Normalize to include schema (default: dbo)
-        tables = []
-        for table in raw_tables:
-            normalized = normalize_sql_server_table_name(table, 'mssql')
-            tables.append(normalized)
-        
-        logger.info(f"   ✅ Found {len(tables)} SQL Server tables")
-        return tables
-    
-    except Exception as e:
-        logger.error(f"   ❌ SQL Server discovery failed: {e}")
-        return []
+    """SQL Server: Discover tables with schema (uses consolidated generic function)"""
+    return discover_tables_generic(db_config, 'mssql')
 
 
 def _discover_mysql_tables(db_config):
-    """MySQL: Simple table discovery (no schema concept)"""
-    logger.info(f"🔍 MySQL: Discovering tables...")
-    
-    try:
-        tables = get_table_list(db_config)
-        logger.info(f"   ✅ Found {len(tables)} MySQL tables")
-        return tables
-    
-    except Exception as e:
-        logger.error(f"   ❌ MySQL discovery failed: {e}")
-        return []
+    """MySQL: Simple table discovery (uses consolidated generic function)"""
+    return discover_tables_generic(db_config, 'mysql')
 
 
 def _build_table_data(replication_config, db_config, all_table_names, db_type):
@@ -4353,38 +3962,19 @@ def _build_table_data(replication_config, db_config, all_table_names, db_type):
 
 
 def _get_table_row_count(db_config, table_name, db_type):
-    """Get row count for a table"""
+    """Get row count for a table (uses consolidated query builder)"""
     try:
         engine = get_database_engine(db_config)
-        
+
         with engine.connect() as conn:
-            if db_type == 'mysql':
-                count_query = text(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
-            
-            elif db_type == 'postgresql':
-                count_query = text(f'SELECT COUNT(*) as cnt FROM "{table_name}"')
-            
-            elif db_type == 'mssql':
-                if '.' in table_name:
-                    schema_name, actual_table = table_name.split('.', 1)
-                    count_query = text(f"SELECT COUNT(*) as cnt FROM [{schema_name}].[{actual_table}]")
-                else:
-                    count_query = text(f"SELECT COUNT(*) as cnt FROM [dbo].[{table_name}]")
-            
-            elif db_type == 'oracle':
-                if '.' in table_name:
-                    schema_part, table_part = table_name.rsplit('.', 1)
-                    count_query = text(f'SELECT COUNT(*) as cnt FROM {schema_part}.{table_part}')
-                else:
-                    count_query = text(f'SELECT COUNT(*) as cnt FROM {table_name}')
-            
-            else:
-                count_query = text(f"SELECT COUNT(*) as cnt FROM {table_name}")
-            
+            # Use consolidated query builder
+            query_str = build_row_count_query(table_name, db_type)
+            count_query = text(query_str)
+
             result = conn.execute(count_query)
             row = result.fetchone()
             row_count = row[0] if row else 0
-        
+
         engine.dispose()
         return row_count
     

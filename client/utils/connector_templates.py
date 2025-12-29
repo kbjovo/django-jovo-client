@@ -417,8 +417,6 @@ def get_sqlserver_connector_config(
                 # No schema: 'Customers' - add schema prefix
                 tables_full.append(f"{schema_name}.{table}")
 
-        # ✅ CRITICAL FIX: Add signal table to table.include.list
-        # This is required for incremental snapshots via Kafka signals
         signal_table = f"{schema_name}.debezium_signal"
         if signal_table not in tables_full:
             tables_full.append(signal_table)
@@ -512,6 +510,9 @@ def get_oracle_connector_config(
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
         
+        "incremental.snapshot.allow.schema.changes": "true",
+        "incremental.snapshot.chunk.size": "1024",
+        
         "snapshot.mode": snapshot_mode,
         "snapshot.locking.mode": "none",
         "snapshot.fetch.size": "2000",
@@ -588,7 +589,14 @@ def get_oracle_connector_config(
 
         if not formatted_tables:
             raise ValueError("No valid tables after formatting")
-        
+
+        # ✅ CRITICAL FIX: Add signal table to table.include.list
+        # This is required for incremental snapshots via signals
+        signal_table_name = f"{schema_name}.DEBEZIUM_SIGNAL"
+        if signal_table_name not in formatted_tables:
+            formatted_tables.append(signal_table_name)
+            logger.info(f"✅ Added signal table for incremental snapshots: {signal_table_name}")
+
         config["table.include.list"] = ",".join(formatted_tables)
         logger.info(f"📋 Tables: {len(formatted_tables)}")
 
