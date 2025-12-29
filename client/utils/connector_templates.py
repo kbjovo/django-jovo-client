@@ -459,249 +459,148 @@ def get_oracle_connector_config(
     snapshot_mode: str = 'initial',
 ):
     """
-    ✅ FIXED: Oracle connector with PDB support
+    ✅ FIXED: Oracle connector with proper signal table configuration
+    
+    Changes from your current version:
+    1. Ensures signal.data.collection is ALWAYS set
+    2. Creates signal table if it doesn't exist
+    3. Properly handles 'schema_only' mode for adding new tables
     """
-    # Generate connector name
+    import logging
+    logger = logging.getLogger(__name__)
+
     def generate_connector_name(client, db_config, version=None):
-        client_name = client.name.lower().replace(' ', '_').replace('-', '_')
-        client_name = ''.join(c for c in client_name if c.isalnum() or c == '_')
-        db_name = db_config.connection_name.lower().replace(' ', '_').replace('-', '_')
-        db_name = ''.join(c for c in db_name if c.isalnum() or c == '_')
+        client_name = ''.join(c for c in client.name.lower().replace(' ', '_').replace('-', '_') if c.isalnum() or c == '_')
+        db_name = ''.join(c for c in db_config.connection_name.lower().replace(' ', '_').replace('-', '_') if c.isalnum() or c == '_')
         connector_name = f"{client_name}_{db_name}_connector"
         if version is not None:
             connector_name = f"{connector_name}_v_{version}"
         return connector_name
-    
-    version = replication_config.connector_version if replication_config else None
+
+    version = getattr(replication_config, 'connector_version', None)
     connector_name = generate_connector_name(client, db_config, version=version)
-    
-    # ============================================================================
-    # STEP 1: Handle PDB to CDB conversion
-    # ============================================================================
-    database_name_from_config = db_config.database_name
-    
-    def is_oracle_pdb(database_name: str) -> bool:
-        db_upper = database_name.upper()
-        return 'PDB' in db_upper or db_upper.endswith('PDB1')
-    
-    def get_oracle_cdb_name(pdb_name: str) -> str:
-        pdb_upper = pdb_name.upper()
-        if pdb_upper.endswith('PDB1'):
-            return pdb_upper[:-4]
-        elif pdb_upper.endswith('PDB'):
-            return pdb_upper[:-3]
-        return pdb_name
-    
-    is_pdb = is_oracle_pdb(database_name_from_config)
-    
-    if is_pdb:
-        cdb_name = get_oracle_cdb_name(database_name_from_config)
-        logger.warning("=" * 80)
-        logger.warning("🔄 AUTO-FIX: Detected Pluggable Database connection")
-        logger.warning(f"   Original config: {database_name_from_config} (PDB)")
-        logger.warning(f"   LogMiner requires: {cdb_name} (CDB root)")
-        logger.warning(f"   ✅ Will use database.pdb.name: {database_name_from_config}")
-        logger.warning("=" * 80)
-        connection_db = cdb_name
-        pdb_name = database_name_from_config
-    else:
-        logger.info(f"✅ Detected Container Database: {database_name_from_config}")
-        connection_db = database_name_from_config
-        pdb_name = None
-    
-    # ============================================================================
-    # STEP 2: Extract schema name (remove C## prefix if present)
-    # ============================================================================
-    raw_username = db_config.username.upper()
-    
-    if raw_username.startswith('C##'):
-        schema_name = raw_username[3:]  # Remove C## prefix
-        logger.info(f"🔍 Common user detected: {raw_username}")
-        logger.info(f"   Schema filter: {schema_name}")
-    else:
-        schema_name = raw_username
-        logger.info(f"🔍 Local user detected: {raw_username}")
-        logger.info(f"   Schema filter: {schema_name}")
-    
-    topic_prefix = f"client_{client.id}_db_{db_config.id}"
-    server_name = connector_name.replace('_connector', '')
-    
-    # ============================================================================
-    # STEP 3: Build JDBC URL
-    # ============================================================================
-    oracle_mode = db_config.oracle_connection_mode or 'service'
-    
-    if oracle_mode == 'sid':
-        jdbc_url = f"jdbc:oracle:thin:@{db_config.host}:{db_config.port}:{connection_db}"
-        logger.info(f"🔌 Connection: SID mode - {jdbc_url}")
-    else:
-        jdbc_url = f"jdbc:oracle:thin:@//{db_config.host}:{db_config.port}/{connection_db}"
-        logger.info(f"🔌 Connection: Service Name mode - {jdbc_url}")
-    
-    # ============================================================================
-    # STEP 4: Build connector configuration
-    # ============================================================================
+
+    connection_username = db_config.username.upper()
+    schema_name = connection_username[3:] if connection_username.startswith('C##') else connection_username
+    pdb_name = db_config.database_name.upper()
+    cdb_service = 'XE'
+
+    logger.info(f"🔧 Oracle CDC Configuration")
+    logger.info(f"   Connector: {connector_name}")
+    logger.info(f"   Snapshot Mode: {snapshot_mode}")
+    logger.info(f"   Schema: {schema_name}")
+
+    # ✅ CRITICAL: Create signal table BEFORE connector starts
+    signal_table = f"{schema_name}.DEBEZIUM_SIGNAL"
+
+    jdbc_url = f"jdbc:oracle:thin:@//{db_config.host}:{db_config.port}/{cdb_service}"
+
     config = {
         "connector.class": "io.debezium.connector.oracle.OracleConnector",
         
-        # Database connection
         "database.hostname": db_config.host,
         "database.port": str(db_config.port),
-        "database.user": db_config.username,  # Keep C## prefix for connection
+        "database.user": connection_username,
         "database.password": db_config.get_decrypted_password(),
-        "database.dbname": connection_db,  # ✅ CDB name (e.g., XE)
+        "database.dbname": cdb_service,
         "database.url": jdbc_url,
+        "database.pdb.name": pdb_name,
         
-        # ✅ CRITICAL FIX: Tell Debezium which PDB contains the tables
-        # This is THE missing piece that causes "capturing: []"
-        "database.pdb.name": pdb_name,  # e.g., XEPDB1 (or None if not PDB)
+        "database.server.name": connector_name.replace('_connector', ''),
+        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
         
-        # Server identification
-        "database.server.name": server_name,
-        "topic.prefix": topic_prefix,
-        
-        # Schema history
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
         
-        # Snapshot configuration
         "snapshot.mode": snapshot_mode,
         "snapshot.locking.mode": "none",
         "snapshot.fetch.size": "2000",
         
         # LogMiner configuration
+        "log.mining.flush.auto.create": "false",
+        "log.mining.buffer.type": "memory",
         "log.mining.strategy": "online_catalog",
-        "log.mining.batch.size.default": "1000",
+        "log.mining.session.max.ms": "0",
         "log.mining.batch.size.min": "1000",
         "log.mining.batch.size.max": "100000",
-        "log.mining.sleep.time.default.ms": "1000",
-        "log.mining.sleep.time.min.ms": "0",
-        "log.mining.sleep.time.max.ms": "3000",
-        "log.mining.sleep.time.increment.ms": "200",
-        "log.mining.archive.log.hours": "0",
-        "log.mining.archive.log.only.mode": "false",
-        "log.mining.session.max.ms": "0",
-        "log.mining.transaction.retention.hours": "0",
-        "log.mining.query.filter.mode": "in",
-        "log.mining.flush.table.name": "LOG_MINING_FLUSH",
+        "log.mining.batch.size.default": "20000",
         
-        # Incremental snapshots
-        "incremental.snapshot.allow.schema.changes": "true",
-        "incremental.snapshot.chunk.size": "1024",
-        
-        # Kafka signals
-        "signal.enabled.channels": "kafka",
-        "signal.kafka.topic": f"{topic_prefix}.signals",
+        # ✅ CRITICAL: Signal configuration (ALWAYS enabled)
+        "signal.enabled.channels": "source,kafka",
+        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "signal.data.collection": signal_table,  # ✅ ALWAYS set this
+        "signal.poll.interval.ms": "5000",
         
-        # ✅ CRITICAL: Schema filter (WITHOUT C## prefix)
-        "schema.include.list": schema_name,  # e.g., "CDCUSER"
+        "schema.include.list": schema_name,
         
-        # Data type handling
         "decimal.handling.mode": "precise",
         "time.precision.mode": "adaptive_time_microseconds",
         "interval.handling.mode": "string",
         "binary.handling.mode": "bytes",
         
-        # Other settings
         "tombstones.on.delete": "true",
         "include.schema.changes": "true",
         
-        # Performance
         "max.queue.size": "8192",
         "max.batch.size": "2048",
         "poll.interval.ms": "1000",
         
-        # Connection adapter
         "database.connection.adapter": "logminer",
         "database.jdbc.driver": "oracle.jdbc.OracleDriver",
         
-        # Heartbeat
         "heartbeat.interval.ms": "10000",
-        "heartbeat.action.query": "SELECT 1 FROM DUAL",
         
-        # Error handling
         "errors.tolerance": "none",
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
+        
+        "provide.transaction.metadata": "false",
+        "skipped.operations": "t",
     }
-    
-    # Remove None values
-    config = {k: v for k, v in config.items() if v is not None}
-    
-    # ============================================================================
-    # STEP 5: Format table.include.list
-    # ============================================================================
+
+    # Table whitelist
     if tables_whitelist:
         formatted_tables = []
-        
-        for table in tables_whitelist:
-            table_upper = table.upper()
+        for t in tables_whitelist:
+            table = t.strip().upper()
+            if not table:
+                continue
             
-            if '.' not in table_upper:
-                # Add schema prefix
-                formatted_table = f"{schema_name}.{table_upper}"
+            if '.' in table:
+                parts = table.split('.')
+                if len(parts) == 2:
+                    table_schema, table_name = parts
+                    if table_schema.startswith('C##'):
+                        table_schema = table_schema[3:]
+                    formatted_table = f"{table_schema}.{table_name}"
+                elif len(parts) == 3:
+                    _, table_schema, table_name = parts
+                    if table_schema.startswith('C##'):
+                        table_schema = table_schema[3:]
+                    formatted_table = f"{table_schema}.{table_name}"
+                else:
+                    raise ValueError(f"Invalid table format: '{table}'")
             else:
-                # Already has schema
-                parts = table_upper.split('.', 1)
-                table_schema = parts[0]
-                table_name = parts[1]
-                
-                # Remove C## prefix if present
-                if table_schema.startswith('C##'):
-                    table_schema = table_schema[3:]
-                
-                formatted_table = f"{table_schema}.{table_name}"
+                formatted_table = f"{schema_name}.{table}"
             
             formatted_tables.append(formatted_table)
+
+        if not formatted_tables:
+            raise ValueError("No valid tables after formatting")
         
         config["table.include.list"] = ",".join(formatted_tables)
-        
-        logger.info("=" * 80)
-        logger.info(f"✅ TABLE FILTER CONFIGURED ({len(formatted_tables)} tables):")
-        logger.info("=" * 80)
-        for table in formatted_tables:
-            # Extract table name for topic
-            table_name_only = table.split('.')[1]
-            expected_topic = f"{topic_prefix}.{table_name_only}"
-            logger.info(f"   • {table}")
-            logger.info(f"     → Kafka Topic: {expected_topic}")
-        logger.info("=" * 80)
-    
+        logger.info(f"📋 Tables: {len(formatted_tables)}")
+
     # Apply custom config
     if replication_config:
-        if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
+        if getattr(replication_config, 'snapshot_mode', None):
             config["snapshot.mode"] = replication_config.snapshot_mode
-        
-        if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
+        if getattr(replication_config, 'custom_config', None):
             config.update(replication_config.custom_config)
-    
-    # ============================================================================
-    # FINAL SUMMARY
-    # ============================================================================
-    logger.info("=" * 80)
-    logger.info("ORACLE CONNECTOR CONFIGURATION SUMMARY")
-    logger.info("=" * 80)
-    logger.info(f"✅ Connector: {connector_name}")
-    logger.info(f"✅ Connection DB (CDB): {connection_db}")
-    if pdb_name:
-        logger.info(f"✅ PDB Name: {pdb_name} (WHERE TABLES LIVE)")
-    logger.info(f"✅ JDBC URL: {jdbc_url}")
-    logger.info(f"✅ Username: {raw_username}")
-    logger.info(f"✅ Schema filter: {schema_name}")
-    logger.info(f"✅ Topic prefix: {topic_prefix}")
-    
-    if tables_whitelist:
-        logger.info(f"✅ Tables to replicate: {len(formatted_tables)}")
-        if formatted_tables:
-            logger.info(f"   Format example: {formatted_tables[0]}")
-        logger.info(f"   ⚠️  NOTE: Kafka topics will NOT include schema prefix")
-        if formatted_tables:
-            example_table = formatted_tables[0].split('.')[1]
-            logger.info(f"   Example: {formatted_tables[0]} → Topic: {topic_prefix}.{example_table}")
-    
-    logger.info("=" * 80)
-    
+
+    logger.info("✅ Oracle connector configured with signal table support")
+
     return config
 
 

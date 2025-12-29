@@ -60,16 +60,16 @@ class KafkaSignalSender:
         """
         Send incremental snapshot signal to Debezium connector.
         
-        CRITICAL: Signal key MUST match connector's topic.prefix configuration!
-        
-        This triggers a snapshot of specific tables without affecting
-        ongoing CDC streaming of other tables.
+        ⚠️ ORACLE SPECIAL HANDLING:
+        For Oracle, database_name should be the PDB name (e.g., XEPDB1),
+        and table_names should be in SCHEMA.TABLE format (e.g., CDC_USER.PRODUCTS).
+        The signal will automatically format them as PDB.SCHEMA.TABLE.
         
         Args:
-            topic_prefix: Topic prefix (e.g., 'client_1_db_3') - MUST match connector config
-            database_name: Source database name
-            table_names: List of table names to snapshot
-            schema_name: Schema name (PostgreSQL/Oracle)
+            topic_prefix: Topic prefix (e.g., 'client_1_db_5')
+            database_name: Source database/PDB name (e.g., 'XEPDB1' for Oracle)
+            table_names: List of table names (e.g., ['CDC_USER.PRODUCTS'])
+            schema_name: Schema name (for PostgreSQL, or Oracle fallback)
             db_type: Database type ('mysql', 'postgresql', 'sqlserver', 'oracle')
         
         Returns:
@@ -77,19 +77,17 @@ class KafkaSignalSender:
         """
         try:
             signal_topic = f"{topic_prefix}.signals"
+            signal_id = str(uuid.uuid4())
+            signal_key = topic_prefix
             
-            # ✅ CRITICAL FIX: Use topic_prefix as signal key
-            # Debezium signal matching uses topic.prefix (NOT database.server.name!)
-            # See: https://github.com/debezium/debezium/blob/main/debezium-core/src/main/java/io/debezium/pipeline/signal/channels/KafkaSignalChannel.java
+            logger.info(f"📡 Sending incremental snapshot signal:")
+            logger.info(f"   Signal ID: {signal_id}")
+            logger.info(f"   Signal Key: {signal_key}")
+            logger.info(f"   Topic: {signal_topic}")
+            logger.info(f"   Database: {database_name} ({db_type.upper()})")
+            logger.info(f"   Tables: {len(table_names)}")
             
-            signal_id = str(uuid.uuid4())  # For tracking in logs
-            
-            # Signal key MUST match the connector's topic.prefix configuration
-            signal_key = topic_prefix  # This is what Debezium checks against!
-            
-            logger.info(f"🔑 Signal key will be: {signal_key} (matches topic.prefix)")
-            
-            # Build table identifiers based on database type
+            # Build table identifiers
             table_identifiers = self._build_table_identifiers(
                 database_name,
                 table_names,
@@ -99,6 +97,10 @@ class KafkaSignalSender:
             
             if not table_identifiers:
                 return False, "No valid table identifiers generated"
+            
+            logger.info(f"   Formatted identifiers:")
+            for identifier in table_identifiers:
+                logger.info(f"      • {identifier}")
             
             # Build signal payload
             signal_payload = {
@@ -110,27 +112,18 @@ class KafkaSignalSender:
                 }
             }
             
-            logger.info(f"📡 Sending incremental snapshot signal:")
-            logger.info(f"   Signal ID: {signal_id}")
-            logger.info(f"   Signal Key: {signal_key} (must match topic.prefix)")
-            logger.info(f"   Topic: {signal_topic}")
-            logger.info(f"   Database: {database_name} ({db_type.upper()})")
-            logger.info(f"   Tables: {len(table_names)}")
-            logger.info(f"   Identifiers: {table_identifiers}")
-            
             # Send signal to Kafka
             self.producer.produce(
                 topic=signal_topic,
-                key=signal_key.encode('utf-8'),  # ✅ CRITICAL: Use server name, not UUID!
+                key=signal_key.encode('utf-8'),
                 value=json.dumps(signal_payload).encode('utf-8'),
                 callback=self._delivery_callback
             )
             
-            # Wait for message delivery
+            # Wait for delivery
             self.producer.flush(timeout=10)
             
             logger.info(f"✅ Incremental snapshot signal sent successfully!")
-            logger.info(f"   Signal ID: {signal_id}")
             logger.info(f"   Tables: {', '.join(table_identifiers)}")
             
             return True, f"Incremental snapshot initiated for {len(table_names)} table(s)"
@@ -235,10 +228,10 @@ class KafkaSignalSender:
         - MySQL:      <database>.<table>
         - PostgreSQL: <schema>.<table>
         - SQL Server: <database>.<schema>.<table>
-        - Oracle:     <schema>.<table>
+        - Oracle:     <PDB>.<schema>.<table> (⚠️ CRITICAL: Must include PDB name!)
         
         Args:
-            database_name: Database name
+            database_name: Database name (for Oracle, this is the PDB name like XEPDB1)
             table_names: List of table names
             schema_name: Schema name (for PostgreSQL/Oracle)
             db_type: Database type
@@ -265,37 +258,49 @@ class KafkaSignalSender:
                     identifier = f"{schema}.{table}"
             
             elif db_type.lower() in ['sqlserver', 'mssql']:
-                # ✅ SQL Server format: database.schema.table (3-part!)
-                # CRITICAL: Must match Debezium's internal schema registry format
-                # Even though table.include.list uses "dbo.Products" (2-part),
-                # Debezium's internal schema stores "AppDB.dbo.Products" (3-part)
-                # Signal payload MUST use 3-part format for schema lookup to succeed
-                #
-                # Input might be:
-                # - 'AppDB.dbo.Orders' (full path) → use as-is
-                # - 'dbo.Orders' (schema.table) → add database prefix
-                # - 'Orders' (just table) → add database and schema prefix
-
+                # SQL Server format: database.schema.table (3-part)
                 parts = table.split('.')
-
+                
                 if len(parts) == 3:
-                    # Already full path: database.schema.table - perfect!
                     identifier = table
                 elif len(parts) == 2:
-                    # schema.table format → add database prefix
                     identifier = f"{database_name}.{table}"
                 else:
-                    # Just table name → add database and schema prefix
                     schema = schema_name or 'dbo'
                     identifier = f"{database_name}.{schema}.{table}"
             
             elif db_type.lower() == 'oracle':
-                # Oracle format: schema.table
-                schema = schema_name or database_name.upper()
-                if '.' in table:
+                # ⚠️ ORACLE CRITICAL FIX:
+                # Debezium's internal schema registry uses: <PDB>.<SCHEMA>.<TABLE>
+                # Even though the connector config might just use <SCHEMA>.<TABLE>,
+                # the signal payload MUST use 3-part format for schema lookup.
+                #
+                # Example:
+                # - Connector config: table.include.list=CDC_USER.PRODUCTS
+                # - Internal schema: XEPDB1.CDC_USER.PRODUCTS
+                # - Signal payload MUST be: XEPDB1.CDC_USER.PRODUCTS
+                
+                # Input might be:
+                # - 'XEPDB1.CDC_USER.PRODUCTS' (full) → use as-is
+                # - 'CDC_USER.PRODUCTS' (schema.table) → add PDB prefix
+                # - 'PRODUCTS' (just table) → add PDB and schema
+                
+                parts = table.split('.')
+                
+                if len(parts) == 3:
+                    # Already full path: PDB.SCHEMA.TABLE
                     identifier = table
+                elif len(parts) == 2:
+                    # SCHEMA.TABLE format → add PDB prefix
+                    # database_name should be the PDB name (e.g., XEPDB1)
+                    identifier = f"{database_name}.{table}"
                 else:
-                    identifier = f"{schema}.{table}"
+                    # Just table name → add PDB and schema
+                    schema = schema_name or database_name.upper()
+                    identifier = f"{database_name}.{schema}.{table}"
+                
+                # Ensure UPPERCASE for Oracle
+                identifier = identifier.upper()
             
             else:
                 # Generic fallback

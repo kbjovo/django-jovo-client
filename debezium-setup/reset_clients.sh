@@ -74,6 +74,17 @@ ClientDatabase.objects.create(
     database_name="AppDB",
 )
 
+ClientDatabase.objects.create(
+    client=client,
+    connection_name="oracle-connector",
+    db_type="oracle",
+    host="192.168.0.50",
+    port=1521,
+    username="c##cdc_user",
+    password="cdc_pass",
+    database_name="XEPDB1",
+    oracle_connection_mode="service",
+
 print("✔️ Client and database connectors created (Oracle skipped)")
 EOF
 
