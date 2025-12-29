@@ -503,30 +503,61 @@ class DebeziumCDCConsumer:
                 if '.' in source_table:
                     table_without_schema = source_table.split('.', 1)[1]
                     logger.debug(f"   🔍 SQL Server: Trying without schema: {table_without_schema}")
-                    
+
                     table_mapping = TableMapping.objects.filter(
                         replication_config=self.replication_config,
                         source_table=table_without_schema,
                         is_enabled=True
                     ).first()
-                    
+
                     if table_mapping:
                         logger.warning(f"   ⚠️ Found legacy mapping: '{table_without_schema}'")
                         return table_mapping
                 else:
                     table_with_schema = f"dbo.{source_table}"
                     logger.debug(f"   🔍 SQL Server: Trying with schema: {table_with_schema}")
-                    
+
                     table_mapping = TableMapping.objects.filter(
                         replication_config=self.replication_config,
                         source_table=table_with_schema,
                         is_enabled=True
                     ).first()
-                    
+
                     if table_mapping:
                         logger.info(f"   ✅ Found with schema prefix: {table_mapping.source_table}")
                         return table_mapping
-            
+
+            # STRATEGY 3.5: PostgreSQL - Try with/without schema
+            elif db_type == 'postgresql':
+                if '.' in source_table:
+                    # Try without schema prefix (legacy mappings)
+                    table_without_schema = source_table.split('.', 1)[1]
+                    logger.debug(f"   🔍 PostgreSQL: Trying without schema: {table_without_schema}")
+
+                    table_mapping = TableMapping.objects.filter(
+                        replication_config=self.replication_config,
+                        source_table=table_without_schema,
+                        is_enabled=True
+                    ).first()
+
+                    if table_mapping:
+                        logger.warning(f"   ⚠️ Found legacy mapping without schema: '{table_without_schema}'")
+                        return table_mapping
+                else:
+                    # Try with schema prefix
+                    table_with_schema = f"public.{source_table}"
+                    logger.debug(f"   🔍 PostgreSQL: Trying with schema: {table_with_schema}")
+
+                    table_mapping = TableMapping.objects.filter(
+                        replication_config=self.replication_config,
+                        source_table=table_with_schema,
+                        is_enabled=True
+                    ).first()
+
+                    if table_mapping:
+                        logger.info(f"   ✅ Found with schema prefix: {table_mapping.source_table}")
+                        return table_mapping
+
             # STRATEGY 4: Case-insensitive match
             logger.debug(f"   🔍 Trying case-insensitive match")
             

@@ -2148,7 +2148,7 @@ def manage_postgresql_publication(db_config, replication_config, table_names):
     Args:
         db_config: ClientDatabase instance
         replication_config: ReplicationConfig instance
-        table_names: List of table names to include in publication
+        table_names: List of table names (can be qualified like "public.table" or unqualified like "table")
     
     Returns:
         tuple: (success, message)
@@ -2161,17 +2161,28 @@ def manage_postgresql_publication(db_config, replication_config, table_names):
         db_id = db_config.id
         publication_name = f"debezium_pub_{client_id}_{db_id}"
         
-        logger.info(f"📋 Managing PostgreSQL publication: {publication_name}")
-        logger.info(f"   Tables to include: {table_names}")
+        logger.info("=" * 80)
+        logger.info(f"📋 MANAGING POSTGRESQL PUBLICATION")
+        logger.info("=" * 80)
+        logger.info(f"   Publication: {publication_name}")
+        logger.info(f"   Input tables: {table_names}")
+        logger.info(f"   Table count: {len(table_names)}")
+        
+        # ✅ CRITICAL: Validate we have tables
+        if not table_names:
+            error_msg = "❌ Cannot create publication with empty table list"
+            logger.error(error_msg)
+            logger.error("   This usually means no tables are enabled in the replication config")
+            return False, error_msg
         
         engine = get_database_engine(db_config)
         
         with engine.connect() as conn:
             # Check if publication exists
             check_query = text(
-                f"SELECT COUNT(*) FROM pg_publication WHERE pubname = '{publication_name}'"
+                "SELECT COUNT(*) FROM pg_publication WHERE pubname = :pub_name"
             )
-            result = conn.execute(check_query)
+            result = conn.execute(check_query, {"pub_name": publication_name})
             exists = result.scalar() > 0
             
             if exists:
@@ -2183,31 +2194,74 @@ def manage_postgresql_publication(db_config, replication_config, table_names):
             else:
                 logger.info(f"ℹ️  Publication doesn't exist yet, will create new one")
             
-            # Create publication with new table list
-            schema_name = 'public'
-            tables_qualified = [f"{schema_name}.{table}" for table in table_names]
+            # ✅ FIX: Handle both qualified and unqualified table names
+            tables_qualified = []
+            for table in table_names:
+                table_stripped = table.strip()
+                
+                if not table_stripped:
+                    logger.warning(f"⚠️  Skipping empty table name")
+                    continue
+                
+                if '.' in table_stripped:
+                    # Already qualified (e.g., "public.busy_items_greenera")
+                    tables_qualified.append(table_stripped)
+                    logger.debug(f"   ✓ Already qualified: {table_stripped}")
+                else:
+                    # Add default schema
+                    qualified = f"public.{table_stripped}"
+                    tables_qualified.append(qualified)
+                    logger.debug(f"   ✓ Added schema: {table_stripped} → {qualified}")
             
-            logger.info(f"🔨 Creating publication with {len(tables_qualified)} tables...")
+            logger.info(f"")
+            logger.info(f"📊 Publication Summary:")
+            logger.info(f"   Input tables: {len(table_names)}")
+            logger.info(f"   Qualified tables: {len(tables_qualified)}")
+            logger.info(f"")
+            logger.info(f"📋 Final table list:")
+            for i, table in enumerate(tables_qualified, 1):
+                logger.info(f"   {i}. {table}")
             
-            create_query = text(
-                f"CREATE PUBLICATION {publication_name} FOR TABLE {', '.join(tables_qualified)}"
-            )
+            # ✅ CRITICAL: Double-check we have tables before creating SQL
+            if not tables_qualified:
+                error_msg = "❌ No valid tables to add to publication after qualification"
+                logger.error(error_msg)
+                logger.error(f"   Original input: {table_names}")
+                return False, error_msg
+            
+            # Create the publication
+            tables_list = ', '.join(tables_qualified)
+            create_sql = f"CREATE PUBLICATION {publication_name} FOR TABLE {tables_list}"
+            
+            logger.info(f"")
+            logger.info(f"🔨 Creating publication...")
+            logger.info(f"   SQL: {create_sql}")
+            
+            create_query = text(create_sql)
             conn.execute(create_query)
             conn.commit()
             
-            logger.info(f"✅ Created publication: {publication_name}")
-            logger.info(f"   Tables: {', '.join(tables_qualified)}")
+            logger.info(f"")
+            logger.info(f"✅ Publication created successfully!")
+            logger.info("=" * 80)
             
         engine.dispose()
         
-        return True, f"Publication {publication_name} recreated with {len(table_names)} table(s)"
+        return True, f"Publication {publication_name} recreated with {len(tables_qualified)} table(s)"
         
     except Exception as e:
         error_msg = f"Failed to manage publication: {str(e)}"
-        logger.error(f"❌ {error_msg}", exc_info=True)
+        logger.error("=" * 80)
+        logger.error(f"❌ PUBLICATION MANAGEMENT FAILED")
+        logger.error("=" * 80)
+        logger.error(f"   Error: {error_msg}")
+        logger.error(f"   Publication: {publication_name}")
+        logger.error(f"   Input tables: {table_names}")
+        logger.error("=" * 80)
+        logger.error(f"Full traceback:", exc_info=True)
         return False, error_msg
-
-
+    
+    
 
 def create_sqlserver_signal_table(db_config):
     """
@@ -3179,3 +3233,6 @@ def cdc_edit_config(request, config_pk):
     }
 
     return render(request, 'client/cdc/edit_config.html', context)
+
+
+

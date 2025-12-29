@@ -273,7 +273,16 @@ def get_postgresql_connector_config(
     }
     
     if tables_whitelist:
-        tables_full = [f"{schema_name}.{table}" for table in tables_whitelist]
+        # ✅ FIX: Don't add schema prefix if table already has it
+        tables_full = []
+        for table in tables_whitelist:
+            if '.' in table:
+                # Table already has schema prefix (e.g., 'public.busy_acc_greenera')
+                tables_full.append(table)
+            else:
+                # Add schema prefix (e.g., 'busy_acc_greenera' -> 'public.busy_acc_greenera')
+                tables_full.append(f"{schema_name}.{table}")
+
         config["table.include.list"] = ",".join(tables_full)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
     
