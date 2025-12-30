@@ -489,7 +489,7 @@ def get_oracle_connector_config(
     logger.info(f"   Schema: {schema_name}")
 
     # ✅ CRITICAL: Create signal table BEFORE connector starts
-    signal_table = f"{schema_name}.DEBEZIUM_SIGNAL"
+    signal_table = f"{pdb_name}.{schema_name}.DEBEZIUM_SIGNAL"
 
     jdbc_url = f"jdbc:oracle:thin:@//{db_config.host}:{db_config.port}/{cdb_service}"
 

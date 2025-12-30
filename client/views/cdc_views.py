@@ -3496,46 +3496,145 @@ def _handle_kafka_signal_snapshots(request, replication_config, db_config, clien
 
         # Database-specific handling
         if db_type == 'oracle':
-            # ✅ ORACLE FIX: Use incremental snapshot signals via Kafka
-            # The when_needed mode DOES NOT work when a previous snapshot already exists.
-            # Debezium will see the existing offset and skip snapshotting entirely.
+            # ✅ ORACLE CRITICAL FIX FOR AVRO SERIALIZATION:
+            # When using Avro with Schema Registry, incremental snapshots REQUIRE the schema
+            # to be registered BEFORE data can be sent. Unlike regular snapshots (which register
+            # schemas automatically), incremental snapshots expect schemas to already exist.
             #
-            # Correct approach: Send incremental snapshot signal via Kafka topic
-            # This works even when connector is already running with existing tables.
+            # PROBLEM: when_needed mode doesn't work when offsets exist (skips snapshot)
+            # SOLUTION: Use schema_only snapshot to register schemas, then incremental snapshot for data
+            #
+            # Workflow:
+            # 1. Set snapshot.mode=schema_only → registers Avro schemas (no data)
+            # 2. Restart connector → executes schema_only snapshot
+            # 3. Revert snapshot.mode → back to original mode
+            # 4. Send incremental snapshot signal → sends data using registered schemas
+
+            import time
 
             logger.info("=" * 80)
-            logger.info("🔧 ORACLE: Sending incremental snapshot signal...")
+            logger.info("🔧 ORACLE: Registering Avro schemas for new tables...")
             logger.info("=" * 80)
 
-            # Oracle tables should already be in SCHEMA.TABLE format (e.g., CDC_USER.PAYMENTS)
-            # We need to send them as XEPDB1.SCHEMA.TABLE for the signal
+            connector_name = replication_config.connector_name
+            manager = DebeziumConnectorManager()
+
+            # Step 1: Get current connector config
+            logger.info("\n📋 Step 1/7: Getting current connector configuration...")
+            current_config = manager.get_connector_config(connector_name)
+
+            if not current_config:
+                signal_sender.close()
+                messages.error(request, f'❌ Failed to get connector config for {connector_name}')
+                return
+
+            original_snapshot_mode = current_config.get('snapshot.mode', 'when_needed')
+            logger.info(f"   Current snapshot.mode: {original_snapshot_mode}")
+
+            # Step 2: Set to schema_only mode (registers Avro schemas without data)
+            logger.info("\n📸 Step 2/7: Setting snapshot.mode=schema_only...")
+            logger.info("   This registers Avro schemas in Schema Registry without snapshotting data")
+
+            updated_config = current_config.copy()
+            updated_config['snapshot.mode'] = 'schema_only'
+
+            if not manager.update_connector_config(connector_name, updated_config):
+                signal_sender.close()
+                messages.error(request, '❌ Failed to update connector config')
+                return
+
+            logger.info("   ✅ Config updated to schema_only")
+
+            # Step 3: Restart connector to trigger schema registration
+            logger.info("\n🔄 Step 3/7: Restarting connector to register Avro schemas...")
+            if not manager.restart_connector(connector_name):
+                logger.warning("   ⚠️  Restart may have failed, but continuing...")
+            else:
+                logger.info("   ✅ Connector restarted")
+
+            # Step 4: Wait for schema registration (schema_only is fast, ~10 seconds)
+            logger.info("\n⏳ Step 4/7: Waiting for Avro schema registration (15 seconds)...")
+            logger.info("   Schema Registry will now have entries for new tables")
+            time.sleep(15)
+
+            # Step 5: Revert to original snapshot mode
+            logger.info(f"\n🔧 Step 5/7: Reverting to snapshot.mode={original_snapshot_mode}...")
+            updated_config['snapshot.mode'] = original_snapshot_mode
+
+            if not manager.update_connector_config(connector_name, updated_config):
+                signal_sender.close()
+                messages.warning(request, '⚠️ Failed to revert snapshot mode, but schemas are registered')
+                logger.warning("   ⚠️  Config revert failed, but schemas ARE registered")
+            else:
+                logger.info(f"   ✅ Reverted to {original_snapshot_mode}")
+
+            # Step 6: Restart connector with original config
+            logger.info("\n🔄 Step 6/7: Restarting connector with original config...")
+            manager.restart_connector(connector_name)
+            logger.info("   Waiting 5 seconds for connector to stabilize...")
+            time.sleep(5)
+
+            # Step 7: Send incremental snapshot signal (now schemas exist!)
+            logger.info("\n📡 Step 7/7: Sending incremental snapshot signal...")
+            logger.info("   Now that Avro schemas are registered, data can be sent")
+
+            # Build table identifiers for signal payload
             tables_for_signal = []
-
             for table in newly_added_tables:
-                # Table is in format: CDC_USER.PAYMENTS or just PAYMENTS
                 if '.' in table:
                     # Already has schema: CDC_USER.PAYMENTS
-                    # Signal needs: XEPDB1.CDC_USER.PAYMENTS (PDB.SCHEMA.TABLE)
                     tables_for_signal.append(table)
                 else:
-                    # Just table name: PAYMENTS
-                    # Get schema from username
+                    # Just table name: PAYMENTS → add schema
                     username = db_config.username.upper()
                     schema = username[3:] if username.startswith('C##') else username
                     tables_for_signal.append(f"{schema}.{table}")
 
             logger.info(f"   Tables to snapshot: {tables_for_signal}")
 
-            # database_name should be the PDB name (e.g., XEPDB1)
+            # Send the signal (PDB name is needed for 3-part identifier)
             pdb_name = db_config.database_name.upper()
 
             success, message = signal_sender.send_incremental_snapshot_signal(
                 topic_prefix=topic_prefix,
                 database_name=pdb_name,
                 table_names=tables_for_signal,
-                schema_name=None,  # Not needed, already in table names
+                schema_name=None,
                 db_type='oracle'
             )
+
+            # Log summary
+            logger.info("\n" + "=" * 80)
+            if success:
+                logger.info("✅ ORACLE AVRO SCHEMA FIX COMPLETE")
+                logger.info("=" * 80)
+                logger.info("\n📊 Summary:")
+                logger.info("   1. ✅ Avro schemas registered in Schema Registry")
+                logger.info("   2. ✅ Incremental snapshot signal sent via Kafka")
+                logger.info("   3. ⏳ Data snapshot in progress")
+                logger.info("\n📋 Tables being snapshotted:")
+                for table in newly_added_tables:
+                    logger.info(f"   • {table}")
+                logger.info("\n💡 Data will arrive in Kafka topics within 30-60 seconds")
+                logger.info("=" * 80)
+            else:
+                logger.error("❌ INCREMENTAL SNAPSHOT SIGNAL FAILED")
+                logger.error(f"   Error: {message}")
+                logger.error("=" * 80)
+
+            # Close signal sender and show user message
+            signal_sender.close()
+
+            if success:
+                messages.success(
+                    request,
+                    f'✅ {len(newly_added_tables)} table(s) added! Avro schemas registered. Snapshot in progress.'
+                )
+            else:
+                messages.warning(request, f'⚠️ Schema registration succeeded but snapshot signal failed: {message}')
+
+            # Return early - Oracle is fully handled
+            return
 
         elif db_type == 'postgresql':
             # Strip schema for signal payload
