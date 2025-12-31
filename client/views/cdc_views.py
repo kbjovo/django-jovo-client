@@ -174,7 +174,17 @@ def build_row_count_query(table_name: str, db_type: str) -> str:
         return f"SELECT COUNT(*) as cnt FROM `{table_name}`"
 
     elif db_type == 'postgresql':
-        return f'SELECT COUNT(*) as cnt FROM "{table_name}"'
+        # ✅ FIX: PostgreSQL needs double quotes and proper schema handling
+        if '.' in table_name:
+            schema, table = table_name.split('.', 1)
+            # Remove any existing quotes first
+            schema = schema.strip('"')
+            table = table.strip('"')
+            return f'SELECT COUNT(*) as cnt FROM "{schema}"."{table}"'
+        else:
+            # No schema - assume public
+            table = table_name.strip('"')
+            return f'SELECT COUNT(*) as cnt FROM "public"."{table}"'
 
     elif db_type == 'mssql':
         if '.' in table_name:
