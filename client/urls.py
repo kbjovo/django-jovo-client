@@ -33,6 +33,8 @@ from .views import (
     stop_replication,
     restart_replication_view,
     replication_status,
+    create_topics,
+    list_topics,
 )
 
 
@@ -104,6 +106,10 @@ urlpatterns = [
     path('cdc/config/<int:config_id>/stop/', stop_replication, name='stop_replication'),
     path('cdc/config/<int:config_id>/restart/', restart_replication_view, name='restart_replication'),
     path('cdc/config/<int:config_id>/status/', replication_status, name='replication_status'),
+
+    # Topic Management
+    path('cdc/config/<int:config_id>/topics/create/', create_topics, name='create_topics'),
+    path('cdc/config/<int:config_id>/topics/list/', list_topics, name='list_topics'),
 
     # Connector Actions
      path('cdc/config/<int:config_pk>/action/<str:action>/',

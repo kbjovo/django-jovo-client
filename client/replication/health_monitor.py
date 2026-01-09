@@ -53,12 +53,12 @@ def monitor_replication_health():
             status = orchestrator.get_unified_status()
 
             overall_health = status['overall']
-            connector_health = status['connector']['healthy']
-            consumer_health = status['consumer']['healthy']
+            source_connector_health = status['source_connector']['healthy']
+            sink_connector_health = status['sink_connector']['healthy']
 
             logger.info(f"[{config.connector_name}] Health: {overall_health} "
-                       f"(Connector: {'✓' if connector_health else '✗'}, "
-                       f"Consumer: {'✓' if consumer_health else '✗'})")
+                       f"(Source: {'✓' if source_connector_health else '✗'}, "
+                       f"Sink: {'✓' if sink_connector_health else '✗'})")
 
             # Track health statistics
             if overall_health == 'healthy':
@@ -96,60 +96,80 @@ def _try_fix_degraded(config, status):
     Returns:
         True if fix was attempted, False otherwise
     """
-    connector_health = status['connector']['healthy']
-    consumer_health = status['consumer']['healthy']
+    source_connector_health = status['source_connector']['healthy']
+    sink_connector_health = status['sink_connector']['healthy']
 
-    # Case 1: Connector healthy, consumer unhealthy
-    if connector_health and not consumer_health:
-        return _fix_consumer(config, status['consumer'])
+    # Case 1: Source healthy, sink unhealthy
+    if source_connector_health and not sink_connector_health:
+        return _fix_sink_connector(config, status['sink_connector'])
 
-    # Case 2: Consumer healthy, connector unhealthy
-    elif consumer_health and not connector_health:
-        return _fix_connector(config, status['connector'])
+    # Case 2: Sink healthy, source unhealthy
+    elif sink_connector_health and not source_connector_health:
+        return _fix_source_connector(config, status['source_connector'])
+
+    # Case 3: Both unhealthy - try to fix source first
+    elif not source_connector_health and not sink_connector_health:
+        source_fixed = _fix_source_connector(config, status['source_connector'])
+        if source_fixed:
+            return True
+        return _fix_sink_connector(config, status['sink_connector'])
 
     return False
 
 
-def _fix_consumer(config, consumer_status):
+def _fix_sink_connector(config, sink_status):
     """
-    Try to fix unhealthy consumer.
+    Try to fix unhealthy sink connector.
 
     Checks:
-    1. Is heartbeat stale? → Restart consumer
-    2. Is consumer state ERROR? → Restart consumer
+    1. Is connector PAUSED? → Resume it
+    2. Is connector FAILED? → Restart it
+    3. Is connector NOT_CONFIGURED? → Skip (no sink connector configured)
 
     Returns:
-        True if restart attempted, False otherwise
+        True if fix attempted, False otherwise
     """
-    from client.tasks import start_kafka_consumer
+    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
-    consumer_state = consumer_status['state']
-    heartbeat_recent = consumer_status['heartbeat_recent']
+    sink_state = sink_status['state']
 
-    # Check if consumer is stuck (no recent heartbeat)
-    if consumer_state == 'RUNNING' and not heartbeat_recent:
-        logger.warning(f"[{config.connector_name}] Consumer heartbeat stale, restarting...")
+    # Skip if no sink connector configured
+    if sink_state == 'NOT_CONFIGURED':
+        return False
 
-        # Restart consumer
-        start_kafka_consumer.apply_async(args=[config.id])
+    if not config.sink_connector_name:
+        return False
 
-        logger.info(f"[{config.connector_name}] ✓ Consumer restart triggered")
-        return True
+    manager = DebeziumConnectorManager()
 
-    # Check if consumer is in error state
-    elif consumer_state == 'ERROR':
-        logger.warning(f"[{config.connector_name}] Consumer in ERROR state, restarting...")
+    # Check if connector is paused
+    if sink_state == 'PAUSED':
+        logger.warning(f"[{config.sink_connector_name}] Sink connector is PAUSED, resuming...")
 
-        # Restart consumer
-        start_kafka_consumer.apply_async(args=[config.id])
+        try:
+            manager.resume_connector(config.sink_connector_name)
+            logger.info(f"[{config.sink_connector_name}] ✓ Sink connector resumed")
+            return True
+        except Exception as e:
+            logger.error(f"[{config.sink_connector_name}] Failed to resume sink connector: {e}")
+            return False
 
-        logger.info(f"[{config.connector_name}] ✓ Consumer restart triggered")
-        return True
+    # Check if connector is failed
+    elif sink_state == 'FAILED':
+        logger.warning(f"[{config.sink_connector_name}] Sink connector is FAILED, restarting...")
+
+        try:
+            manager.restart_connector(config.sink_connector_name)
+            logger.info(f"[{config.sink_connector_name}] ✓ Sink connector restarted")
+            return True
+        except Exception as e:
+            logger.error(f"[{config.sink_connector_name}] Failed to restart sink connector: {e}")
+            return False
 
     return False
 
 
-def _fix_connector(config, connector_status):
+def _fix_source_connector(config, connector_status):
     """
     Try to fix unhealthy connector.
 
@@ -160,7 +180,7 @@ def _fix_connector(config, connector_status):
     Returns:
         True if fix attempted, False otherwise
     """
-    from client.utils.debezium_manager import DebeziumConnectorManager
+    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
     connector_state = connector_status['state']
     manager = DebeziumConnectorManager()

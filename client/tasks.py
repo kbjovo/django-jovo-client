@@ -9,8 +9,7 @@ from datetime import timedelta
 
 from client.models import Client
 from client.models.replication import ReplicationConfig
-from client.utils.debezium_manager import DebeziumConnectorManager
-from client.utils.kafka_consumer import DebeziumCDCConsumer
+from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from client.utils.database_utils import get_database_engine
 from client.utils.notification_utils import send_error_notification
 
@@ -153,8 +152,8 @@ def create_debezium_connector(self, replication_config_id):
         logger.info(f"🚀 Creating Debezium connector for ReplicationConfig {replication_config_id}")
         
         config = ReplicationConfig.objects.get(id=replication_config_id)
-        
-        from client.utils.connector_templates import (
+
+        from jovoclient.utils.debezium.connector_templates import (
             generate_connector_name,
             get_connector_config_for_database
         )
@@ -180,7 +179,7 @@ def create_debezium_connector(self, replication_config_id):
             db_config=db_config,
             replication_config=config,
             tables_whitelist=tables_list,
-            kafka_bootstrap_servers='kafka:29092',  # Docker internal
+            kafka_bootstrap_servers='kafka-1:9092,kafka-2:9092,kafka-3:9092',
             schema_registry_url='http://schema-registry:8081'
         )
         
@@ -307,7 +306,7 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
         from client.replication import ResilientKafkaConsumer
         from django.conf import settings
 
-        bootstrap_servers = settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'kafka:29092')
+        bootstrap_servers = settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
         logger.info(f"🔄 Creating ResilientKafkaConsumer with bootstrap_servers={bootstrap_servers}...")
 
         consumer = ResilientKafkaConsumer(
@@ -432,19 +431,6 @@ def delete_debezium_connector(connector_name, replication_config_id=None, delete
         if success:
             logger.info(f"✅ Successfully deleted connector: {connector_name}")
 
-            # Clear connector offsets
-            if clear_offsets:
-                try:
-                    from client.utils.offset_manager import delete_connector_offsets
-                    logger.info(f"🧹 Clearing offsets for connector: {connector_name}")
-                    offset_deleted = delete_connector_offsets(connector_name)
-                    if offset_deleted:
-                        logger.info(f"✅ Successfully cleared offsets for: {connector_name}")
-                    else:
-                        logger.warning(f"⚠️ Failed to clear offsets for: {connector_name}")
-                except Exception as e:
-                    logger.error(f"❌ Error clearing offsets: {e}", exc_info=True)
-
             # Update config
             if replication_config_id:
                 try:
@@ -521,25 +507,18 @@ def force_resnapshot(replication_config_id):
         connector_name = config.connector_name
 
         # Step 1: Stop consumer
-        logger.info(f"Step 1/5: Stopping consumer...")
+        logger.info(f"Step 1/4: Stopping consumer...")
         stop_kafka_consumer(replication_config_id)
 
         # Step 2: Delete connector
-        logger.info(f"Step 2/5: Deleting connector...")
+        logger.info(f"Step 2/4: Deleting connector...")
         manager = DebeziumConnectorManager()
         success, error = manager.delete_connector(connector_name, notify=False, delete_topics=False)
         if not success:
             raise Exception(f"Failed to delete connector: {error}")
 
-        # Step 3: Clear offsets
-        logger.info(f"Step 3/5: Clearing offsets...")
-        from client.utils.offset_manager import delete_connector_offsets
-        offset_deleted = delete_connector_offsets(connector_name)
-        if not offset_deleted:
-            logger.warning("Failed to clear offsets, but continuing...")
-
-        # Step 4: Recreate connector
-        logger.info(f"Step 4/5: Recreating connector for fresh snapshot...")
+        # Step 3: Recreate connector
+        logger.info(f"Step 3/4: Recreating connector for fresh snapshot...")
         from client.replication.orchestrator import ReplicationOrchestrator
         orchestrator = ReplicationOrchestrator(config)
 
@@ -547,8 +526,8 @@ def force_resnapshot(replication_config_id):
         if not result['success']:
             raise Exception(f"Failed to recreate connector: {result.get('error')}")
 
-        # Step 5: Start consumer
-        logger.info(f"Step 5/5: Starting consumer...")
+        # Step 4: Start consumer
+        logger.info(f"Step 4/4: Starting consumer...")
         start_kafka_consumer.apply_async(
             args=[replication_config_id],
             countdown=10

@@ -15,8 +15,8 @@ django.setup()
 
 import requests
 from client.models import ReplicationConfig
-from client.utils.kafka_topic_manager import KafkaTopicManager
-from client.utils.debezium_manager import DebeziumConnectorManager
+from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
+from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
 print("=" * 80)
 print("CDC DIAGNOSTIC REPORT")

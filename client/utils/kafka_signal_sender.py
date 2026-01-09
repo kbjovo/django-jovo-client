@@ -28,13 +28,19 @@ class KafkaSignalSender:
     restarting the connector or re-snapshotting existing tables.
     """
     
-    def __init__(self, bootstrap_servers: str = 'kafka:29092'):
+    def __init__(self, bootstrap_servers: str = None):
         """
         Initialize Kafka producer for sending signals.
-        
+
         Args:
-            bootstrap_servers: Kafka bootstrap servers
+            bootstrap_servers: Kafka bootstrap servers (defaults to settings)
         """
+        if bootstrap_servers is None:
+            from django.conf import settings
+            bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS',
+                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
         self.bootstrap_servers = bootstrap_servers
         
         self.producer_config = {

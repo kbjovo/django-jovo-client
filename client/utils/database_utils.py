@@ -290,9 +290,61 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
         
         engine.dispose()
         return sorted(tables)
-        
+
     except Exception as e:
         error_msg = f"Failed to get table list: {str(e)}"
+        logger.error(error_msg)
+        raise DatabaseOperationError(error_msg) from e
+
+
+def get_unassigned_tables(client_database_id: int, schema: Optional[str] = None) -> List[str]:
+    """
+    Get list of tables that are NOT assigned to any active ReplicationConfig.
+    This is used when creating new source connectors to show only available tables.
+
+    Args:
+        client_database_id: ClientDatabase ID
+        schema: Schema name (optional)
+
+    Returns:
+        List[str]: List of unassigned table names
+
+    Raises:
+        DatabaseOperationError: If operation fails
+    """
+    try:
+        from client.models.replication import ReplicationConfig, TableMapping
+
+        # Get the database config
+        db_config = ClientDatabase.objects.get(id=client_database_id)
+
+        # Get all assigned tables from active replication configs
+        assigned_tables = TableMapping.objects.filter(
+            replication_config__client_database_id=client_database_id,
+            replication_config__status__in=['configured', 'active', 'paused'],
+            is_enabled=True
+        ).values_list('source_table', flat=True)
+
+        assigned_set = set(assigned_tables)
+
+        logger.info(f"Found {len(assigned_set)} assigned tables for database {db_config.connection_name}")
+
+        # Get all tables from database
+        all_tables = get_table_list(db_config, schema=schema)
+
+        # Filter out assigned tables
+        unassigned = [t for t in all_tables if t not in assigned_set]
+
+        logger.info(f"Found {len(unassigned)} unassigned tables available for new connectors")
+
+        return sorted(unassigned)
+
+    except ClientDatabase.DoesNotExist:
+        error_msg = f"Database with ID {client_database_id} not found"
+        logger.error(error_msg)
+        raise DatabaseOperationError(error_msg)
+    except Exception as e:
+        error_msg = f"Failed to get unassigned tables: {str(e)}"
         logger.error(error_msg)
         raise DatabaseOperationError(error_msg) from e
 

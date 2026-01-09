@@ -1,21 +1,22 @@
 """
-Replication Orchestrator - Main entry point for all replication operations.
+Replication Orchestrator - Efficient sink connector management.
 
-Manages the complete lifecycle of CDC replication:
-- Starting/stopping replication (connector + consumer as a unit)
-- Validating prerequisites
-- Monitoring health
-- Providing unified status
+Key improvements:
+- Reuses existing sink connector when possible
+- Updates sink connector config if table list changes
+- Only creates new sink connector if it doesn't exist
+- Always creates fresh source connector with incremented version
 """
 
 import logging
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Set
 from django.utils import timezone
+from django.conf import settings
 
-from client.utils.debezium_manager import DebeziumConnectorManager
-from client.utils.kafka_topic_manager import KafkaTopicManager
-from client.utils.connector_templates import get_connector_config_for_database
-from client.utils.offset_manager import DebeziumOffsetManager
+from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
+from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
+from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
 from .validators import ReplicationValidator
 from sqlalchemy import text
 
@@ -41,25 +42,41 @@ class ReplicationOrchestrator:
         self.validator = ReplicationValidator(replication_config)
         self.connector_manager = DebeziumConnectorManager()
         self.topic_manager = KafkaTopicManager()
-        self.offset_manager = DebeziumOffsetManager()
 
     # ==========================================
-    # Main Operations
+    # Utility Methods
+    # ==========================================
+
+    def _update_status(self, status: str, message: Optional[str] = None):
+        """Update ReplicationConfig status."""
+        self.config.status = status
+        if message:
+            self.config.last_error_message = message if status == 'error' else ''
+        self.config.save()
+
+    def _log_info(self, message: str):
+        """Log info message."""
+        logger.info(f"[{self.config.connector_name}] {message}")
+
+    def _log_warning(self, message: str):
+        """Log warning message."""
+        logger.warning(f"[{self.config.connector_name}] {message}")
+
+    def _log_error(self, message: str):
+        """Log error message."""
+        logger.error(f"[{self.config.connector_name}] {message}") 
     # ==========================================
 
     def start_replication(self) -> Tuple[bool, str]:
         """
         Start complete replication (connector + consumer).
 
-        SIMPLIFIED FLOW:
-        1. Validate prerequisites (database connectivity, permissions, binlog settings)
-        2. Start Debezium connector with 'initial' snapshot mode
-           - Debezium performs initial snapshot → Kafka topics (auto-created)
-           - Then streams real-time CDC events
-        3. Start consumer to process messages from Kafka → Target database
-
-        Args:
-            force_resync: If True, restart connector to re-snapshot all data
+        EFFICIENT FLOW:
+        1. Validate prerequisites
+        2. Create Kafka topics
+        3. Ensure sink connector is ready (create/update/reuse)
+        4. Create fresh source connector with incremented version
+        5. Mark as active
 
         Returns:
             (success, message)
@@ -72,9 +89,9 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 1: Validate Prerequisites
             # ========================================
-            self._log_info("STEP 1/3: Validating prerequisites...")
+            self._log_info("STEP 1/4: Validating prerequisites...")
             self._log_info("  → Checking database connectivity")
-            self._log_info("  → Verifying MySQL binlog configuration")
+            self._log_info("  → Verifying binlog configuration")
             self._log_info("  → Validating user permissions")
 
             is_valid, errors = self.validator.validate_all()
@@ -88,9 +105,37 @@ class ReplicationOrchestrator:
             self._log_info("")
 
             # ========================================
-            # STEP 2: Start Debezium Connector
+            # STEP 2: Create Kafka Topics Explicitly
             # ========================================
-            self._log_info("STEP 2/3: Starting Debezium connector...")
+            self._log_info("STEP 2/4: Creating Kafka topics explicitly...")
+            
+            success, message = self.create_topics()
+            if not success:
+                self._update_status('error', message)
+                return False, message
+
+            self._log_info(f"✓ {message}")
+            self._log_info("")
+
+            # ========================================
+            # STEP 3: Ensure Sink Connector Ready (Efficient)
+            # ========================================
+            self._log_info("STEP 3/4: Ensuring sink connector is ready...")
+            self._log_info("  → Checking if sink connector exists")
+            self._log_info("  → Will reuse if compatible, update if needed, or create if missing")
+
+            success, message = self._ensure_sink_connector_ready()
+            if not success:
+                self._update_status('error', message)
+                return False, message
+
+            self._log_info(f"✓ {message}")
+            self._log_info("")
+
+            # ========================================
+            # STEP 4: Create Fresh Source Connector
+            # ========================================
+            self._log_info("STEP 4/4: Creating fresh source connector...")
             self._log_info("  → Snapshot mode: 'initial' (full snapshot + CDC streaming)")
             self._log_info("  → Source: {}.{}".format(
                 self.config.client_database.host,
@@ -102,38 +147,21 @@ class ReplicationOrchestrator:
             )
             self._log_info(f"  → Tables: {', '.join(enabled_tables)}")
 
-
-            # Start connector with initial snapshot
+            # Increment version and create connector
             success, message = self._ensure_connector_running(snapshot_mode='initial')
             if not success:
                 self._update_status('error', message)
                 return False, message
 
-            self._log_info(f"✓ Debezium connector started: {self.config.connector_name}")
-            self._log_info("  → Initial snapshot in progress (Debezium → Kafka)")
-            self._log_info("  → Kafka topics will be auto-created")
-            self._log_info("  → Binlog streaming will begin after snapshot completes")
+            self._log_info(f"✓ Source connector created: {self.config.connector_name}")
             self._log_info("")
 
             # ========================================
-            # STEP 3: Start Consumer
+            # Mark as Active
             # ========================================
-            self._log_info("STEP 3/3: Starting Kafka consumer...")
-            self._log_info("  → Consumer will read from Kafka topics")
-            self._log_info("  → Data flow: Kafka → Consumer → Target database")
-
-            # Mark as active BEFORE starting consumer (consumer task checks this)
-            self._update_status('active', 'Consumer starting...')
+            self._update_status('active', 'Replication active')
             self.config.is_active = True
             self.config.save()
-
-            success, message = self._start_consumer_with_fresh_group()
-            if not success:
-                self._update_status('error', message)
-                return False, message
-
-            self._log_info(f"✓ Consumer started successfully")
-            self._log_info("")
 
             # ========================================
             # Success Summary
@@ -142,17 +170,14 @@ class ReplicationOrchestrator:
             self._log_info("✓ CDC REPLICATION STARTED SUCCESSFULLY")
             self._log_info("=" * 60)
             self._log_info("Status: ACTIVE")
-            self._log_info(f"Connector: {self.config.connector_name}")
+            self._log_info(f"Source Connector: {self.config.connector_name}")
+            self._log_info(f"Sink Connector: {self.config.sink_connector_name}")
             self._log_info(f"Topics: {self.config.kafka_topic_prefix}.*")
-            self._log_info(f"Consumer Group: cdc_consumer_{self.config.client_database.client.id}_{self.config.client_database.database_name}")
             self._log_info("")
-            self._log_info("Next steps:")
-            self._log_info("  1. Monitor initial snapshot progress in Debezium logs")
-            self._log_info("  2. Check consumer is processing messages")
-            self._log_info("  3. Verify data appearing in target database")
+            self._log_info("Data flow:")
+            self._log_info(f"  Source DB → Debezium → Kafka → JDBC Sink → Target DB")
             self._log_info("=" * 60)
 
-            self._update_status('active', 'Replication active')
             return True, "Replication started successfully"
 
         except Exception as e:
@@ -163,10 +188,7 @@ class ReplicationOrchestrator:
 
     def stop_replication(self) -> Tuple[bool, str]:
         """
-        Stop replication (consumer + optionally connector).
-
-        Args:
-            stop_connector: Whether to also stop the Debezium connector
+        Stop replication (pause both connectors).
 
         Returns:
             (success, message)
@@ -176,22 +198,40 @@ class ReplicationOrchestrator:
         self._log_info("=" * 60)
 
         try:
-            # STEP 1: Update status
-            self._log_info("STEP 1/3: Updating status to 'stopping'...")
-            self._update_status('paused', 'Stopping consumer...')
+            # Update status
+            self._update_status('paused', 'Stopping replication...')
             self.config.is_active = False
             self.config.save()
 
-            # STEP 2: Consumer will be stopped by Celery task revocation
-            self._log_info("STEP 2/3: Consumer will be stopped by task manager...")
+            # Pause both connectors
+            errors = []
+            
+            # Pause source connector
+            if self.config.connector_name:
+                try:
+                    success, error = self.connector_manager.pause_connector(self.config.connector_name)
+                    if success:
+                        self._log_info(f"✓ Paused source: {self.config.connector_name}")
+                    else:
+                        errors.append(f"Source connector: {error}")
+                except Exception as e:
+                    errors.append(f"Source connector: {str(e)}")
 
-            # STEP 3: Optionally pause connector
-            self._log_info("STEP 3/3: Pausing Debezium connector...")
-            try:
-                self.connector_manager.pause_connector(self.config.connector_name)
-                self._log_info(f"✓ Connector paused: {self.config.connector_name}")
-            except Exception as e:
-                self._log_warning(f"Could not pause connector: {e}")
+            # Pause sink connector
+            if self.config.sink_connector_name:
+                try:
+                    success, error = self.connector_manager.pause_connector(self.config.sink_connector_name)
+                    if success:
+                        self._log_info(f"✓ Paused sink: {self.config.sink_connector_name}")
+                    else:
+                        errors.append(f"Sink connector: {error}")
+                except Exception as e:
+                    errors.append(f"Sink connector: {str(e)}")
+
+            if errors:
+                error_msg = "; ".join(errors)
+                self._log_warning(f"⚠️ Some connectors could not be paused: {error_msg}")
+                return False, error_msg
 
             self._log_info("=" * 60)
             self._log_info("✓ REPLICATION STOPPED SUCCESSFULLY")
@@ -233,20 +273,6 @@ class ReplicationOrchestrator:
         """
         Delete replication completely.
 
-        FLOW:
-        1. Stop consumer (Celery task + mark inactive)
-        2. Pause connector (stop producing)
-        3. Skip consumer group deletion (database-based groups are reused)
-        4. Delete connector
-        5. Clear offsets
-        6. Optionally delete topics
-        7. Delete config
-
-        NOTE: Consumer groups are NOT deleted because:
-        - Database-based naming allows reuse for new connectors
-        - Kafka auto-cleans inactive groups after retention period
-        - Deletion attempts often fail if consumer hasn't fully disconnected
-
         Args:
             delete_topics: If True, permanently delete Kafka topics
 
@@ -258,233 +284,635 @@ class ReplicationOrchestrator:
         self._log_info("=" * 80)
 
         config_id = self.config.id
-        connector_name = self.config.connector_name
-        client_id = self.config.client_database.client.id
-        database_name = self.config.client_database.database_name
-        # Use database-based consumer group ID (same as in _start_consumer_with_fresh_group)
-        consumer_group_id = f"cdc_consumer_{client_id}_{database_name}"
+        source_connector_name = self.config.connector_name
+        sink_connector_name = self.config.sink_connector_name
         
         try:
-            # ========================================
-            # STEP 1: Force Stop Consumer
-            # ========================================
-            self._log_info("STEP 1/7: Force stopping consumer...")
-            
             # Mark as inactive
             self.config.is_active = False
             self.config.status = 'stopping'
-            self.config.consumer_state = 'STOPPING'
             self.config.save()
-            self._log_info("  ✓ Marked as inactive")
-            
-            # Revoke Celery task
-            if self.config.consumer_task_id:
+
+            # Delete source connector
+            if source_connector_name:
                 try:
-                    from jovoclient.celery import app as celery_app
-
-                    # First try graceful termination
-                    celery_app.control.revoke(
-                        self.config.consumer_task_id,
-                        terminate=True,
-                        signal='SIGTERM'
+                    success, error = self.connector_manager.delete_connector(
+                        source_connector_name,
+                        delete_topics=False
                     )
-                    self._log_info(f"  → Sent SIGTERM to: {self.config.consumer_task_id}")
-
-                    # Wait 2 seconds then force kill
-                    import time
-                    time.sleep(2)
-
-                    celery_app.control.revoke(
-                        self.config.consumer_task_id,
-                        terminate=True,
-                        signal='SIGKILL'
-                    )
-                    self._log_info(f"  ✓ Force killed task: {self.config.consumer_task_id}")
-
-                except Exception as e:
-                    self._log_warning(f"  ⚠ Could not revoke task: {e}")
-
-            # Check for any other orphaned tasks for this config and kill them too
-            self._log_info("  → Checking for orphaned consumer tasks...")
-            try:
-                from jovoclient.celery import app as celery_app
-                inspect = celery_app.control.inspect()
-                active_tasks = inspect.active()
-
-                orphaned_count = 0
-                if active_tasks:
-                    for worker, tasks in active_tasks.items():
-                        for task in tasks:
-                            if (task['name'] == 'client.tasks.start_kafka_consumer' and
-                                str(config_id) in str(task.get('args', []))):
-
-                                celery_app.control.revoke(
-                                    task['id'],
-                                    terminate=True,
-                                    signal='SIGKILL'
-                                )
-                                self._log_info(f"    ✓ Killed orphaned task: {task['id']}")
-                                orphaned_count += 1
-
-                if orphaned_count == 0:
-                    self._log_info(f"    ✓ No orphaned tasks found")
-                else:
-                    self._log_info(f"    ✓ Killed {orphaned_count} orphaned task(s)")
-
-            except Exception as e:
-                self._log_warning(f"  ⚠ Error checking for orphaned tasks: {e}")
-
-            self._log_info("")
-
-            # ========================================
-            # STEP 2: Pause Connector
-            # ========================================
-            self._log_info("STEP 2/7: Pausing connector...")
-            
-            if connector_name:
-                try:
-                    self.connector_manager.pause_connector(connector_name)
-                    self._log_info(f"  ✓ Paused: {connector_name}")
-                except Exception as e:
-                    self._log_warning(f"  ⚠ Could not pause: {e}")
-            
-            self._log_info("")
-
-            # ========================================
-            # STEP 3: Skip Consumer Group Deletion (Now using database-based groups)
-            # ========================================
-            self._log_info("STEP 3/7: Skipping consumer group deletion...")
-            self._log_info(f"  → Consumer group: {consumer_group_id}")
-            self._log_info(f"  → Database-based naming allows group reuse for new connectors")
-            self._log_info(f"  → Kafka will auto-clean inactive groups after retention period")
-            self._log_info("")
-
-            # ========================================
-            # STEP 4: Delete Debezium Connector
-            # ========================================
-            self._log_info("STEP 4/7: Deleting connector...")
-            
-            try:
-                if connector_name:
-                    self.connector_manager.delete_connector(
-                        connector_name,
-                        delete_topics=False  # We handle topic deletion separately
-                    )
-                    self._log_info(f"  ✓ Deleted: {connector_name}")
-                else:
-                    self._log_info("  → No connector to delete")
-            except Exception as e:
-                self._log_warning(f"  ⚠ Could not delete: {e}")
-            
-            self._log_info("")
-
-            # ========================================
-            # STEP 5: Clear Connector Offsets
-            # ========================================
-            self._log_info("STEP 5/7: Clearing connector offsets...")
-            
-            try:
-                if connector_name:
-                    success = self.offset_manager.delete_connector_offsets(connector_name)
-                    
-                    if not success:
-                        server_name = connector_name.replace('_connector', '')
-                        success = self.offset_manager.delete_connector_offsets(server_name)
-
                     if success:
-                        self._log_info(f"  ✓ Cleared offsets: {connector_name}")
+                        # Mark as deleted in history
+                        from client.models import ConnectorHistory
+                        ConnectorHistory.mark_connector_deleted(
+                            connector_name=source_connector_name,
+                            notes="Deleted via orchestrator"
+                        )
+                        self._log_info(f"✓ Deleted source: {source_connector_name}")
                     else:
-                        self._log_warning(f"  ⚠ Could not clear offsets")
-                else:
-                    self._log_info("  → No offsets to clear")
-            except Exception as e:
-                self._log_warning(f"  ⚠ Error: {e}")
-            
-            self._log_info("")
-
-            # ========================================
-            # STEP 6: Optionally Delete Topics
-            # ========================================
-            if delete_topics:
-                self._log_info("STEP 6/7: Deleting Kafka topics (DESTRUCTIVE)...")
-                
-                try:
-                    topic_prefix = self.config.kafka_topic_prefix
-                    topics_to_delete = self.topic_manager.list_topics(prefix=topic_prefix)
-                    
-                    if topics_to_delete:
-                        self._log_info(f"  → Found {len(topics_to_delete)} topics")
-                        
-                        deleted = 0
-                        for topic in topics_to_delete:
-                            try:
-                                success, error = self.topic_manager.delete_topic(topic)
-                                if success:
-                                    self._log_info(f"    ✓ {topic}")
-                                    deleted += 1
-                                else:
-                                    self._log_warning(f"    ✗ {topic}: {error}")
-                            except Exception as e:
-                                self._log_warning(f"    ✗ {topic}: {e}")
-                        
-                        self._log_info(f"  ✓ Deleted {deleted}/{len(topics_to_delete)} topics")
-                        self._log_info("  ⚠ ALL MESSAGES PERMANENTLY DELETED")
-                    else:
-                        self._log_info("  → No topics found")
+                        self._log_warning(f"⚠️ Source deletion failed: {error}")
                 except Exception as e:
-                    self._log_warning(f"  ⚠ Error: {e}")
-            else:
-                self._log_info("STEP 6/7: Skipping topic deletion")
-                self._log_info(f"  → Topics preserved: {self.config.kafka_topic_prefix}.*")
-            
-            self._log_info("")
+                    self._log_warning(f"⚠️ Source deletion error: {e}")
 
-            # ========================================
-            # STEP 7: Delete ReplicationConfig
-            # ========================================
-            self._log_info("STEP 7/7: Deleting configuration...")
-            
-            try:
-                from client.models import ReplicationConfig
-                
-                deleted_count, details = ReplicationConfig.objects.filter(pk=config_id).delete()
-                
-                self._log_info(f"  ✓ Deleted ReplicationConfig (id={config_id})")
-                
-                for model, count in details.items():
-                    if count > 0 and 'ReplicationConfig' not in model:
-                        self._log_info(f"    → {model}: {count} deleted (cascade)")
-                        
-            except Exception as e:
-                error_msg = f"Failed to delete config: {str(e)}"
-                self._log_error(f"  ✗ {error_msg}")
-                return False, error_msg
+            # Delete sink connector
+            if sink_connector_name:
+                try:
+                    success, error = self.connector_manager.delete_connector(
+                        sink_connector_name,
+                        delete_topics=False
+                    )
+                    if success:
+                        # Mark as deleted in history
+                        from client.models import ConnectorHistory
+                        ConnectorHistory.mark_connector_deleted(
+                            connector_name=sink_connector_name,
+                            notes="Deleted via orchestrator"
+                        )
+                        self._log_info(f"✓ Deleted sink: {sink_connector_name}")
+                    else:
+                        self._log_warning(f"⚠️ Sink deletion failed: {error}")
+                except Exception as e:
+                    self._log_warning(f"⚠️ Sink deletion error: {e}")
 
-            # ========================================
-            # Success
-            # ========================================
-            self._log_info("")
+            # Optionally delete topics and target tables
+            if delete_topics:
+                self._log_info("Deleting Kafka topics...")
+                success, message = self.delete_topics()
+                if success:
+                    self._log_info(f"✓ {message}")
+                else:
+                    self._log_warning(f"⚠️ {message}")
+
+                # Also drop target database tables for these topics
+                self._log_info("Dropping target database tables...")
+                success, message = self._drop_target_tables()
+                if success:
+                    self._log_info(f"✓ {message}")
+                else:
+                    self._log_warning(f"⚠️ {message}")
+
+            # Delete config
+            from client.models import ReplicationConfig
+            ReplicationConfig.objects.filter(pk=config_id).delete()
+            self._log_info(f"✓ Deleted config (id={config_id})")
+
             self._log_info("=" * 80)
             self._log_info("✓ REPLICATION DELETED")
-            self._log_info("=" * 80)
-            self._log_info(f"Connector:      {connector_name}")
-            self._log_info(f"Consumer Group: {consumer_group_id}")
-            self._log_info(f"Topics:         {self.config.kafka_topic_prefix}.* ({'DELETED' if delete_topics else 'PRESERVED'})")
-            self._log_info(f"Config:         {config_id}")
-            
-            if not delete_topics:
-                self._log_info("")
-                self._log_info("💡 Topics preserved - can be replayed later")
-            
             self._log_info("=" * 80)
 
             return True, "Replication deleted successfully"
 
         except Exception as e:
-            import traceback
             error_msg = f"Failed to delete: {str(e)}"
             self._log_error(error_msg)
-            self._log_error(traceback.format_exc())
+            return False, error_msg
+
+    # ==========================================
+    # Efficient Sink Connector Management
+    # ==========================================
+
+    def _ensure_sink_connector_ready(self) -> Tuple[bool, str]:
+        """
+        Efficiently ensure sink connector is ready.
+
+        Strategy:
+        1. Check if sink connector exists
+        2. If exists:
+           - Compare current tables with configured tables
+           - If same: reuse (do nothing)
+           - If different: update config
+        3. If doesn't exist: create new
+
+        Returns:
+            (success, message)
+        """
+        try:
+            # Get client's target database
+            from client.models.database import ClientDatabase
+            client = self.config.client_database.client
+            target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+
+            if not target_db:
+                return False, "No target database configured"
+
+            # Generate sink connector name (NOT versioned - same across source connector versions)
+            sink_connector_name = f"client_{client.id}_db_{target_db.id}_sink_connector"
+
+            # Get current enabled tables
+            current_topics = self._get_kafka_topics_for_config()
+            
+            if not current_topics:
+                return False, "No tables enabled for replication"
+
+            # Check if sink connector exists
+            exists, status_data = self.connector_manager.get_connector_status(sink_connector_name)
+
+            if exists:
+                # Get existing config
+                existing_config = self.connector_manager.get_connector_config(sink_connector_name)
+
+                if existing_config:
+                    # Compare topics
+                    existing_topics = self._parse_topics_from_config(existing_config)
+
+                    if existing_topics == current_topics:
+                        # Perfect match - reuse as is
+                        self._log_info("✓ Reusing existing sink connector")
+                        self.config.sink_connector_name = sink_connector_name
+                        self.config.sink_connector_state = 'RUNNING'
+                        self.config.save()
+                        return True, "Sink connector reused (config unchanged)"
+                    else:
+                        # Tables changed - update config
+                        self._log_info(f"Updating sink connector topics ({len(current_topics)} tables)")
+                        return self._update_sink_connector(sink_connector_name, current_topics, target_db)
+                else:
+                    # Couldn't get config - recreate
+                    self._log_warning("Unable to retrieve sink config - recreating")
+                    self.connector_manager.delete_connector(sink_connector_name, delete_topics=False)
+                    import time
+                    time.sleep(2)
+                    return self._create_sink_connector(sink_connector_name, current_topics, target_db)
+            else:
+                # Doesn't exist - create new
+                return self._create_sink_connector(sink_connector_name, current_topics, target_db)
+
+        except Exception as e:
+            error_msg = f"Failed to ensure sink connector ready: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def _get_kafka_topics_for_config(self) -> Set[str]:
+        """
+        Get set of Kafka topics for currently enabled tables.
+
+        Returns:
+            Set of topic names
+        """
+        topics = set()
+        enabled_tables = self.config.table_mappings.filter(is_enabled=True)
+        
+        for table_mapping in enabled_tables:
+            db_config = self.config.client_database
+            topic_prefix = self.config.kafka_topic_prefix
+
+            if db_config.db_type == 'mysql':
+                topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
+            elif db_config.db_type == 'postgresql':
+                schema = table_mapping.source_schema or 'public'
+                topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
+            elif db_config.db_type == 'mssql':
+                schema = table_mapping.source_schema or 'dbo'
+                topic = f"{topic_prefix}.{db_config.database_name}.{schema}.{table_mapping.source_table}"
+            elif db_config.db_type == 'oracle':
+                schema = table_mapping.source_schema
+                topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
+            else:
+                continue
+
+            topics.add(topic)
+
+        return topics
+
+    def _parse_topics_from_config(self, config: Dict[str, Any]) -> Set[str]:
+        """
+        Parse topics from existing sink connector config.
+
+        Args:
+            config: Sink connector configuration dict
+
+        Returns:
+            Set of topic names
+        """
+        topics_str = config.get('topics', '')
+        if topics_str:
+            return set(t.strip() for t in topics_str.split(',') if t.strip())
+        return set()
+
+    def _update_sink_connector(
+        self,
+        sink_connector_name: str,
+        topics: Set[str],
+        target_db
+    ) -> Tuple[bool, str]:
+        """
+        Update existing sink connector with new topic list.
+
+        Args:
+            sink_connector_name: Name of sink connector
+            topics: Set of Kafka topics to subscribe to
+            target_db: Target database instance
+
+        Returns:
+            (success, message)
+        """
+        try:
+            # Get primary key fields
+            primary_key_fields = self._get_primary_key_fields()
+
+            # Generate new config
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS',
+                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
+
+            custom_config = {'name': sink_connector_name}
+
+            new_config = get_sink_connector_config_for_database(
+                db_config=target_db,
+                topics=list(topics),
+                kafka_bootstrap_servers=kafka_bootstrap,
+                primary_key_fields=primary_key_fields,
+                custom_config=custom_config,
+            )
+
+            # Update connector config
+            success, error = self.connector_manager.update_connector_config(
+                sink_connector_name,
+                new_config
+            )
+
+            if success:
+                self._log_info(f"✓ Updated sink connector with {len(topics)} topics")
+                self.config.sink_connector_name = sink_connector_name
+                self.config.sink_connector_state = 'RUNNING'
+                self.config.save()
+                return True, f"Sink connector updated ({len(topics)} topics)"
+            else:
+                return False, f"Failed to update sink connector: {error}"
+
+        except Exception as e:
+            error_msg = f"Failed to update sink connector: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def _create_sink_connector(
+        self,
+        sink_connector_name: str,
+        topics: Set[str],
+        target_db
+    ) -> Tuple[bool, str]:
+        """
+        Create new sink connector.
+
+        Args:
+            sink_connector_name: Name for sink connector
+            topics: Set of Kafka topics to subscribe to
+            target_db: Target database instance
+
+        Returns:
+            (success, message)
+        """
+        try:
+            # Get primary key fields
+            primary_key_fields = self._get_primary_key_fields()
+
+            # Get Kafka bootstrap servers
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS',
+                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
+
+            # Generate config
+            custom_config = {'name': sink_connector_name}
+
+            sink_config = get_sink_connector_config_for_database(
+                db_config=target_db,
+                topics=list(topics),
+                kafka_bootstrap_servers=kafka_bootstrap,
+                primary_key_fields=primary_key_fields,
+                custom_config=custom_config,
+            )
+
+            # Create connector
+            success, error = self.connector_manager.create_connector(
+                connector_name=sink_connector_name,
+                config=sink_config
+            )
+
+            if success:
+                # Record sink connector creation in history
+                from client.models import ConnectorHistory
+                ConnectorHistory.record_connector_creation(
+                    replication_config=self.config,
+                    connector_name=sink_connector_name,
+                    connector_version=1,  # Sink connectors don't use versions
+                    connector_type='sink'
+                )
+
+                # Log success with configuration details
+                self._log_info(f"✓ Sink connector created successfully")
+                self._log_info(f"  Connector: {sink_connector_name}")
+                self._log_info(f"  Target: {target_db.db_type} ({target_db.host}:{target_db.port})")
+                self._log_info(f"  Database: {target_db.database_name}")
+                self._log_info(f"  Topics subscribed: {len(topics)}")
+                # Log topic list (excluding internal topics)
+                user_topics = [t for t in sorted(topics) if not t.startswith('_') and not t.startswith('connect-') and not t.startswith('schema-')]
+                for topic in user_topics:
+                    self._log_info(f"    - {topic}")
+                self._log_info(f"  Primary key fields: {primary_key_fields or 'auto-detected'}")
+                self._log_info(f"  Kafka bootstrap: {kafka_bootstrap}")
+
+                self.config.sink_connector_name = sink_connector_name
+                self.config.sink_connector_state = 'RUNNING'
+                self.config.save()
+
+                return True, f"Sink connector created ({len(topics)} topics)"
+            else:
+                return False, f"Failed to create sink connector: {error}"
+
+        except Exception as e:
+            error_msg = f"Failed to create sink connector: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def _get_primary_key_fields(self) -> Optional[str]:
+        """
+        Extract primary key fields from first enabled table.
+
+        Returns:
+            Comma-separated list of primary key column names, or None
+        """
+        enabled_tables = list(self.config.table_mappings.filter(is_enabled=True))
+        
+        if enabled_tables:
+            first_table = enabled_tables[0]
+            pk_columns = first_table.column_mappings.filter(
+                is_primary_key=True,
+                is_enabled=True
+            )
+            
+            if pk_columns.exists():
+                pk_fields = ",".join([col.target_column for col in pk_columns])
+                return pk_fields
+        
+        return None
+
+    # ==========================================
+    # Source Connector Management (Existing)
+    # ==========================================
+
+    def _ensure_connector_running(self, snapshot_mode: str = 'when_needed') -> Tuple[bool, str]:
+        """
+        Ensure Debezium source connector exists and is running.
+
+        Creates new connector with incremented version.
+
+        Args:
+            snapshot_mode: Debezium snapshot mode
+
+        Returns:
+            (success, message)
+        """
+        # Generate versioned connector name
+        from jovoclient.utils.debezium.connector_templates import generate_connector_name
+        db_config = self.config.client_database
+        client = db_config.client
+        
+        versioned_connector_name = generate_connector_name(
+            client,
+            db_config,
+            version=self.config.connector_version
+        )
+
+        # Delete old connector if exists
+        try:
+            self.connector_manager.delete_connector(versioned_connector_name, delete_topics=False)
+        except Exception:
+            pass  # Connector didn't exist
+
+        # Create fresh connector
+        return self._create_connector(snapshot_mode=snapshot_mode)
+
+    def _create_connector(self, snapshot_mode: str = 'when_needed') -> Tuple[bool, str]:
+        """
+        Create new Debezium source connector with incremented version.
+        Uses ConnectorHistory to track version numbers across deletions.
+
+        Returns:
+            (success, message)
+        """
+        try:
+            # Get next version from history (handles deleted connectors)
+            from client.models import ConnectorHistory
+            db_config = self.config.client_database
+            client = db_config.client
+
+            next_version = ConnectorHistory.get_next_version(
+                client_id=client.id,
+                database_id=db_config.id,
+                connector_type='source'
+            )
+
+            self.config.connector_version = next_version
+            self.config.save()
+
+            # Generate configuration
+            enabled_tables = list(
+                self.config.table_mappings.filter(is_enabled=True).values_list('source_table', flat=True)
+            )
+
+            if not enabled_tables:
+                return False, "No tables enabled for replication"
+
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS',
+                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
+            schema_registry = settings.DEBEZIUM_CONFIG.get(
+                'SCHEMA_REGISTRY_URL',
+                'http://schema-registry:8081'
+            )
+
+            config = get_connector_config_for_database(
+                db_config=db_config,
+                replication_config=self.config,
+                tables_whitelist=enabled_tables,
+                kafka_bootstrap_servers=kafka_bootstrap,
+                schema_registry_url=schema_registry,
+                snapshot_mode=snapshot_mode,
+            )
+
+            # Generate versioned connector name
+            from jovoclient.utils.debezium.connector_templates import generate_connector_name
+            versioned_connector_name = generate_connector_name(
+                client,
+                db_config,
+                version=self.config.connector_version
+            )
+
+            # Update config
+            self.config.connector_name = versioned_connector_name
+            self.config.save()
+
+            # Create connector
+            success, error = self.connector_manager.create_connector(
+                connector_name=versioned_connector_name,
+                config=config
+            )
+
+            if success:
+                # Record connector creation in history
+                ConnectorHistory.record_connector_creation(
+                    replication_config=self.config,
+                    connector_name=versioned_connector_name,
+                    connector_version=self.config.connector_version,
+                    connector_type='source'
+                )
+
+                # Log success with configuration details
+                self._log_info(f"✓ Source connector created successfully")
+                self._log_info(f"  Connector: {versioned_connector_name}")
+                self._log_info(f"  Version: {self.config.connector_version}")
+                self._log_info(f"  Snapshot mode: {snapshot_mode}")
+                self._log_info(f"  Tables: {', '.join(enabled_tables)}")
+                self._log_info(f"  Kafka bootstrap: {kafka_bootstrap}")
+                self._log_info(f"  Topic prefix: {self.config.kafka_topic_prefix}")
+
+                return True, "Connector created successfully"
+            else:
+                return False, f"Failed to create connector: {error}"
+
+        except Exception as e:
+            error_msg = f"Failed to create connector: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    # ==========================================
+    # Topic Management (Delegated)
+    # ==========================================
+
+    def create_topics(self) -> Tuple[bool, str]:
+        """Create Kafka topics for replication."""
+        try:
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS',
+                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
+            topic_manager = KafkaTopicManager(bootstrap_servers=kafka_bootstrap)
+            return topic_manager.create_topics_for_config(self.config)
+        except Exception as e:
+            error_msg = f"Failed to create topics: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def delete_topics(self) -> Tuple[bool, str]:
+        """Delete Kafka topics for replication."""
+        try:
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS',
+                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
+            topic_manager = KafkaTopicManager(bootstrap_servers=kafka_bootstrap)
+            topic_prefix = self.config.kafka_topic_prefix
+            return topic_manager.delete_topics_by_prefix(topic_prefix)
+        except Exception as e:
+            error_msg = f"Failed to delete topics: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+        
+
+    def _drop_target_tables(self) -> Tuple[bool, str]:
+        """
+        Drop target database tables corresponding to the replicated tables.
+
+        This is called when deleting replication with delete_topics=True
+        to clean up the target database tables that were receiving data.
+
+        Returns:
+            (success, message)
+        """
+        try:
+            # Get target database
+            from client.models.database import ClientDatabase
+            from client.utils.database_utils import get_database_engine
+            
+            client = self.config.client_database.client
+            target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+
+            if not target_db:
+                return False, "No target database configured"
+
+            # Get enabled table mappings
+            enabled_tables = self.config.table_mappings.filter(is_enabled=True)
+
+            if not enabled_tables.exists():
+                return True, "No tables to drop"
+
+            # Get target database engine using the utility function
+            engine = get_database_engine(target_db)
+
+            dropped_tables = []
+            failed_tables = []
+
+            try:
+                with engine.connect() as conn:
+                    for table_mapping in enabled_tables:
+                        target_table = table_mapping.target_table
+                        target_schema = table_mapping.target_schema or None
+
+                        try:
+                            # Build fully qualified table name
+                            if target_schema:
+                                full_table_name = f"{target_schema}.{target_table}"
+                            else:
+                                full_table_name = target_table
+
+                            # Drop table with appropriate syntax for each database type
+                            if target_db.db_type == 'mysql':
+                                drop_sql = f"DROP TABLE IF EXISTS `{target_table}`"
+                            elif target_db.db_type == 'postgresql':
+                                if target_schema:
+                                    drop_sql = f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}" CASCADE'
+                                else:
+                                    drop_sql = f'DROP TABLE IF EXISTS "{target_table}" CASCADE'
+                            elif target_db.db_type == 'mssql':
+                                if target_schema:
+                                    drop_sql = f"DROP TABLE IF EXISTS [{target_schema}].[{target_table}]"
+                                else:
+                                    drop_sql = f"DROP TABLE IF EXISTS [{target_table}]"
+                            elif target_db.db_type == 'oracle':
+                                # Oracle doesn't support IF EXISTS, need to handle exception
+                                if target_schema:
+                                    drop_sql = f'DROP TABLE "{target_schema}"."{target_table}" CASCADE CONSTRAINTS'
+                                else:
+                                    drop_sql = f'DROP TABLE "{target_table}" CASCADE CONSTRAINTS'
+                            else:
+                                drop_sql = f"DROP TABLE IF EXISTS {target_table}"
+
+                            # Execute drop
+                            conn.execute(text(drop_sql))
+                            conn.commit()
+
+                            dropped_tables.append(full_table_name)
+                            self._log_info(f"  ✓ Dropped table: {full_table_name}")
+
+                        except Exception as e:
+                            # For Oracle, if table doesn't exist, it's okay
+                            if target_db.db_type == 'oracle' and ('ORA-00942' in str(e) or 'does not exist' in str(e)):
+                                self._log_info(f"  ○ Table already dropped: {full_table_name}")
+                            else:
+                                failed_tables.append(f"{full_table_name}: {str(e)}")
+                                self._log_warning(f"  ⚠️ Failed to drop {full_table_name}: {e}")
+
+            finally:
+                # Always dispose of the engine
+                engine.dispose()
+
+            # Build result message
+            if dropped_tables:
+                message = f"Dropped {len(dropped_tables)} table(s): {', '.join(dropped_tables)}"
+            else:
+                message = "No tables were dropped"
+
+            if failed_tables:
+                message += f" | {len(failed_tables)} failed"
+                return False, message
+
+            return True, message
+
+        except Exception as e:
+            error_msg = f"Failed to drop target tables: {str(e)}"
+            self._log_error(error_msg)
             return False, error_msg
 
     # ==========================================
@@ -492,36 +920,20 @@ class ReplicationOrchestrator:
     # ==========================================
 
     def get_unified_status(self) -> Dict[str, Any]:
-        """
-        Get comprehensive status of replication.
-
-        Returns a detailed status object showing:
-        - Connector state (RUNNING/FAILED/PAUSED)
-        - Consumer state (RUNNING/STOPPED/ERROR)
-        - Last sync info
-        - Statistics
-        - Health check results
-
-        Returns:
-            Dictionary with complete status information
-        """
-        # Get connector status
+        """Get comprehensive status of replication."""
         connector_status = self._get_connector_status()
-
-        # Get consumer status
-        consumer_status = self._get_consumer_status()
-
-        # Calculate overall health
-        overall_health = self._calculate_overall_health(connector_status, consumer_status)
+        sink_status = self._get_sink_connector_status()
+        overall_health = self._calculate_overall_health(connector_status, sink_status)
 
         return {
             'overall': overall_health,
-            'connector': connector_status,
-            'consumer': consumer_status,
+            'source_connector': connector_status,
+            'sink_connector': sink_status,
             'config': {
                 'status': self.config.status,
                 'is_active': self.config.is_active,
                 'connector_name': self.config.connector_name,
+                'sink_connector_name': self.config.sink_connector_name,
                 'kafka_topic_prefix': self.config.kafka_topic_prefix,
             },
             'statistics': {
@@ -536,271 +948,65 @@ class ReplicationOrchestrator:
         }
 
     def _get_connector_status(self) -> Dict[str, Any]:
-        """Get Debezium connector status from Kafka Connect."""
+        """Get Debezium source connector status."""
         try:
-            # BUG FIX: get_connector_status() returns (success, data) tuple, not just data
             result = self.connector_manager.get_connector_status(self.config.connector_name)
-
-            # Handle tuple return (success, status_dict)
+            
             if isinstance(result, tuple):
                 success, status_data = result
                 if not success or not status_data:
-                    return {
-                        'state': 'NOT_FOUND',
-                        'healthy': False,
-                        'message': 'Connector does not exist',
-                    }
+                    return {'state': 'NOT_FOUND', 'healthy': False}
             else:
-                # Fallback for dict return (for backward compatibility)
                 status_data = result
                 if not status_data:
-                    return {
-                        'state': 'NOT_FOUND',
-                        'healthy': False,
-                        'message': 'Connector does not exist',
-                    }
+                    return {'state': 'NOT_FOUND', 'healthy': False}
 
-            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-            tasks = status_data.get('tasks', [])
-
+            state = status_data.get('connector', {}).get('state', 'UNKNOWN')
             return {
-                'state': connector_state,
-                'healthy': connector_state == 'RUNNING',
-                'tasks': tasks,
-                'message': f"Connector is {connector_state}",
+                'state': state,
+                'healthy': state == 'RUNNING',
+                'tasks': status_data.get('tasks', []),
             }
-
         except Exception as e:
+            return {'state': 'ERROR', 'healthy': False, 'message': str(e)}
+
+    def _get_sink_connector_status(self) -> Dict[str, Any]:
+        """Get JDBC Sink connector status."""
+        try:
+            if not self.config.sink_connector_name:
+                return {'state': 'NOT_CONFIGURED', 'healthy': False}
+
+            result = self.connector_manager.get_connector_status(self.config.sink_connector_name)
+            
+            if isinstance(result, tuple):
+                success, status_data = result
+                if not success or not status_data:
+                    return {'state': 'NOT_FOUND', 'healthy': False}
+            else:
+                status_data = result
+                if not status_data:
+                    return {'state': 'NOT_FOUND', 'healthy': False}
+
+            state = status_data.get('connector', {}).get('state', 'UNKNOWN')
             return {
-                'state': 'ERROR',
-                'healthy': False,
-                'message': f"Failed to get connector status: {str(e)}",
+                'state': state,
+                'healthy': state == 'RUNNING',
+                'tasks': status_data.get('tasks', []),
             }
+        except Exception as e:
+            return {'state': 'ERROR', 'healthy': False, 'message': str(e)}
 
-    def _get_consumer_status(self) -> Dict[str, Any]:
-        """Get consumer status from ReplicationConfig."""
-        consumer_state = getattr(self.config, 'consumer_state', 'UNKNOWN')
-        last_heartbeat = getattr(self.config, 'consumer_last_heartbeat', None)
-
-        # Check if heartbeat is recent (within last 2 minutes)
-        heartbeat_recent = False
-        if last_heartbeat:
-            time_diff = timezone.now() - last_heartbeat
-            heartbeat_recent = time_diff.total_seconds() < 120
-
-        is_healthy = (
-            consumer_state == 'RUNNING' and
-            heartbeat_recent and
-            self.config.is_active
-        )
-
-        return {
-            'state': consumer_state,
-            'healthy': is_healthy,
-            'last_heartbeat': last_heartbeat.isoformat() if last_heartbeat else None,
-            'heartbeat_recent': heartbeat_recent,
-            'message': self._get_consumer_message(consumer_state, heartbeat_recent),
-        }
-
-    def _get_consumer_message(self, state: str, heartbeat_recent: bool) -> str:
-        """Get human-readable consumer status message."""
-        if state == 'RUNNING' and heartbeat_recent:
-            return "Consumer is healthy and processing messages"
-        elif state == 'RUNNING' and not heartbeat_recent:
-            return "Consumer may be stuck (no recent heartbeat)"
-        elif state == 'STOPPED':
-            return "Consumer is stopped"
-        elif state == 'ERROR':
-            return "Consumer encountered an error"
-        else:
-            return f"Consumer state: {state}"
-
-    def _calculate_overall_health(self, connector_status: Dict, consumer_status: Dict) -> str:
-        """
-        Calculate overall health status.
-
-        Returns:
-            'healthy', 'degraded', or 'failed'
-        """
+    def _calculate_overall_health(self, connector_status: Dict, sink_status: Dict) -> str:
+        """Calculate overall health: 'healthy', 'degraded', or 'failed'."""
         connector_healthy = connector_status.get('healthy', False)
-        consumer_healthy = consumer_status.get('healthy', False)
+        sink_healthy = sink_status.get('healthy', False)
 
-        if connector_healthy and consumer_healthy:
+        if connector_healthy and sink_healthy:
             return 'healthy'
-        elif connector_healthy or consumer_healthy:
+        elif connector_healthy or sink_healthy:
             return 'degraded'
         else:
             return 'failed'
 
     # ==========================================
-    # Internal Helpers
-    # ==========================================
-
-    def _ensure_connector_running(self, snapshot_mode: str = 'when_needed') -> Tuple[bool, str]:
-        """
-        Ensure Debezium connector exists and is running.
-
-        Creates connector if it doesn't exist.
-        Resumes if paused.
-        Restarts if failed.
-
-        Args:
-            snapshot_mode: Debezium snapshot mode ('never', 'initial', 'when_needed', etc.)
-
-        Returns:
-            (success, message)
-        """
-        # Generate versioned connector name to check for old connector
-        from client.utils.connector_templates import generate_connector_name
-        db_config = self.config.client_database
-        client = db_config.client
-        versioned_connector_name = generate_connector_name(
-            client,
-            db_config,
-            version=self.config.connector_version
-        )
-
-        # Delete old connector if exists (for fresh start)
-        try:
-            self.connector_manager.delete_connector(versioned_connector_name)
-            self._log_info(f"Deleted old connector for fresh start: {versioned_connector_name}")
-            
-            # Also clear its offsets using the database.server.name (not connector name)
-            # Debezium uses database.server.name as the key in offset topic
-            server_name = versioned_connector_name.replace('_connector', '')
-            success = self.offset_manager.delete_connector_offsets(server_name)
-            if success:
-                self._log_info(f"Cleared offsets for server: {server_name}")
-            else:
-                error_msg = f"Failed to clear offsets for server: {server_name}"
-                self._log_error(error_msg)
-                return False, error_msg
-        except Exception as e:
-            # Connector didn't exist or offset clearing failed
-            if "Failed to clear offsets" in str(e):
-                self._log_error(f"Error clearing offsets: {e}")
-                return False, str(e)
-            else:
-                self._log_info("Connector didn't exist")
-
-        # Create fresh connector
-        self._log_info(f"Creating connector with snapshot_mode={snapshot_mode}...")
-        return self._create_connector(snapshot_mode=snapshot_mode)
-
-    def _create_connector(self, snapshot_mode: str = 'when_needed') -> Tuple[bool, str]:
-        """
-        Create new Debezium connector.
-
-        Returns:
-            (success, message)
-        """
-        try:
-            self._log_info("Creating Debezium connector...")
-
-            # Generate connector configuration
-            db_config = self.config.client_database
-            enabled_tables = list(
-                self.config.table_mappings.filter(is_enabled=True).values_list('source_table', flat=True)
-            )
-
-            if not enabled_tables:
-                return False, "No tables enabled for replication"
-
-            config = get_connector_config_for_database(
-                db_config=db_config,
-                replication_config=self.config,
-                tables_whitelist=enabled_tables,
-                kafka_bootstrap_servers='kafka:29092',
-                schema_registry_url='http://schema-registry:8081',
-                snapshot_mode=snapshot_mode,
-            )
-
-            # Generate versioned connector name (same logic as in connector_templates)
-            from client.utils.connector_templates import generate_connector_name
-            client = db_config.client
-            versioned_connector_name = generate_connector_name(
-                client,
-                db_config,
-                version=self.config.connector_version
-            )
-
-            # Update the config with the versioned connector name
-            self.config.connector_name = versioned_connector_name
-            self.config.save()
-
-            # Create connector with versioned name
-            success, error = self.connector_manager.create_connector(
-                connector_name=versioned_connector_name,
-                config=config
-            )
-
-            if success:
-                self._log_info(f"✓ Connector created: {versioned_connector_name}")
-                return True, "Connector created successfully"
-            else:
-                return False, f"Failed to create connector: {error}"
-
-        except Exception as e:
-            error_msg = f"Failed to create connector: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
-
-    def _update_status(self, status: str, message: Optional[str] = None):
-        """Update ReplicationConfig status."""
-        self.config.status = status
-        if message:
-            self.config.last_error_message = message if status == 'error' else ''
-        self.config.save()
-
-    def _log_info(self, message: str):
-        """Log info message with structured format."""
-        logger.info(f"[{self.config.connector_name}] {message}")
-
-    def _log_warning(self, message: str):
-        """Log warning message with structured format."""
-        logger.warning(f"[{self.config.connector_name}] {message}")
-
-    def _log_error(self, message: str):
-        """Log error message with structured format."""
-        logger.error(f"[{self.config.connector_name}] {message}")
-
-    def _start_consumer_with_fresh_group(self) -> Tuple[bool, str]:
-        """
-        Start consumer with database-based group ID.
-
-        IMPORTANT: Consumer group is based on client_id + database_name, NOT config_id.
-        This ensures that the same topic always uses the same consumer group,
-        preventing duplicate message consumption when recreating connectors.
-
-        Example: cdc_consumer_1_mydb (client 1, database mydb)
-        """
-        try:
-            import time
-            from client.tasks import start_kafka_consumer
-
-            # Generate database-based consumer group ID
-            # Format: cdc_consumer_{client_id}_{database_name}
-            client_id = self.config.client_database.client.id
-            database_name = self.config.client_database.database_name
-            consumer_group = f"cdc_consumer_{client_id}_{database_name}"
-
-            self._log_info(f"Starting consumer with group: {consumer_group}")
-            self._log_info(f"  (database-based naming ensures no duplicates on connector recreation)")
-
-            # Queue consumer task with custom group ID
-            result = start_kafka_consumer.apply_async(
-                args=[self.config.id],
-                kwargs={'consumer_group_override': consumer_group}
-            )
-
-            # Update config
-            self.config.consumer_task_id = result.id
-            self.config.consumer_state = 'STARTING'
-            self.config.save()
-            self._log_info(f"✓ Consumer task queued: {result.id}")
-            return True, f"Consumer started with group {consumer_group}"
-
-        except Exception as e:
-            error_msg = f"Failed to start consumer: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
+    #

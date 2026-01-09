@@ -7,8 +7,8 @@ Provides pre-flight checks to ensure replication can start successfully.
 import logging
 from typing import Dict, List, Tuple
 
-from client.utils.kafka_topic_manager import KafkaTopicManager
-from client.utils.debezium_manager import DebeziumConnectorManager
+from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
+from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +45,10 @@ class ReplicationValidator:
 
         # Skip topic validation for Option A (Debezium creates topics automatically)
         if not skip_topic_check:
-            logger.info(f"[{self.config.connector_name}] Checking Kafka topics...")
+            logger.debug(f"[{self.config.connector_name}] Checking Kafka topics...")
             validations.append(self._validate_kafka_topics())
         else:
-            logger.info(f"[{self.config.connector_name}] ⚠️ Skipping Kafka topic validation (topics will be auto-created)")
+            logger.debug(f"[{self.config.connector_name}] Skipping Kafka topic validation (topics will be auto-created)")
 
         # Collect all errors
         errors = []

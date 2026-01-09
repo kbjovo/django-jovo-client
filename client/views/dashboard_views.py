@@ -239,7 +239,7 @@ def monitoring_dashboard(request):
     - Performance metrics
     - Task statuses
     """
-    from client.utils.debezium_manager import DebeziumConnectorManager
+    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
     # Get all active replications
     active_replications = ReplicationConfig.objects.select_related(

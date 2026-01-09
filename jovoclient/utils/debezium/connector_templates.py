@@ -43,13 +43,14 @@ def generate_connector_name(client: Client, db_config: ClientDatabase, version: 
     logger.info(f"Generated connector name: {connector_name}")
     return connector_name
 
+
 def get_mysql_connector_config(
     client: Client,
     db_config: ClientDatabase,
     replication_config: Optional[ReplicationConfig] = None,
     tables_whitelist: Optional[List[str]] = None,
-    kafka_bootstrap_servers: str = 'localhost:9092',
-    schema_registry_url: str = 'http://localhost:8081',
+    kafka_bootstrap_servers: str = None,
+    schema_registry_url: str = None,
     use_docker_internal_host: bool = True,
     snapshot_mode: str = 'initial',
 ) -> Dict[str, Any]:
@@ -61,13 +62,27 @@ def get_mysql_connector_config(
         db_config: ClientDatabase instance
         replication_config: ReplicationConfig instance (optional)
         tables_whitelist: List of tables to replicate (e.g., ['users', 'orders'])
-        kafka_bootstrap_servers: Kafka bootstrap servers
-        schema_registry_url: Schema registry URL
+        kafka_bootstrap_servers: Kafka bootstrap servers (defaults to settings)
+        schema_registry_url: Schema registry URL (defaults to settings)
         use_docker_internal_host: Use Docker internal hostname (default: True)
 
     Returns:
         Dict[str, Any]: Connector configuration
     """
+    # Get from settings if not provided
+    if kafka_bootstrap_servers is None:
+        from django.conf import settings
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_INTERNAL_SERVERS',
+            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+        )
+    if schema_registry_url is None:
+        from django.conf import settings
+        schema_registry_url = settings.DEBEZIUM_CONFIG.get(
+            'SCHEMA_REGISTRY_URL',
+            'http://schema-registry:8081'
+        )
+
     # Generate connector name with version if replication_config is provided
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
@@ -107,12 +122,13 @@ def get_mysql_connector_config(
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
 
-        "snapshot.mode": snapshot_mode,
+        # Snapshot mode - use from replication_config if provided, otherwise use parameter
+        "snapshot.mode": replication_config.snapshot_mode if replication_config and hasattr(replication_config, 'snapshot_mode') else snapshot_mode,
         "snapshot.locking.mode": "none",
-        
+
         # Include schema changes
         "include.schema.changes": "true",
-        
+
         "database.allowPublicKeyRetrieval": "true",
 
         # Read-only mode - user has no write permissions to source database
@@ -123,7 +139,7 @@ def get_mysql_connector_config(
         # Incremental snapshots with Kafka signaling (compatible with read-only databases when GTIDs enabled)
         "incremental.snapshot.allowed": "true",
         "incremental.snapshot.allow.schema.changes": "true",
-        "incremental.snapshot.chunk.size": "1024",
+        "incremental.snapshot.chunk.size": str(replication_config.incremental_snapshot_chunk_size) if replication_config and hasattr(replication_config, 'incremental_snapshot_chunk_size') else "1024",
 
         # Kafka-based signals (for connector control and incremental snapshots on read-only databases)
         "signal.enabled.channels": "kafka",
@@ -132,20 +148,21 @@ def get_mysql_connector_config(
 
         # Decimal handling
         "decimal.handling.mode": "precise",  # Options: precise, double, string
-        
+
         # Binary handling
         "binary.handling.mode": "bytes",  # Options: bytes, base64, hex
-        
+
         # Time precision
         "time.precision.mode": "adaptive_time_microseconds",
-        
+
         # Tombstones on delete
         "tombstones.on.delete": "true",
-        
-        # Max queue size
-        "max.queue.size": "8192",
-        "max.batch.size": "2048",
-        
+
+        # Performance tuning - use values from replication_config if provided
+        "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
+        "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
+        "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "500",
+
         # Connection timeouts
         "connect.timeout.ms": "30000",
         "connect.max.attempts": "3",
@@ -174,19 +191,34 @@ def get_mysql_connector_config(
     logger.info(f"Generated MySQL connector config for: {connector_name} along with replication_config: {replication_config}")
     return config
 
+
 def get_postgresql_connector_config(
     client: Client,
     db_config: ClientDatabase,
     replication_config: Optional[ReplicationConfig] = None,
     tables_whitelist: Optional[List[str]] = None,
-    kafka_bootstrap_servers: str = 'localhost:9092',
-    schema_registry_url: str = 'http://localhost:8081',
+    kafka_bootstrap_servers: str = None,
+    schema_registry_url: str = None,
     schema_name: str = 'public',
     snapshot_mode: str = 'when_needed',  # ✅ Changed from 'initial'
 ) -> Dict[str, Any]:
     """
     FIXED: PostgreSQL Debezium connector with working incremental snapshots
     """
+    # Get from settings if not provided
+    if kafka_bootstrap_servers is None:
+        from django.conf import settings
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_INTERNAL_SERVERS',
+            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+        )
+    if schema_registry_url is None:
+        from django.conf import settings
+        schema_registry_url = settings.DEBEZIUM_CONFIG.get(
+            'SCHEMA_REGISTRY_URL',
+            'http://schema-registry:8081'
+        )
+
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
     
@@ -231,41 +263,43 @@ def get_postgresql_connector_config(
         
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
-        
-        "snapshot.mode": "when_needed",  # NOT "initial"
+
+        # Snapshot mode - use from replication_config if provided, otherwise use parameter
+        "snapshot.mode": replication_config.snapshot_mode if replication_config and hasattr(replication_config, 'snapshot_mode') else snapshot_mode,
         "snapshot.locking.mode": "none",
-        
+
         # ✅ CRITICAL: Configure incremental snapshot support
         "incremental.snapshot.allow.schema.changes": "true",
-        "incremental.snapshot.chunk.size": "1024",
-        
+        "incremental.snapshot.chunk.size": str(replication_config.incremental_snapshot_chunk_size) if replication_config and hasattr(replication_config, 'incremental_snapshot_chunk_size') else "1024",
+
         # ✅ CRITICAL FIX: Add BOTH signal channels and signal data collection
         "signal.enabled.channels": "source,kafka",  # ✅ Enable BOTH channels
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        
+
         # ✅ THIS WAS MISSING - CRITICAL FOR INCREMENTAL SNAPSHOTS
         "signal.data.collection": signal_table,
-        
+
         "include.schema.changes": "true",
-        
+
         "decimal.handling.mode": "precise",
         "time.precision.mode": "adaptive_time_microseconds",
-        
+
         "hstore.handling.mode": "json",
         "interval.handling.mode": "string",
-        
+
         "schema.include.list": schema_name,
-        
+
         "heartbeat.interval.ms": "10000",
         "heartbeat.action.query": "",
-        
+
         "tombstones.on.delete": "true",
-        
-        "max.queue.size": "8192",
-        "max.batch.size": "2048",
-        "poll.interval.ms": "1000",
-        
+
+        # Performance tuning - use values from replication_config if provided
+        "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
+        "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
+        "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "1000",
+
         "connect.timeout.ms": "30000",
         "connect.max.attempts": "3",
         "connect.backoff.initial.delay.ms": "1000",
@@ -302,15 +336,15 @@ def get_sqlserver_connector_config(
     db_config: ClientDatabase,
     replication_config: Optional[ReplicationConfig] = None,
     tables_whitelist: Optional[List[str]] = None,
-    kafka_bootstrap_servers: str = 'localhost:9092',
-    schema_registry_url: str = 'http://localhost:8081',
+    kafka_bootstrap_servers: str = None,
+    schema_registry_url: str = None,
     schema_name: str = 'dbo',
     snapshot_mode: str = 'initial',
     use_docker_internal_host: bool = True,
 ) -> Dict[str, Any]:
     """
     ✅ FIXED: SQL Server connector with incremental snapshots via Kafka signals
-    
+
     Key features:
     - Supports incremental snapshots for adding new tables
     - Uses Kafka-only signaling (no DB writes needed)
@@ -322,6 +356,20 @@ def get_sqlserver_connector_config(
     2. SQL Server Agent must be running
     3. User needs CDC permissions: EXEC sys.sp_cdc_enable_table
     """
+    # Get from settings if not provided
+    if kafka_bootstrap_servers is None:
+        from django.conf import settings
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_INTERNAL_SERVERS',
+            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+        )
+    if schema_registry_url is None:
+        from django.conf import settings
+        schema_registry_url = settings.DEBEZIUM_CONFIG.get(
+            'SCHEMA_REGISTRY_URL',
+            'http://schema-registry:8081'
+        )
+
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
 
@@ -452,13 +500,13 @@ def get_oracle_connector_config(
     db_config,
     replication_config=None,
     tables_whitelist=None,
-    kafka_bootstrap_servers: str = 'kafka:29092',
-    schema_registry_url: str = 'http://localhost:8081',
+    kafka_bootstrap_servers: str = None,
+    schema_registry_url: str = None,
     snapshot_mode: str = 'initial',
 ):
     """
     ✅ FIXED: Oracle connector with proper signal table configuration
-    
+
     Changes from your current version:
     1. Ensures signal.data.collection is ALWAYS set
     2. Creates signal table if it doesn't exist
@@ -466,6 +514,20 @@ def get_oracle_connector_config(
     """
     import logging
     logger = logging.getLogger(__name__)
+
+    # Get from settings if not provided
+    if kafka_bootstrap_servers is None:
+        from django.conf import settings
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_INTERNAL_SERVERS',
+            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+        )
+    if schema_registry_url is None:
+        from django.conf import settings
+        schema_registry_url = settings.DEBEZIUM_CONFIG.get(
+            'SCHEMA_REGISTRY_URL',
+            'http://schema-registry:8081'
+        )
 
     def generate_connector_name(client, db_config, version=None):
         client_name = ''.join(c for c in client.name.lower().replace(' ', '_').replace('-', '_') if c.isalnum() or c == '_')
@@ -616,7 +678,7 @@ def get_connector_config_for_database(
     db_config: ClientDatabase,
     replication_config: Optional[ReplicationConfig] = None,
     tables_whitelist: Optional[List[str]] = None,
-    kafka_bootstrap_servers: str = 'localhost:9092',
+    kafka_bootstrap_servers: str = 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
     schema_registry_url: str = 'http://localhost:8081',
     snapshot_mode: str = 'initial',
 ) -> Optional[Dict[str, Any]]:
@@ -666,7 +728,7 @@ def get_connector_config_for_database(
 def get_snapshot_modes() -> Dict[str, str]:
     """
     Get available snapshot modes with descriptions
-    
+
     Returns:
         Dict[str, str]: Dictionary of snapshot mode -> description
     """

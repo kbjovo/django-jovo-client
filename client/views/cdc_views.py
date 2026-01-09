@@ -33,11 +33,11 @@ from typing import List
 from client.models.client import Client
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping
-from client.utils.debezium_manager import DebeziumConnectorManager
-from client.utils.kafka_topic_manager import KafkaTopicManager
+from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
 from client.replication import ReplicationOrchestrator
 
-from client.utils.connector_templates import (
+from jovoclient.utils.debezium.connector_templates import (
     get_connector_config_for_database,
     generate_connector_name
 )
@@ -48,7 +48,6 @@ from client.utils.database_utils import (
     check_binary_logging,
     check_oracle_logminer
 )
-from client.utils.offset_manager import delete_connector_offsets
 from client.tasks import (
     create_debezium_connector,
     start_kafka_consumer,
@@ -1362,19 +1361,23 @@ def cdc_configure_tables(request, database_pk):
                             try:
                                 schema = get_table_schema(db_config, table_name)
                                 columns = schema.get('columns', [])
-                                
+                                primary_keys = schema.get('primary_keys', [])
+
                                 # ✅ CRITICAL FIX: Case-insensitive column lookup for Oracle
                                 column_info = None
                                 for col in columns:
                                     if col.get('name', '').upper() == source_column.upper():
                                         column_info = col
                                         break
-                                
+
                                 if not column_info:
                                     logger.warning(f"Column {source_column} not found in schema, using VARCHAR")
-                                
+
                                 source_type = str(column_info.get('type', 'VARCHAR')) if column_info else 'VARCHAR'
-                                
+
+                                # Check if this column is a primary key (case-insensitive)
+                                is_pk = any(pk.upper() == source_column.upper() for pk in primary_keys)
+
                                 ColumnMapping.objects.create(
                                     table_mapping=table_mapping,
                                     source_column=source_column,
@@ -1382,10 +1385,12 @@ def cdc_configure_tables(request, database_pk):
                                     source_type=source_type,
                                     target_type=source_type,
                                     is_enabled=True,
+                                    is_primary_key=is_pk,
                                 )
-                                
-                                logger.debug(f"   ✅ Mapped column: {source_column} -> {target_column or source_column}")
-                                
+
+                                pk_indicator = " (PK)" if is_pk else ""
+                                logger.debug(f"   ✅ Mapped column: {source_column} -> {target_column or source_column}{pk_indicator}")
+
                             except Exception as e:
                                 logger.error(f"Error creating column mapping for {source_column}: {e}")
                     else:
@@ -1393,18 +1398,22 @@ def cdc_configure_tables(request, database_pk):
                         try:
                             schema = get_table_schema(db_config, table_name)
                             columns = schema.get('columns', [])
-                            
-                            logger.info(f"Creating {len(columns)} column mappings for {table_name}")
-                            
+                            primary_keys = schema.get('primary_keys', [])
+
+                            logger.info(f"Creating {len(columns)} column mappings for {table_name} (PKs: {primary_keys})")
+
                             for col in columns:
                                 col_name = col.get('name')
                                 col_type = str(col.get('type', 'VARCHAR'))
-                                
+
                                 target_column = request.POST.get(
-                                    f'column_mapping_{table_name}_{col_name}', 
+                                    f'column_mapping_{table_name}_{col_name}',
                                     col_name
                                 )
-                                
+
+                                # Check if this column is a primary key
+                                is_pk = col_name in primary_keys
+
                                 ColumnMapping.objects.create(
                                     table_mapping=table_mapping,
                                     source_column=col_name,
@@ -1412,26 +1421,30 @@ def cdc_configure_tables(request, database_pk):
                                     source_type=col_type,
                                     target_type=col_type,
                                     is_enabled=True,
+                                    is_primary_key=is_pk,
                                 )
-                            
-                            logger.info(f"   ✅ Created {len(columns)} default column mappings")
+
+                            logger.info(f"   ✅ Created {len(columns)} default column mappings ({len(primary_keys)} PKs)")
                             
                         except Exception as e:
                             logger.error(f"Error creating default column mappings: {e}")
                 
                 # ================================================================
-                # Auto-create tables if enabled
+                # Auto-create tables - DISABLED (handled by sink connector)
                 # ================================================================
-                if replication_config.auto_create_tables:
-                    try:
-                        from client.utils.table_creator import create_target_tables
-                        create_target_tables(replication_config)
-                        messages.success(request, '✅ Target tables created successfully!')
-                    except Exception as e:
-                        logger.error(f"Failed to create target tables: {e}")
-                        messages.warning(request, f'Configuration saved, but failed to create target tables: {str(e)}')
-                
-                messages.success(request, '✅ CDC configuration saved successfully!')
+                # ✅ FIX: Sink connector now automatically creates tables with correct naming
+                # Tables will be created as: {database}_{table} (e.g., kbe_busyuk_items)
+                # Manual table creation was causing DUPLICATE tables to be created
+                # if replication_config.auto_create_tables:
+                #     try:
+                #         from client.utils.table_creator import create_target_tables
+                #         create_target_tables(replication_config)
+                #         messages.success(request, '✅ Target tables created successfully!')
+                #     except Exception as e:
+                #         logger.error(f"Failed to create target tables: {e}")
+                #         messages.warning(request, f'Configuration saved, but failed to create target tables: {str(e)}')
+
+                messages.success(request, '✅ CDC configuration saved successfully! Target tables will be auto-created by sink connector.')
                 
                 # Clean up session
                 request.session.pop('selected_tables', None)
@@ -1575,12 +1588,9 @@ def cdc_create_connector(request, config_pk):
 
     if request.method == "POST":
         try:
-            # Generate connector name
-            connector_name = generate_connector_name(client, db_config)
-
             # Get list of tables to replicate
             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-            
+
             if not table_mappings.exists():
                 raise Exception("No tables selected for replication")
 
@@ -1588,7 +1598,7 @@ def cdc_create_connector(request, config_pk):
 
             # ✅ CRITICAL: Get formatted table names for connector config
             formatted_tables = get_table_list_for_connector(db_config, table_mappings)
-            
+
             logger.info(f"✅ Formatted tables for connector config:")
             for fmt_table in formatted_tables:
                 logger.info(f"   - {fmt_table}")
@@ -1599,31 +1609,38 @@ def cdc_create_connector(request, config_pk):
             is_healthy, health_error = manager.check_kafka_connect_health()
             if not is_healthy:
                 raise Exception(f"Kafka Connect is not healthy: {health_error}")
-            
+
             logger.info(f"✅ Kafka Connect is healthy")
 
-            # Update replication config
-            replication_config.connector_name = connector_name
+            # Update replication config - DO NOT set connector_name here
+            # The orchestrator will generate and set the versioned connector name
             replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
             replication_config.status = 'configured'
             replication_config.is_active = False
             replication_config.save()
 
-            logger.info(f"✅ Configuration saved for connector: {connector_name}")
+            logger.info(f"✅ Configuration saved")
             logger.info(f"   Tables configured: {len(formatted_tables)}")
             logger.info(f"   Topic prefix: {replication_config.kafka_topic_prefix}")
 
             # Check if user wants to auto-start
             auto_start = request.POST.get('auto_start', 'false').lower() == 'true'
-            
+
             if auto_start:
-                logger.info(f"🚀 Auto-starting replication for {connector_name}")
+                logger.info(f"🚀 Auto-starting replication")
 
                 from client.replication import ReplicationOrchestrator
                 orchestrator = ReplicationOrchestrator(replication_config)
 
                 success, message = orchestrator.start_replication()
-
+                from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
+                from django.conf import settings
+                # Use internal Kafka servers for Docker environment
+                kafka_bootstrap = settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
+                kafka_topic_manager = KafkaTopicManager(bootstrap_servers=kafka_bootstrap)
+                topics_list = kafka_topic_manager.list_topics()
+                print(f'topics_list_by_kafka: {topics_list}')
+                logger.info(f'topics_list_by_kafka: {topics_list}')
                 if success:
                     # ✅ CRITICAL: Validate topic subscription after connector starts
                     kafka_topics = get_kafka_topics_for_tables(db_config, replication_config, table_mappings)
@@ -1709,8 +1726,9 @@ def cdc_monitor_connector(request, config_pk):
         orchestrator = ReplicationOrchestrator(replication_config)
         unified_status = orchestrator.get_unified_status()
 
-        # Check if connector actually exists in Kafka Connect
-        connector_exists = unified_status['connector']['state'] not in ['NOT_FOUND', 'ERROR']
+        # Check if connectors actually exist in Kafka Connect
+        source_connector_exists = unified_status['source_connector']['state'] not in ['NOT_FOUND', 'ERROR']
+        sink_connector_exists = unified_status['sink_connector']['state'] not in ['NOT_FOUND', 'ERROR', 'NOT_CONFIGURED']
 
         # Determine what actions are available based on state
         can_start = (
@@ -1720,30 +1738,32 @@ def cdc_monitor_connector(request, config_pk):
 
         can_stop = (
             replication_config.is_active and
-            connector_exists
+            (source_connector_exists or sink_connector_exists)
         )
 
         can_restart = (
             replication_config.is_active and
-            connector_exists
+            (source_connector_exists or sink_connector_exists)
         )
 
         context = {
             'replication_config': replication_config,
             'client': replication_config.client_database.client,
             'unified_status': unified_status,
-            'connector_exists': connector_exists,
+            'connector_exists': source_connector_exists,  # For backward compatibility
+            'source_connector_exists': source_connector_exists,
+            'sink_connector_exists': sink_connector_exists,
             'can_start': can_start,
             'can_stop': can_stop,
             'can_restart': can_restart,
             'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True),
             # Legacy fields for backward compatibility with template
             'connector_status': {
-                'connector': {'state': unified_status['connector']['state']},
-                'tasks': unified_status['connector'].get('tasks', [])
-            } if connector_exists else None,
-            'tasks': unified_status['connector'].get('tasks', []),
-            'exists': connector_exists,
+                'connector': {'state': unified_status['source_connector']['state']},
+                'tasks': unified_status['source_connector'].get('tasks', [])
+            } if source_connector_exists else None,
+            'tasks': unified_status['source_connector'].get('tasks', []),
+            'exists': source_connector_exists,
         }
 
         return render(request, 'client/cdc/monitor_connector.html', context)
@@ -1863,8 +1883,12 @@ def cdc_connector_action(request, config_pk, action):
             # Create orchestrator BEFORE deletion
             orchestrator = ReplicationOrchestrator(replication_config)
 
+            # Always delete topics when deleting connector (mandatory)
+            delete_topics = True
+            logger.info(f"Delete topics: {delete_topics} (always True - mandatory)")
+
             # This will delete the config and all related records
-            success, message = orchestrator.delete_replication(delete_topics=False)
+            success, message = orchestrator.delete_replication(delete_topics=delete_topics)
 
             logger.info(f"Delete result: {success} - {message}")
 
@@ -1981,6 +2005,49 @@ def restart_replication_view(request, config_id):
     )
 
 
+@require_http_methods(["POST"])
+def create_topics(request, config_id):
+    """Create Kafka topics explicitly before starting replication"""
+    return execute_replication_action(
+        request=request,
+        config_id=config_id,
+        action_name='create_topics',
+        orchestrator_method='create_topics',
+        success_emoji='📝',
+        action_display='Topics created'
+    )
+
+
+@require_http_methods(["GET"])
+def list_topics(request, config_id):
+    """List all Kafka topics for this replication (AJAX endpoint)"""
+    try:
+        config = get_object_or_404(ReplicationConfig, id=config_id)
+
+        # Use orchestrator to list topics
+        from client.replication import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(config)
+        success, topics, message = orchestrator.list_topics()
+
+        return JsonResponse({
+            'success': success,
+            'topics': topics,
+            'message': message,
+            'count': len(topics) if success else 0
+        })
+
+    except Exception as e:
+        import traceback
+        return JsonResponse({
+            'success': False,
+            'topics': [],
+            'message': str(e),
+            'count': 0,
+            'traceback': traceback.format_exc()
+        }, status=500)
+
+
 @require_http_methods(["GET"])
 def replication_status(request, config_id):
     """Get replication status (AJAX endpoint) - NEW: Uses orchestrator"""
@@ -2024,8 +2091,9 @@ def cdc_delete_config(request, config_pk):
 
         logger.info(f"Deleting replication config {config_pk} (connector: {replication_config.connector_name})")
 
-        # Check if user wants to delete topics (from query parameter)
-        delete_topics = request.GET.get('delete_topics', 'false').lower() == 'true'
+        # Always delete topics when deleting connector (mandatory)
+        delete_topics = True
+        logger.info(f"Delete topics: {delete_topics} (always True - mandatory)")
 
         # Use orchestrator for proper cleanup
         orchestrator = ReplicationOrchestrator(replication_config)
@@ -2748,8 +2816,8 @@ def trigger_incremental_snapshot_for_mssql(replication_config, db_config, table_
         # Get source database engine for inserting signal
         source_engine = get_database_engine(db_config)
 
-        # Initialize signal sender
-        signal_sender = KafkaSignalSender(bootstrap_servers='kafka:29092')
+        # Initialize signal sender (uses settings by default)
+        signal_sender = KafkaSignalSender()
 
         # ✅ CRITICAL FIX: Use DATABASE TABLE method for SQL Server (more reliable)
         # Database table signals are processed more consistently than Kafka topic signals for SQL Server
@@ -3077,26 +3145,31 @@ def _create_column_mappings(request, table_mapping, db_config, table_name):
     try:
         schema = get_table_schema(db_config, table_name)
         columns = schema.get('columns', [])
-        
-        logger.info(f"      Creating {len(columns)} column mappings...")
-        
+        primary_keys = schema.get('primary_keys', [])
+
+        logger.info(f"      Creating {len(columns)} column mappings (PKs: {primary_keys})...")
+
         for column in columns:
             col_name = column.get('name')
             col_type = str(column.get('type', 'VARCHAR'))
-            
+
             col_enabled = request.POST.get(f'enabled_column_new_{table_name}_{col_name}') == 'on'
             target_col_name = request.POST.get(f'target_column_new_{table_name}_{col_name}', col_name)
-            
+
+            # Check if this column is a primary key
+            is_pk = col_name in primary_keys
+
             ColumnMapping.objects.create(
                 table_mapping=table_mapping,
                 source_column=col_name,
                 target_column=target_col_name,
                 source_type=col_type,
                 target_type=col_type,
-                is_enabled=col_enabled
+                is_enabled=col_enabled,
+                is_primary_key=is_pk,
             )
-        
-        logger.info(f"      ✅ Created {len(columns)} column mappings")
+
+        logger.info(f"      ✅ Created {len(columns)} column mappings ({len(primary_keys)} PKs)")
         
     except Exception as e:
         logger.error(f"      ❌ Column mapping failed: {e}")
@@ -3105,15 +3178,17 @@ def _create_column_mappings(request, table_mapping, db_config, table_name):
 
 def _handle_infrastructure(request, replication_config, db_config, client, changes, db_type):
     """Handle target tables, Kafka topics, and removals"""
-    
-    # Create target tables for new tables
-    if changes['newly_added'] and replication_config.auto_create_tables:
-        _create_target_tables(request, replication_config, changes['newly_added'])
-    
+
+    # ✅ FIX: Target table creation disabled - sink connector handles it automatically
+    # Manual creation was causing DUPLICATE tables (both manual + sink connector auto-create)
+    # Sink connector now creates tables with format: {database}_{table}
+    # if changes['newly_added'] and replication_config.auto_create_tables:
+    #     _create_target_tables(request, replication_config, changes['newly_added'])
+
     # Create Kafka topics for new tables (manual creation for better control)
     if changes['newly_added']:
         _create_kafka_topics(request, replication_config, db_config, client, changes['newly_added'], db_type)
-    
+
     # Remove deleted tables
     if changes['removed']:
         _remove_tables(request, replication_config, changes['removed'], changes['existing_mappings'])
@@ -3147,7 +3222,7 @@ def _create_kafka_topics(request, replication_config, db_config, client, newly_a
     try:
         logger.info(f"\n📡 Creating Kafka topics for {len(newly_added_tables)} table(s)...")
 
-        from client.utils.kafka_topic_manager import KafkaTopicManager
+        from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
         topic_manager = KafkaTopicManager()
         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
 
@@ -3499,7 +3574,7 @@ def _handle_kafka_signal_snapshots(request, replication_config, db_config, clien
 
     try:
         from client.utils.kafka_signal_sender import KafkaSignalSender
-        from client.utils.debezium_manager import DebeziumConnectorManager
+        from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
         topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
         signal_sender = KafkaSignalSender()

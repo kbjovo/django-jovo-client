@@ -17,6 +17,187 @@ from .database import ClientDatabase
 logger = logging.getLogger(__name__)
 
 
+class ConnectorHistory(models.Model):
+    """
+    History of all connectors created, even after deletion.
+    Used to track version numbers and prevent collisions.
+    """
+
+    STATUS_CHOICES = [
+        ('created', 'Created'),
+        ('running', 'Running'),
+        ('paused', 'Paused'),
+        ('deleted', 'Deleted'),
+        ('failed', 'Failed'),
+    ]
+
+    # Foreign key to replication config (can be null if config is deleted)
+    replication_config = models.ForeignKey(
+        'ReplicationConfig',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='connector_history'
+    )
+
+    # Client and database info (preserved even if FK is deleted)
+    client_id = models.IntegerField(
+        help_text="Client ID (preserved for history)"
+    )
+    client_name = models.CharField(
+        max_length=255,
+        help_text="Client name (preserved for history)"
+    )
+    database_id = models.IntegerField(
+        help_text="Database ID (preserved for history)"
+    )
+    database_name = models.CharField(
+        max_length=255,
+        help_text="Database name (preserved for history)"
+    )
+    db_type = models.CharField(
+        max_length=50,
+        help_text="Database type (mysql, postgres, sqlserver, oracle)"
+    )
+
+    # Connector details
+    connector_name = models.CharField(
+        max_length=255,
+        unique=True,
+        help_text="Full connector name including version"
+    )
+    connector_version = models.IntegerField(
+        help_text="Version number of this connector"
+    )
+    connector_type = models.CharField(
+        max_length=50,
+        choices=[
+            ('source', 'Source Connector (Debezium)'),
+            ('sink', 'Sink Connector (JDBC)'),
+        ],
+        help_text="Type of connector"
+    )
+
+    # Status tracking
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='created'
+    )
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    # Metadata
+    kafka_topic_prefix = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Kafka topic prefix used by this connector"
+    )
+    notes = models.TextField(
+        blank=True,
+        help_text="Additional notes or reason for deletion"
+    )
+
+    class Meta:
+        db_table = "connector_history"
+        verbose_name = "Connector History"
+        verbose_name_plural = "Connector History"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['client_id', 'database_id', 'connector_version']),
+            models.Index(fields=['connector_name']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"{self.connector_name} (v{self.connector_version}) - {self.status}"
+
+    @classmethod
+    def get_next_version(cls, client_id: int, database_id: int, connector_type: str = 'source') -> int:
+        """
+        Get the next available version number for a client/database connector.
+
+        Args:
+            client_id: Client ID
+            database_id: Database ID
+            connector_type: 'source' or 'sink'
+
+        Returns:
+            Next version number (starts at 1)
+        """
+        highest = cls.objects.filter(
+            client_id=client_id,
+            database_id=database_id,
+            connector_type=connector_type
+        ).aggregate(
+            max_version=models.Max('connector_version')
+        )['max_version']
+
+        return (highest or 0) + 1
+
+    @classmethod
+    def record_connector_creation(cls, replication_config, connector_name: str,
+                                  connector_version: int, connector_type: str = 'source'):
+        """
+        Record a connector creation in history.
+
+        For sink connectors, this is idempotent - if the connector already exists in history,
+        it updates the record instead of creating a duplicate.
+
+        Args:
+            replication_config: ReplicationConfig instance
+            connector_name: Full connector name
+            connector_version: Version number
+            connector_type: 'source' or 'sink'
+        """
+        db_config = replication_config.client_database
+        client = db_config.client
+
+        # For sink connectors, check if already exists (they are reused)
+        if connector_type == 'sink':
+            existing = cls.objects.filter(connector_name=connector_name).first()
+            if existing:
+                # Update existing record
+                existing.replication_config = replication_config
+                existing.status = 'created'
+                existing.deleted_at = None
+                existing.kafka_topic_prefix = replication_config.kafka_topic_prefix or ''
+                existing.save()
+                logger.debug(f"Updated existing sink connector history: {connector_name}")
+                return existing
+
+        # Create new record (for source connectors or new sink connectors)
+        return cls.objects.create(
+            replication_config=replication_config,
+            client_id=client.id,
+            client_name=client.name,
+            database_id=db_config.id,
+            database_name=db_config.database_name,
+            db_type=db_config.db_type,
+            connector_name=connector_name,
+            connector_version=connector_version,
+            connector_type=connector_type,
+            status='created',
+            kafka_topic_prefix=replication_config.kafka_topic_prefix or ''
+        )
+
+    @classmethod
+    def mark_connector_deleted(cls, connector_name: str, notes: str = ''):
+        """Mark a connector as deleted in history."""
+        try:
+            history = cls.objects.get(connector_name=connector_name)
+            history.status = 'deleted'
+            history.deleted_at = timezone.now()
+            if notes:
+                history.notes = notes
+            history.save()
+            return True
+        except cls.DoesNotExist:
+            logger.warning(f"Connector {connector_name} not found in history")
+            return False
+
 
 class ReplicationConfig(models.Model):
     """Configuration for replication from source DB to client's database"""
@@ -107,29 +288,85 @@ class ReplicationConfig(models.Model):
         help_text="Drop and recreate tables (only for full refresh)"
     )
 
+    # ====== PERFORMANCE TUNING SETTINGS ======
+    # These settings control Debezium connector performance and behavior
+
+    SNAPSHOT_MODE_CHOICES = [
+        ('initial', 'Initial - Snapshot on first run only'),
+        ('when_needed', 'When Needed - Snapshot if no offset'),
+        ('never', 'Never - CDC only, no snapshot'),
+        ('always', 'Always - Snapshot every restart'),
+        ('schema_only', 'Schema Only - No data snapshot'),
+        ('recovery', 'Recovery - For recovery scenarios'),
+    ]
+
+    snapshot_mode = models.CharField(
+        max_length=20,
+        choices=SNAPSHOT_MODE_CHOICES,
+        default='initial',
+        help_text="Snapshot mode for initial data load"
+    )
+
+    max_queue_size = models.IntegerField(
+        default=8192,
+        help_text="Maximum queue size for the connector (1024-32768). Higher values = better throughput but more memory usage."
+    )
+
+    max_batch_size = models.IntegerField(
+        default=2048,
+        help_text="Maximum batch size for processing (512-8192). Larger batches = faster throughput but more latency."
+    )
+
+    poll_interval_ms = models.IntegerField(
+        default=500,
+        help_text="Poll interval in milliseconds (100-5000). Lower = more real-time but more CPU usage."
+    )
+
+    incremental_snapshot_chunk_size = models.IntegerField(
+        default=1024,
+        help_text="Chunk size for incremental snapshots (256-10240). Used when adding tables via signals."
+    )
+
     # NEW: Health monitoring and state tracking
     connector_state = models.CharField(
         max_length=50,
         blank=True,
         null=True,
-        help_text="Debezium connector state (RUNNING/PAUSED/FAILED/etc)"
+        help_text="Debezium source connector state (RUNNING/PAUSED/FAILED/etc)"
     )
+
+    # ✅ NEW: Sink connector tracking (JDBC Sink Connector to target database)
+    sink_connector_name = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="JDBC Sink connector name in Kafka Connect"
+    )
+    sink_connector_state = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="JDBC Sink connector state (RUNNING/PAUSED/FAILED/etc)"
+    )
+
+    # DEPRECATED: Consumer fields (replaced by sink connectors)
     consumer_state = models.CharField(
         max_length=50,
         default='UNKNOWN',
-        help_text="Kafka consumer state (RUNNING/STOPPED/ERROR)"
+        help_text="[DEPRECATED] Kafka consumer state - replaced by sink_connector_state"
     )
     consumer_task_id = models.CharField(
         max_length=100,
         blank=True,
         null=True,
-        help_text="Celery task ID for running consumer"
+        help_text="[DEPRECATED] Celery task ID for running consumer - no longer used with sink connectors"
     )
     consumer_last_heartbeat = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Last heartbeat from consumer (updated every 30s)"
+        help_text="[DEPRECATED] Last heartbeat from consumer - no longer used with sink connectors"
     )
+
     last_error_message = models.TextField(
         blank=True,
         null=True,
@@ -255,49 +492,58 @@ class ReplicationConfig(models.Model):
                 logger.warning(f"    ⚠ Error checking for orphaned tasks: {e}")
 
             # ========================================
-            # STEP 2: Clean up Debezium Connector
+            # STEP 2: Clean up Source Connector (Debezium)
             # ========================================
             if connector_name:
-                logger.info(f"  → Cleaning up connector: {connector_name}")
+                logger.info(f"  → Cleaning up source connector: {connector_name}")
 
                 try:
-                    from client.utils.debezium_manager import DebeziumConnectorManager
+                    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
                     manager = DebeziumConnectorManager()
 
                     # Pause connector first
                     try:
                         manager.pause_connector(connector_name)
-                        logger.info(f"    ✓ Paused connector")
+                        logger.info(f"    ✓ Paused source connector")
                     except Exception as e:
-                        logger.warning(f"    ⚠ Could not pause: {e}")
+                        logger.warning(f"    ⚠ Could not pause source connector: {e}")
 
                     # Delete connector
                     try:
                         manager.delete_connector(connector_name, delete_topics=False)
-                        logger.info(f"    ✓ Deleted connector")
+                        logger.info(f"    ✓ Deleted source connector")
                     except Exception as e:
-                        logger.warning(f"    ⚠ Could not delete: {e}")
-
-                    # Clear offsets
-                    try:
-                        from client.utils.offset_manager import DebeziumOffsetManager
-                        offset_manager = DebeziumOffsetManager()
-
-                        success = offset_manager.delete_connector_offsets(connector_name)
-                        if not success:
-                            # Try with server name (without _connector suffix)
-                            server_name = connector_name.replace('_connector', '')
-                            success = offset_manager.delete_connector_offsets(server_name)
-
-                        if success:
-                            logger.info(f"    ✓ Cleared offsets")
-                        else:
-                            logger.warning(f"    ⚠ Could not clear offsets")
-                    except Exception as e:
-                        logger.warning(f"    ⚠ Error clearing offsets: {e}")
+                        logger.warning(f"    ⚠ Could not delete source connector: {e}")
 
                 except Exception as e:
-                    logger.error(f"    ❌ Error during connector cleanup: {e}")
+                    logger.error(f"    ❌ Error during source connector cleanup: {e}")
+
+            # ========================================
+            # STEP 3: Clean up Sink Connector (JDBC Sink)
+            # ========================================
+            if self.sink_connector_name:
+                logger.info(f"  → Cleaning up sink connector: {self.sink_connector_name}")
+
+                try:
+                    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+                    manager = DebeziumConnectorManager()
+
+                    # Pause sink connector first
+                    try:
+                        manager.pause_connector(self.sink_connector_name)
+                        logger.info(f"    ✓ Paused sink connector")
+                    except Exception as e:
+                        logger.warning(f"    ⚠ Could not pause sink connector: {e}")
+
+                    # Delete sink connector
+                    try:
+                        manager.delete_connector(self.sink_connector_name, delete_topics=False)
+                        logger.info(f"    ✓ Deleted sink connector")
+                    except Exception as e:
+                        logger.warning(f"    ⚠ Could not delete sink connector: {e}")
+
+                except Exception as e:
+                    logger.error(f"    ❌ Error during sink connector cleanup: {e}")
 
             # ========================================
             # STEP 3: Delete Model

@@ -9,7 +9,6 @@ This module provides a clean, maintainable architecture for CDC replication:
 """
 
 from .orchestrator import ReplicationOrchestrator
-from .consumer import ResilientKafkaConsumer
 from .health_monitor import monitor_replication_health
 from .validators import ReplicationValidator
 

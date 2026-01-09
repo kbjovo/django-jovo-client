@@ -230,7 +230,7 @@ LOGGING = {
 
 
 # ====================================
-# CELERY CONFIGURATION
+# CELERY CONFIGURATION - FIXED FOR IDLE TIMEOUT
 # ====================================
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
@@ -239,21 +239,123 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'Asia/Kolkata'
 CELERY_TASK_TRACK_STARTED = True
-CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
-CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes
-CELERY_WORKER_MAX_TASKS_PER_CHILD = 1000
-CELERY_WORKER_PREFETCH_MULTIPLIER = 4
 
-# Celery Beat (for scheduled tasks)
+# Broker connection retry settings
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_CONNECTION_RETRY = True
+CELERY_BROKER_CONNECTION_MAX_RETRIES = 10
+
+# # Broker transport options - CRITICAL FOR PREVENTING IDLE TIMEOUTS
+# CELERY_BROKER_TRANSPORT_OPTIONS = {
+#     'visibility_timeout': int(os.getenv('CELERY_VISIBILITY_TIMEOUT', '43200')),  # 12 hours
+#     'socket_timeout': int(os.getenv('CELERY_SOCKET_TIMEOUT', '120')),  # 2 minutes
+#     'socket_connect_timeout': int(os.getenv('CELERY_SOCKET_CONNECT_TIMEOUT', '30')),  # 30 seconds
+#     'socket_keepalive': True,
+#     'socket_keepalive_options': {
+#         1: 1,  # TCP_KEEPIDLE
+#         2: 3,  # TCP_KEEPINTVL  
+#         3: 5,  # TCP_KEEPCNT
+#     },
+#     'retry_on_timeout': True,
+#     'health_check_interval': int(os.getenv('CELERY_HEALTH_CHECK_INTERVAL', '30')),  # 30 seconds
+# }
+
+# # Result backend transport options
+# CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = {
+#     'visibility_timeout': int(os.getenv('CELERY_VISIBILITY_TIMEOUT', '43200')),  # 12 hours
+#     'socket_timeout': int(os.getenv('CELERY_SOCKET_TIMEOUT', '120')),  # 2 minutes
+#     'socket_connect_timeout': int(os.getenv('CELERY_SOCKET_CONNECT_TIMEOUT', '30')),  # 30 seconds
+#     'socket_keepalive': True,
+#     'retry_on_timeout': True,
+#     'retry_policy': {
+#         'timeout': 5.0,
+#     }
+# }
+
+# Global visibility timeout (set all three for Redis)
+CELERY_VISIBILITY_TIMEOUT = int(os.getenv('CELERY_VISIBILITY_TIMEOUT', '43200'))  # 12 hours
+
+# Task execution time limits
+CELERY_TASK_TIME_LIMIT = int(os.getenv('CELERY_TASK_TIME_LIMIT', '7200'))  # 2 hours hard limit
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv('CELERY_TASK_SOFT_TIME_LIMIT', '6900'))  # 1h 55m soft limit
+
+# Worker prefetch settings
+CELERY_WORKER_PREFETCH_MULTIPLIER = int(os.getenv('CELERY_WORKER_PREFETCH_MULTIPLIER', '1'))
+
+# Worker max tasks per child (prevents memory leaks)
+CELERY_WORKER_MAX_TASKS_PER_CHILD = int(os.getenv('CELERY_WORKER_MAX_TASKS_PER_CHILD', '1000'))
+
+# Task acknowledgment settings
+CELERY_TASK_ACKS_LATE = os.getenv('CELERY_TASK_ACKS_LATE', 'True').lower() in ('true', '1', 'yes')
+CELERY_TASK_REJECT_ON_WORKER_LOST = os.getenv('CELERY_TASK_REJECT_ON_WORKER_LOST', 'True').lower() in ('true', '1', 'yes')
+
+# Connection loss handling
+CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS = os.getenv(
+    'CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS', 
+    'False'
+).lower() in ('true', '1', 'yes')
+
+# Enable prefetch count reduction after connection loss (Celery 5.4+)
+CELERY_WORKER_ENABLE_PREFETCH_COUNT_REDUCTION = True
+
+# Result settings
+CELERY_RESULT_EXPIRES = int(os.getenv('CELERY_RESULT_EXPIRES', '86400'))  # 1 day
+CELERY_RESULT_EXTENDED = True
+CELERY_RESULT_COMPRESSION = 'gzip'
+
+# Celery Beat
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_BEAT_MAX_LOOP_INTERVAL = 60  # 1 minute
+
+# Monitoring and events
+CELERY_TASK_SEND_SENT_EVENT = True
+CELERY_EVENT_QUEUE_EXPIRES = 60  # 1 minute
+CELERY_EVENT_QUEUE_TTL = 5  # 5 seconds
+CELERY_WORKER_STATE_DB = '/tmp/celery_worker_state.db'
+
+# Task routing
+CELERY_TASK_ROUTES = {
+    'client.tasks.consumer_tasks.*': {
+        'queue': 'consumers',
+        'routing_key': 'consumers',
+    },
+    'client.tasks.general_tasks.*': {
+        'queue': 'celery',
+        'routing_key': 'celery',
+    },
+}
+
+# Default queue
+CELERY_TASK_DEFAULT_QUEUE = 'celery'
+CELERY_TASK_DEFAULT_EXCHANGE = 'celery'
+CELERY_TASK_DEFAULT_ROUTING_KEY = 'celery'
+
+# Additional optimizations
+CELERY_CACHE_BACKEND = None
+CELERY_TASK_COMPRESSION = 'gzip'
+CELERY_MESSAGE_COMPRESSION = 'gzip'
+CELERY_WORKER_POOL = 'prefork'
+CELERY_WORKER_CONCURRENCY = int(os.getenv('CELERY_WORKER_CONCURRENCY', '4'))
+CELERY_WORKER_DISABLE_RATE_LIMITS = os.getenv('CELERY_DISABLE_RATE_LIMITS', 'False').lower() in ('true', '1', 'yes')
 
 # ====================================
 # DEBEZIUM / KAFKA CONFIGURATION
 # ====================================
 DEBEZIUM_CONFIG = {
     'KAFKA_CONNECT_URL': os.getenv('KAFKA_CONNECT_URL', 'http://localhost:8083'),
-    'KAFKA_BOOTSTRAP_SERVERS': os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092'),
-    'KAFKA_INTERNAL_SERVERS': os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:29092'),  # For Docker internal
+    
+    # External bootstrap servers (for host machine connections)
+    'KAFKA_BOOTSTRAP_SERVERS': os.getenv(
+        'KAFKA_BOOTSTRAP_SERVERS', 
+        'localhost:9092,localhost:9094,localhost:9096'
+    ),
+    
+    # Internal bootstrap servers (for Docker container communication)
+    'KAFKA_INTERNAL_SERVERS': os.getenv(
+        'KAFKA_INTERNAL_SERVERS', 
+        'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+    ),
+    
     'SCHEMA_REGISTRY_URL': os.getenv('SCHEMA_REGISTRY_URL', 'http://localhost:8081'),
     'CONSUMER_GROUP_PREFIX': 'cdc_consumer',
 }
@@ -261,70 +363,53 @@ DEBEZIUM_CONFIG = {
 # ====================================
 # KAFKA TOPIC CONFIGURATION
 # ====================================
-# These settings control how Kafka topics are created and managed
-# Can be overridden via environment variables for different environments
 KAFKA_TOPIC_CONFIG = {
-    # Number of partitions per topic
-    # - 1 partition = strict message ordering (recommended for CDC)
-    # - Multiple partitions = higher throughput but no ordering guarantee
-    # Override: KAFKA_TOPIC_PARTITIONS=3
     'PARTITIONS': int(os.getenv('KAFKA_TOPIC_PARTITIONS', '1')),
-
-    # Replication factor (number of copies)
-    # - Must be <= number of Kafka brokers
-    # - 1 broker (dev) = replication factor 1
-    # - 3+ brokers (prod) = replication factor 2 or 3
-    # Override: KAFKA_TOPIC_REPLICATION_FACTOR=3
-    'REPLICATION_FACTOR': int(os.getenv('KAFKA_TOPIC_REPLICATION_FACTOR', '1')),
-
-    # Retention time in milliseconds
-    # How long Kafka keeps messages before deletion
-    # - 1 hour = 3600000
-    # - 1 day = 86400000
-    # - 7 days = 604800000 (default, recommended for CDC)
-    # - 30 days = 2592000000
-    # - Forever = -1
-    # Override: KAFKA_TOPIC_RETENTION_MS=2592000000
-    'RETENTION_MS': int(os.getenv('KAFKA_TOPIC_RETENTION_MS', '604800000')),  # 7 days default
-
-    # Retention size in bytes per partition
-    # Maximum size per partition before old messages are deleted
-    # -1 = unlimited (default)
-    # Override: KAFKA_TOPIC_RETENTION_BYTES=1073741824
+    'REPLICATION_FACTOR': int(os.getenv('KAFKA_TOPIC_REPLICATION_FACTOR', '3')),  # Updated for 3 brokers
+    'RETENTION_MS': int(os.getenv('KAFKA_TOPIC_RETENTION_MS', '604800000')),  # 7 days
     'RETENTION_BYTES': int(os.getenv('KAFKA_TOPIC_RETENTION_BYTES', '-1')),
-
-    # Cleanup policy
-    # - 'delete': Delete old messages after retention period (recommended for CDC)
-    # - 'compact': Keep only latest value per key
-    # Override: KAFKA_TOPIC_CLEANUP_POLICY=compact
     'CLEANUP_POLICY': os.getenv('KAFKA_TOPIC_CLEANUP_POLICY', 'delete'),
-
-    # Compression type
-    # - 'none': No compression (fastest, uses most disk)
-    # - 'gzip': Good compression, moderate CPU
-    # - 'snappy': Balanced (recommended)
-    # - 'lz4': Fast compression/decompression
-    # - 'zstd': Best compression ratio
-    # Override: KAFKA_TOPIC_COMPRESSION=lz4
     'COMPRESSION_TYPE': os.getenv('KAFKA_TOPIC_COMPRESSION_TYPE', 'snappy'),
-
-    # Minimum in-sync replicas
-    # Number of replicas that must acknowledge write before success
-    # Must be <= replication factor
-    # - 1 broker = 1
-    # - 3 brokers with RF=3 = 2 (recommended for production)
-    # Override: KAFKA_TOPIC_MIN_ISR=2
-    'MIN_INSYNC_REPLICAS': int(os.getenv('KAFKA_TOPIC_MIN_ISR', '1')),
-
-    # Segment size in bytes
-    # Kafka rolls to new log segment after this size
-    # Default: 1GB (1073741824)
-    # Override: KAFKA_TOPIC_SEGMENT_BYTES=536870912
+    'MIN_INSYNC_REPLICAS': int(os.getenv('KAFKA_TOPIC_MIN_ISR', '2')),  # Updated for 3 brokers
     'SEGMENT_BYTES': int(os.getenv('KAFKA_TOPIC_SEGMENT_BYTES', '1073741824')),
-
-    # Segment time in milliseconds
-    # Kafka rolls to new log segment after this time
-    # Default: 7 days (604800000)
-    # Override: KAFKA_TOPIC_SEGMENT_MS=86400000
     'SEGMENT_MS': int(os.getenv('KAFKA_TOPIC_SEGMENT_MS', '604800000')),
+}
+
+# ====================================
+# KAFKA ADMIN CONFIGURATION
+# ====================================
+KAFKA_ADMIN_CONFIG = {
+    'REQUEST_TIMEOUT_MS': int(os.getenv('KAFKA_ADMIN_REQUEST_TIMEOUT_MS', '30000')),
+    'API_VERSION_AUTO_TIMEOUT_MS': int(os.getenv('KAFKA_ADMIN_API_VERSION_TIMEOUT_MS', '30000')),
+    'METADATA_MAX_AGE_MS': int(os.getenv('KAFKA_ADMIN_METADATA_MAX_AGE_MS', '300000')),
+    'AUTO_CREATE_TOPICS': False,  # Must be False since brokers have auto-create disabled
+    'TOPIC_CREATE_RETRIES': int(os.getenv('KAFKA_TOPIC_CREATE_RETRIES', '3')),
+    'TOPIC_CREATE_RETRY_BACKOFF_MS': int(os.getenv('KAFKA_TOPIC_CREATE_RETRY_BACKOFF_MS', '1000')),
+}
+
+# ====================================
+# KAFKA CONSUMER CONFIGURATION
+# ====================================
+KAFKA_CONSUMER_CONFIG = {
+    'SESSION_TIMEOUT_MS': int(os.getenv('KAFKA_CONSUMER_SESSION_TIMEOUT_MS', '30000')),
+    'HEARTBEAT_INTERVAL_MS': int(os.getenv('KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS', '10000')),
+    'MAX_POLL_INTERVAL_MS': int(os.getenv('KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS', '300000')),
+    'MAX_POLL_RECORDS': int(os.getenv('KAFKA_CONSUMER_MAX_POLL_RECORDS', '500')),
+    'AUTO_OFFSET_RESET': os.getenv('KAFKA_CONSUMER_AUTO_OFFSET_RESET', 'earliest'),
+    'ENABLE_AUTO_COMMIT': os.getenv('KAFKA_CONSUMER_ENABLE_AUTO_COMMIT', 'False').lower() in ('true', '1', 'yes'),
+    'AUTO_COMMIT_INTERVAL_MS': int(os.getenv('KAFKA_CONSUMER_AUTO_COMMIT_INTERVAL_MS', '5000')),
+}
+
+# ====================================
+# KAFKA PRODUCER CONFIGURATION
+# ====================================
+KAFKA_PRODUCER_CONFIG = {
+    'ACKS': os.getenv('KAFKA_PRODUCER_ACKS', 'all'),  # Wait for all replicas
+    'RETRIES': int(os.getenv('KAFKA_PRODUCER_RETRIES', '3')),
+    'RETRY_BACKOFF_MS': int(os.getenv('KAFKA_PRODUCER_RETRY_BACKOFF_MS', '1000')),
+    'BATCH_SIZE': int(os.getenv('KAFKA_PRODUCER_BATCH_SIZE', '16384')),
+    'LINGER_MS': int(os.getenv('KAFKA_PRODUCER_LINGER_MS', '10')),
+    'COMPRESSION_TYPE': os.getenv('KAFKA_PRODUCER_COMPRESSION_TYPE', 'snappy'),
+    'MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION': int(os.getenv('KAFKA_PRODUCER_MAX_IN_FLIGHT', '5')),
+    'REQUEST_TIMEOUT_MS': int(os.getenv('KAFKA_PRODUCER_REQUEST_TIMEOUT_MS', '30000')),
 }

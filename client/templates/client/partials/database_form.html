@@ -59,20 +59,35 @@
       <div>
         <label for="id_db_type" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
           Database Type <span class="text-red-500">*</span>
+          {% if object.is_target %}
+            <span class="ml-2 inline-flex items-center px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400 rounded">Target DB</span>
+          {% endif %}
         </label>
-        <select 
-          name="db_type" 
+        <select
+          name="db_type"
           id="id_db_type"
           x-model="formData.db_type"
           @change="updateDefaultPort()"
           required
           class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition">
-          <option value="mysql" {% if form.db_type.value == 'mysql' %}selected{% endif %}>MySQL</option>
-          <option value="mssql" {% if form.db_type.value == 'mssql' %}selected{% endif %}>SQL Server</option>
-          <option value="postgresql" {% if form.db_type.value == 'postgresql' %}selected{% endif %}>PostgreSQL</option>
-          <option value="sqlite" {% if form.db_type.value == 'sqlite' %}selected{% endif %}>SQLite</option>
-          <option value="oracle" {% if form.db_type.value == 'oracle' %}selected{% endif %}>Oracle</option>
+          {% if object.is_target %}
+            <!-- Target databases: Only MySQL and PostgreSQL -->
+            <option value="mysql" {% if form.db_type.value == 'mysql' %}selected{% endif %}>MySQL</option>
+            <option value="postgresql" {% if form.db_type.value == 'postgresql' %}selected{% endif %}>PostgreSQL</option>
+          {% else %}
+            <!-- Source databases: All types -->
+            <option value="mysql" {% if form.db_type.value == 'mysql' %}selected{% endif %}>MySQL</option>
+            <option value="postgresql" {% if form.db_type.value == 'postgresql' %}selected{% endif %}>PostgreSQL</option>
+            <option value="mssql" {% if form.db_type.value == 'mssql' %}selected{% endif %}>SQL Server</option>
+            <option value="oracle" {% if form.db_type.value == 'oracle' %}selected{% endif %}>Oracle</option>
+            <option value="sqlite" {% if form.db_type.value == 'sqlite' %}selected{% endif %}>SQLite</option>
+          {% endif %}
         </select>
+        {% if object.is_target %}
+          <p class="mt-1 text-xs text-blue-600 dark:text-blue-400">
+            ℹ️ Target databases are restricted to MySQL or PostgreSQL for sink connector compatibility.
+          </p>
+        {% endif %}
         {% if form.db_type.errors %}
           <p class="mt-1 text-xs text-red-600">{{ form.db_type.errors.0 }}</p>
         {% endif %}

@@ -37,6 +37,8 @@ from .cdc_views import (
     stop_replication,
     restart_replication_view,
     replication_status,
+    create_topics,
+    list_topics,
 )
 
 from .dashboard_views import (
@@ -74,6 +76,8 @@ __all__ = [
     'stop_replication',
     'restart_replication_view',
     'replication_status',
+    'create_topics',
+    'list_topics',
 
     # Dashboard views
     'dashboard',

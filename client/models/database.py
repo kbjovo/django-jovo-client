@@ -103,15 +103,36 @@ class ClientDatabase(models.Model):
         db_type_display = "Source" if self.is_primary else "Target" if self.is_target else "Database"
         return f"{self.client.name} → {self.connection_name} ({db_type_display})"
 
+    def clean(self):
+        """Validate target database restrictions."""
+        super().clean()
+
+        # ✅ Validate: Target databases can only be MySQL or PostgreSQL
+        if self.is_target and self.db_type not in ['mysql', 'postgresql']:
+            from django.core.exceptions import ValidationError
+            raise ValidationError({
+                'db_type': f'Target databases can only be MySQL or PostgreSQL. Selected type: {self.get_db_type_display()}'
+            })
+
     def save(self, *args, **kwargs):
         """Encrypt password before storing."""
         if self.password and not self._is_password_encrypted():
             self.password = encrypt_password(self.password)
-        
+
         # ✅ Auto-set oracle_connection_mode to 'service' if Oracle and not set
         if self.db_type == "oracle" and not self.oracle_connection_mode:
             self.oracle_connection_mode = "service"
-        
+
+        # ✅ Validate target database restrictions (unless we're updating specific fields only)
+        # This check is also performed at the form level for better UX
+        if not kwargs.get('update_fields'):
+            # Only run validation on full saves, not partial updates
+            if self.is_target and self.db_type not in ['mysql', 'postgresql']:
+                from django.core.exceptions import ValidationError
+                raise ValidationError(
+                    f'Target databases can only be MySQL or PostgreSQL. Current type: {self.get_db_type_display()}'
+                )
+
         super().save(*args, **kwargs)
 
     def _is_password_encrypted(self):
@@ -179,14 +200,26 @@ class ClientDatabase(models.Model):
     def check_connection_status(self, save=True):
         """
         Test database connection and update status
-        
+
         ✅ ENHANCED: Better Oracle error messages with service/SID context
         """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.info(f"🔍 Testing connection to {self.db_type} database:")
+        logger.info(f"   Host: {self.host}")
+        logger.info(f"   Port: {self.port}")
+        logger.info(f"   Username: {self.username}")
+        logger.info(f"   Database: {self.database_name}")
+        logger.info(f"   Is Target: {self.is_target}")
+
         try:
             # Network connectivity check (skip for SQLite)
             if self.db_type != "sqlite":
                 try:
+                    logger.info(f"   Testing network connectivity to {self.host}:{self.port}...")
                     socket.create_connection((self.host, self.port), timeout=5)
+                    logger.info(f"   ✓ Network connection successful")
                 except socket.timeout:
                     self.connection_status = "failed"
                     raise Exception(f"Connection timeout - host {self.host}:{self.port} is unreachable")
@@ -199,7 +232,8 @@ class ClientDatabase(models.Model):
 
             # Database connection test
             connection_url = self.get_connection_url()
-            
+            logger.info(f"   Building connection string (password hidden)...")
+
             # ✅ Oracle-specific engine configuration
             if self.db_type == "oracle":
                 engine = create_engine(
@@ -209,7 +243,8 @@ class ClientDatabase(models.Model):
                 )
             else:
                 engine = create_engine(connection_url, pool_pre_ping=True)
-            
+
+            logger.info(f"   Attempting database connection...")
             with engine.connect() as conn:
                 # Database-specific test queries
                 if self.db_type == "oracle":
@@ -219,6 +254,7 @@ class ClientDatabase(models.Model):
 
             engine.dispose()
             self.connection_status = "success"
+            logger.info(f"   ✅ Database connection successful!")
 
         except Exception as e:
             self.connection_status = "failed"
@@ -265,5 +301,74 @@ class ClientDatabase(models.Model):
             self.last_checked = timezone.now()
             if save:
                 self.save(update_fields=["connection_status", "last_checked"])
-        
+
         return self.connection_status
+
+    # ========================================
+    # Multiple Source Connectors Helper Methods
+    # ========================================
+
+    def get_source_connectors(self):
+        """
+        Get all source connectors (ReplicationConfigs) for this database.
+        Returns only active, configured, or paused connectors (not deleted or disabled).
+        """
+        return self.replication_configs.filter(
+            status__in=['configured', 'active', 'paused']
+        ).order_by('connector_version')
+
+    def get_sink_connector_name(self):
+        """
+        Get the shared sink connector name for this database.
+        Format: client_{client_id}_db_{database_id}_sink
+        """
+        return f"client_{self.client.id}_db_{self.id}_sink"
+
+    def has_active_connectors(self):
+        """
+        Check if database has any active source connectors.
+        """
+        return self.replication_configs.filter(
+            status__in=['active', 'configured']
+        ).exists()
+
+    def get_total_replicated_tables_count(self):
+        """
+        Get total count of tables being replicated across all source connectors.
+        """
+        from client.models.replication import TableMapping
+
+        return TableMapping.objects.filter(
+            replication_config__client_database=self,
+            replication_config__status__in=['configured', 'active', 'paused'],
+            is_enabled=True
+        ).count()
+
+    def get_connector_health_summary(self):
+        """
+        Get health summary for all connectors (source and sink).
+        Returns dict with connector counts and overall health status.
+        """
+        source_connectors = self.get_source_connectors()
+        total_sources = source_connectors.count()
+        running_sources = source_connectors.filter(connector_state='RUNNING').count()
+        failed_sources = source_connectors.filter(connector_state='FAILED').count()
+
+        # Determine overall health
+        if total_sources == 0:
+            health_status = 'no_connectors'
+        elif failed_sources > 0:
+            health_status = 'degraded'
+        elif running_sources == total_sources:
+            health_status = 'healthy'
+        else:
+            health_status = 'partial'
+
+        return {
+            'total_source_connectors': total_sources,
+            'running_source_connectors': running_sources,
+            'failed_source_connectors': failed_sources,
+            'total_tables': self.get_total_replicated_tables_count(),
+            'health_status': health_status,
+            'sink_connector_name': self.get_sink_connector_name(),
+        }

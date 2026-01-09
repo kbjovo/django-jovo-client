@@ -10,8 +10,8 @@ from typing import Dict, List, Optional, Any, Tuple
 from django.conf import settings
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig
-from .notification_utils import send_connector_status_email, log_and_notify_error
-from .kafka_topic_manager import KafkaTopicManager
+from client.utils.notification_utils import send_connector_status_email, log_and_notify_error
+from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class DebeziumConnectorManager:
                 response = requests.delete(url, headers=headers, timeout=timeout)
             else:
                 return False, None, f"Unsupported HTTP method: {method}"
-            logger.info(f"method: {method}, url: {url}, data: {data}")
+            logger.debug(f"method: {method}, url: {url}")
             # Check if request was successful
             # 200: OK, 201: Created, 202: Accepted (async operations), 204: No Content
             if response.status_code in [200, 201, 202, 204]:
@@ -123,8 +123,13 @@ class DebeziumConnectorManager:
                     error_message = error_json.get('message', error_data)
                 except:
                     error_message = error_data
-                
-                logger.error(f"Request failed: {method} {url} - Status: {response.status_code} - {error_message}")
+
+                # 404 is expected when checking if connector exists - log as debug
+                if response.status_code == 404:
+                    logger.debug(f"Resource not found: {method} {url}")
+                else:
+                    logger.error(f"Request failed: {method} {url} - Status: {response.status_code} - {error_message}")
+
                 return False, None, f"HTTP {response.status_code}: {error_message}"
                 
         except requests.exceptions.Timeout:
@@ -198,11 +203,11 @@ class DebeziumConnectorManager:
             success, data, error = self._make_request('GET', url)
             
             if success and data:
-                logger.info(f"Connector {connector_name} status: {data.get('connector', {}).get('state', 'UNKNOWN')}")
+                logger.debug(f"Connector {connector_name} status: {data.get('connector', {}).get('state', 'UNKNOWN')}")
                 return True, data
             else:
                 if '404' in str(error):
-                    logger.warning(f"Connector {connector_name} not found")
+                    logger.debug(f"Connector {connector_name} not found")
                     return False, None
                 logger.error(f"Failed to get connector status: {error}")
                 return False, None
@@ -336,9 +341,9 @@ class DebeziumConnectorManager:
             # Check if connector exists
             exists, _ = self.get_connector_status(connector_name)
             if not exists:
-                error_msg = f"Connector {connector_name} does not exist"
-                logger.warning(error_msg)
-                return False, error_msg
+                # Connector doesn't exist - this is fine, nothing to delete
+                logger.debug(f"Connector {connector_name} does not exist (already deleted or never created)")
+                return True, None  # Return success since the desired state (deleted) is achieved
 
             # Get connector config to find topic prefix (needed for topic deletion)
             topic_prefix = None
@@ -445,12 +450,12 @@ class DebeziumConnectorManager:
             else:
                 logger.error(f"Failed to resume connector {connector_name}: {error}")
                 return False, error
-                
+
         except Exception as e:
             error_msg = f"Error resuming connector: {str(e)}"
             logger.error(error_msg)
             return False, error_msg
-    
+
     def restart_connector(self, connector_name: str) -> Tuple[bool, Optional[str]]:
         """
         Restart a connector
