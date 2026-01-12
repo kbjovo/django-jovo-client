@@ -437,18 +437,45 @@ def get_table_schema(db_config: ClientDatabase, table_name: str, schema: Optiona
             foreign_keys = inspector.get_foreign_keys(actual_table_name)
         
         primary_keys = pk_constraint.get('constrained_columns', []) if pk_constraint else []
-        
+
+        # Get row count
+        row_count = 0
+        try:
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                # Build the table identifier for COUNT query
+                if schema_name and db_type != 'mysql':
+                    if db_type == 'oracle':
+                        # Oracle needs quoted identifiers for case-sensitivity
+                        table_identifier = f'"{schema_name}"."{actual_table_name}"'
+                    else:
+                        table_identifier = f'{schema_name}.{actual_table_name}'
+                else:
+                    if db_type == 'oracle':
+                        table_identifier = f'"{actual_table_name}"'
+                    else:
+                        table_identifier = actual_table_name
+
+                count_query = text(f"SELECT COUNT(*) FROM {table_identifier}")
+                result = conn.execute(count_query)
+                row_count = result.scalar()
+                logger.debug(f"Table '{table_name}' has {row_count} rows")
+        except Exception as count_error:
+            logger.warning(f"Could not get row count for table '{table_name}': {count_error}")
+            row_count = 0
+
         engine.dispose()
-        
+
         schema_info = {
             'table_name': table_name,
             'columns': columns,
             'primary_keys': primary_keys,
             'indexes': indexes,
             'foreign_keys': foreign_keys,
+            'row_count': row_count,
         }
-        
-        logger.info(f"Retrieved schema for table '{table_name}': {len(columns)} columns, {len(primary_keys)} PKs")
+
+        logger.info(f"Retrieved schema for table '{table_name}': {len(columns)} columns, {len(primary_keys)} PKs, {row_count} rows")
         return schema_info
         
     except Exception as e:

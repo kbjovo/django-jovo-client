@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+
+<!-- Page Header -->
+<div class="flex justify-between items-center mb-6">
+    <div>
+        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">🔌 CDC Connectors - {{ database.connection_name }}</h2>
+        <p class="text-gray-600 dark:text-gray-400 mt-1">
+            Client: <span class="font-semibold">{{ client.name }}</span> |
+            Database: <span class="font-semibold">{{ database.db_type|upper }}</span> @ {{ database.host }}:{{ database.port }}
+        </p>
+    </div>
+    <div class="flex gap-2">
+        <a href="{% url 'client_detail' client.pk %}"
+           class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+            ← Back to Client
+        </a>
+        {% if can_add_connector %}
+        <a href="{% url 'connector_add' database.pk %}"
+           class="inline-flex items-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition">
+            ➕ Add Source Connector
+        </a>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Health Summary Card -->
+<div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+    <div class="{% if health_summary.health_status == 'healthy' %}bg-green-600{% elif health_summary.health_status == 'degraded' %}bg-red-600{% elif health_summary.health_status == 'partial' %}bg-yellow-600{% else %}bg-gray-600{% endif %} text-white px-6 py-4">
+        <h5 class="text-lg font-semibold">📊 Health Summary</h5>
+    </div>
+    <div class="p-6">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 text-center">
+            <div>
+                <div class="text-3xl font-bold text-gray-900 dark:text-white">{{ health_summary.total_source_connectors }}</div>
+                <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Source Connectors</p>
+            </div>
+            <div>
+                <div class="text-3xl font-bold text-green-600 dark:text-green-400">{{ health_summary.running_source_connectors }}</div>
+                <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Running</p>
+            </div>
+            <div>
+                <div class="text-3xl font-bold text-gray-900 dark:text-white">{{ health_summary.total_tables }}</div>
+                <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Tables Replicated</p>
+            </div>
+            <div>
+                <div class="text-3xl font-bold">
+                    {% if health_summary.health_status == 'healthy' %}
+                        <span class="text-green-600 dark:text-green-400">✅ Healthy</span>
+                    {% elif health_summary.health_status == 'degraded' %}
+                        <span class="text-red-600 dark:text-red-400">❌ Degraded</span>
+                    {% elif health_summary.health_status == 'partial' %}
+                        <span class="text-yellow-600 dark:text-yellow-400">⚠️ Partial</span>
+                    {% else %}
+                        <span class="text-gray-600 dark:text-gray-400">➖ No Connectors</span>
+                    {% endif %}
+                </div>
+                <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Overall Status</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- View Toggle -->
+<div class="border-b border-gray-200 dark:border-gray-700 mb-6">
+    <nav class="flex gap-4">
+        <a href="?view=by_connector"
+           class="pb-4 px-1 border-b-2 {% if view_mode == 'by_connector' %}border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400{% else %}border-transparent text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200{% endif %} font-medium transition">
+            🔌 By Connector
+        </a>
+        <a href="?view=combined"
+           class="pb-4 px-1 border-b-2 {% if view_mode == 'combined' %}border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400{% else %}border-transparent text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200{% endif %} font-medium transition">
+            📋 Combined View
+        </a>
+    </nav>
+</div>
+
+<!-- Combined View -->
+{% if view_mode == 'combined' %}
+<div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+    <div class="bg-blue-600 text-white px-6 py-4">
+        <h5 class="text-lg font-semibold">📋 All Tables Across All Connectors</h5>
+    </div>
+    <div class="p-6">
+        {% if all_table_mappings %}
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Table Name</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Connector</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Version</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Status</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Target Table</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for mapping in all_table_mappings %}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td class="px-6 py-4 whitespace-nowrap"><span class="font-semibold text-gray-900 dark:text-white">{{ mapping.source_table }}</span></td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <a href="?view=by_connector#connector-{{ mapping.replication_config.id }}"
+                               class="text-blue-600 dark:text-blue-400 hover:underline">
+                                {{ mapping.replication_config.connector_name }}
+                            </a>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-400">v{{ mapping.replication_config.connector_version }}</span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% if mapping.replication_config.connector_state == 'RUNNING' %}
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">✅ Running</span>
+                            {% elif mapping.replication_config.connector_state == 'FAILED' %}
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">❌ Failed</span>
+                            {% elif mapping.replication_config.connector_state == 'PAUSED' %}
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400">⏸️ Paused</span>
+                            {% else %}
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-900/30 text-gray-800 dark:text-gray-400">{{ mapping.replication_config.connector_state|default:"UNKNOWN" }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-gray-900 dark:text-white">{{ mapping.target_table }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-gray-600 dark:text-gray-400 text-center py-8">No tables configured yet.</p>
+        {% endif %}
+    </div>
+</div>
+
+<!-- By Connector View (Default) -->
+{% else %}
+
+<!-- Source Connectors -->
+{% if source_connectors %}
+    {% for config in source_connectors %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden" id="connector-{{ config.id }}">
+        <div class="{% if config.debezium_status.state == 'RUNNING' %}bg-green-600{% elif config.debezium_status.state == 'FAILED' %}bg-red-600{% elif config.debezium_status.state == 'PAUSED' %}bg-yellow-600{% else %}bg-gray-600{% endif %} text-white px-6 py-4">
+            <div class="flex justify-between items-center">
+                <h5 class="text-lg font-semibold">
+                    📡 Source Connector v{{ config.connector_version }}
+                    {% if config.debezium_status.state == 'RUNNING' %}
+                        <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-green-700">✅ RUNNING</span>
+                    {% elif config.debezium_status.state == 'FAILED' %}
+                        <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-red-700">❌ FAILED</span>
+                    {% elif config.debezium_status.state == 'PAUSED' %}
+                        <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-yellow-700">⏸️ PAUSED</span>
+                    {% else %}
+                        <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-gray-700">{{ config.debezium_status.state|default:"UNKNOWN" }}</span>
+                    {% endif %}
+                </h5>
+                <div class="flex gap-2">
+                    <a href="{% url 'connector_edit_tables' config.pk %}"
+                       class="px-3 py-1.5 bg-white hover:bg-gray-100 text-gray-900 rounded transition text-sm font-medium">
+                        ✏️ Edit Tables
+                    </a>
+                    <a href="{% url 'connector_delete' config.pk %}"
+                       class="px-3 py-1.5 bg-transparent hover:bg-white/10 text-white border border-white rounded transition text-sm font-medium">
+                        🗑️ Delete
+                    </a>
+                </div>
+            </div>
+        </div>
+        <div class="p-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                <div class="space-y-2">
+                    <p class="text-gray-900 dark:text-white"><span class="font-semibold">Connector Name:</span> {{ config.connector_name }}</p>
+                    <p class="text-gray-900 dark:text-white"><span class="font-semibold">Topic Prefix:</span> {{ config.kafka_topic_prefix }}</p>
+                    <p class="text-gray-900 dark:text-white"><span class="font-semibold">Tables:</span> {{ config.table_count }}</p>
+                    <p class="text-gray-900 dark:text-white"><span class="font-semibold">Created:</span> {{ config.created_at|date:"Y-m-d H:i" }}</p>
+                </div>
+                <div class="space-y-2">
+                    <p class="text-gray-900 dark:text-white">
+                        <span class="font-semibold">Snapshot Mode:</span>
+                        <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-400">{{ config.get_snapshot_mode_display }}</span>
+                    </p>
+                    <p class="text-gray-900 dark:text-white"><span class="font-semibold">Max Queue Size:</span> {{ config.max_queue_size }}</p>
+                    <p class="text-gray-900 dark:text-white"><span class="font-semibold">Max Batch Size:</span> {{ config.max_batch_size }}</p>
+                    <p class="text-gray-900 dark:text-white"><span class="font-semibold">Poll Interval:</span> {{ config.poll_interval_ms }}ms</p>
+                </div>
+            </div>
+
+            <!-- Tables List -->
+            <h6 class="text-lg font-semibold text-gray-900 dark:text-white mb-3">📋 Tables ({{ config.table_count }}):</h6>
+            <div class="overflow-x-auto mb-6">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
+                    <thead class="bg-gray-50 dark:bg-gray-700">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Table Name</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Target Table</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Columns</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                        {% for mapping in config.table_mappings.all %}
+                        {% if mapping.is_enabled %}
+                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                            <td class="px-4 py-3"><span class="font-semibold text-gray-900 dark:text-white">{{ mapping.source_table }}</span></td>
+                            <td class="px-4 py-3 text-gray-900 dark:text-white">{{ mapping.target_table }}</td>
+                            <td class="px-4 py-3 text-gray-900 dark:text-white">{{ mapping.get_column_count }} columns</td>
+                            <td class="px-4 py-3">
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">✅ Enabled</span>
+                            </td>
+                        </tr>
+                        {% endif %}
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Kafka Topics -->
+            <h6 class="text-lg font-semibold text-gray-900 dark:text-white mb-3">📨 Kafka Topics:</h6>
+            <ul class="space-y-1">
+                {% for mapping in config.table_mappings.all %}
+                {% if mapping.is_enabled %}
+                <li class="text-sm">
+                    <code class="px-2 py-1 bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 rounded">{{ config.kafka_topic_prefix }}.{{ mapping.source_schema|default:"" }}{% if mapping.source_schema %}.{% endif %}{{ mapping.source_table }}</code>
+                </li>
+                {% endif %}
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endfor %}
+{% else %}
+    <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6 text-center">
+        <h5 class="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-2">No source connectors configured yet</h5>
+        <p class="text-blue-700 dark:text-blue-300">Click "Add Source Connector" to create your first connector.</p>
+    </div>
+{% endif %}
+
+<!-- Sink Connector -->
+<div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+    <div class="{% if sink_status.state == 'RUNNING' %}bg-green-600{% elif sink_status.state == 'FAILED' %}bg-red-600{% else %}bg-gray-600{% endif %} text-white px-6 py-4">
+        <h5 class="text-lg font-semibold">
+            📥 Sink Connector (Shared)
+            {% if sink_status.state == 'RUNNING' %}
+                <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-green-700">✅ RUNNING</span>
+            {% elif sink_status.state == 'FAILED' %}
+                <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-red-700">❌ FAILED</span>
+            {% elif sink_status.state == 'NOT_CREATED' %}
+                <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-gray-700">➖ Not Created</span>
+            {% else %}
+                <span class="ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium bg-white text-gray-700">{{ sink_status.state }}</span>
+            {% endif %}
+        </h5>
+    </div>
+    <div class="p-6 space-y-2">
+        <p class="text-gray-900 dark:text-white"><span class="font-semibold">Connector Name:</span> {{ sink_connector_name }}</p>
+        <p class="text-gray-900 dark:text-white"><span class="font-semibold">Consuming From:</span> {{ health_summary.total_source_connectors }} source connector(s)</p>
+        <p class="text-gray-900 dark:text-white"><span class="font-semibold">Total Tables:</span> {{ health_summary.total_tables }}</p>
+        <p class="text-gray-900 dark:text-white"><span class="font-semibold">Topics Pattern:</span> <code class="px-2 py-1 bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 rounded">client_{{ client.id }}_db_{{ database.id }}_connector_v_.*</code></p>
+        {% if sink_status.state == 'NOT_CREATED' %}
+        <p class="text-gray-600 dark:text-gray-400 italic mt-4">
+            Sink connector will be automatically created when you create the first source connector.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+{% endif %}
+
+<!-- Info Box -->
+{% if not can_add_connector %}
+<div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
+    <div class="flex">
+        <div class="flex-shrink-0">
+            <svg class="h-5 w-5 text-yellow-600 dark:text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+            </svg>
+        </div>
+        <div class="ml-3">
+            <h3 class="text-sm font-semibold text-yellow-800 dark:text-yellow-200">⚠️ All tables are assigned</h3>
+            <p class="text-sm text-yellow-700 dark:text-yellow-300 mt-1">All tables from this database are already assigned to connectors. To add more tables, you need to remove them from existing connectors first.</p>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}

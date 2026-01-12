@@ -9,6 +9,7 @@ Key Features:
 - PostgreSQL JDBC Sink Connector configuration
 - Configurable settings with sensible defaults
 - UI-customizable options via custom_config parameter
+- Primary keys passed via custom_config from database metadata
 """
 
 import logging
@@ -24,19 +25,22 @@ def get_mysql_sink_connector_config(
     db_config: ClientDatabase,
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
-    primary_key_fields: Optional[str] = None,
+    delete_enabled: bool = False,
     custom_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Generate MySQL JDBC Sink Connector configuration
+
+    Primary keys should be passed via custom_config['primary.key.fields'].
 
     Args:
         client: Client instance
         db_config: Target ClientDatabase instance (must be MySQL)
         topics: List of Kafka topics to consume (e.g., ['client_1_db_2.mydb.users'])
         kafka_bootstrap_servers: Kafka bootstrap servers (defaults to settings)
-        primary_key_fields: Comma-separated list of primary key field names (e.g., 'id' or 'user_id,tenant_id')
+        delete_enabled: Enable DELETE operations
         custom_config: Optional custom configuration to override defaults
+                      Should include 'primary.key.fields' for upsert mode
 
     Returns:
         Dict[str, Any]: JDBC Sink Connector configuration
@@ -54,6 +58,10 @@ def get_mysql_sink_connector_config(
 
     connector_name = f"{client.name.lower().replace(' ', '_')}_{db_config.connection_name.lower().replace(' ', '_')}_sink"
     connector_name = ''.join(c for c in connector_name if c.isalnum() or c == '_')
+
+    # Primary key fields should be passed via custom_config
+    # No longer extracting from Schema Registry as it may not have schemas yet
+    primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
 
     # Build JDBC connection URL
     jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}"
@@ -88,6 +96,7 @@ def get_mysql_sink_connector_config(
         "insert.mode": "upsert",  # Options: insert, upsert, update
         "primary.key.mode": "record_key",  # Fixed: was pk.mode
         "primary.key.fields": primary_key_fields or "",  # Primary key fields (comma-separated)
+        "delete.enabled": str(delete_enabled).lower(),  # Enable/disable delete operations (requires PKs)
 
         # Batch settings
         "batch.size": "3000",
@@ -117,18 +126,22 @@ def get_postgresql_sink_connector_config(
     db_config: ClientDatabase,
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
-    primary_key_fields: Optional[str] = None,
+    delete_enabled: bool = False,
     custom_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Generate PostgreSQL JDBC Sink Connector configuration
+
+    Primary keys should be passed via custom_config['primary.key.fields'].
 
     Args:
         client: Client instance
         db_config: Target ClientDatabase instance (must be PostgreSQL)
         topics: List of Kafka topics to consume (e.g., ['client_1_db_2.mydb.users'])
         kafka_bootstrap_servers: Kafka bootstrap servers (defaults to settings)
+        delete_enabled: Enable DELETE operations
         custom_config: Optional custom configuration to override defaults
+                      Should include 'primary.key.fields' for upsert mode
 
     Returns:
         Dict[str, Any]: JDBC Sink Connector configuration
@@ -146,6 +159,10 @@ def get_postgresql_sink_connector_config(
 
     connector_name = f"{client.name.lower().replace(' ', '_')}_{db_config.connection_name.lower().replace(' ', '_')}_sink"
     connector_name = ''.join(c for c in connector_name if c.isalnum() or c == '_')
+
+    # Primary key fields should be passed via custom_config
+    # No longer extracting from Schema Registry as it may not have schemas yet
+    primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
 
     # Build JDBC connection URL
     jdbc_url = f"jdbc:postgresql://{db_config.host}:{db_config.port}/{db_config.database_name}"
@@ -179,6 +196,7 @@ def get_postgresql_sink_connector_config(
         "insert.mode": "upsert",  # Options: insert, upsert, update
         "primary.key.mode": "record_key",  # Fixed: was pk.mode
         "primary.key.fields": primary_key_fields or "",  # Primary key fields (comma-separated)
+        "delete.enabled": str(delete_enabled).lower(),  # Enable/disable delete operations (requires PKs)
 
         # Batch settings
         "batch.size": "3000",
@@ -207,17 +225,23 @@ def get_sink_connector_config_for_database(
     db_config: ClientDatabase,
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
-    primary_key_fields: Optional[str] = None,
+    delete_enabled: bool = False,
     custom_config: Optional[Dict[str, Any]] = None,
+    primary_key_fields: Optional[str] = None,  # Deprecated - pass via custom_config instead
 ) -> Optional[Dict[str, Any]]:
     """
     Get JDBC Sink connector configuration based on target database type
+
+    Primary keys should be passed via custom_config['primary.key.fields'].
 
     Args:
         db_config: Target ClientDatabase instance
         topics: List of Kafka topics to consume
         kafka_bootstrap_servers: Kafka bootstrap servers (defaults to settings)
+        delete_enabled: Enable DELETE operations (requires primary keys)
         custom_config: Optional custom configuration to override defaults
+                      Should include 'primary.key.fields' for upsert mode
+        primary_key_fields: Deprecated - pass via custom_config['primary.key.fields'] instead
 
     Returns:
         Optional[Dict[str, Any]]: Sink connector configuration or None if unsupported
@@ -248,14 +272,14 @@ def get_sink_connector_config_for_database(
         logger.error(f"Unsupported target database type for sink connector: {db_type}")
         return None
 
-    logger.info(f"Generating {db_type} sink connector config")
+    logger.info(f"Generating {db_type} sink connector config (primary keys from custom_config)")
 
     return generator(
         client=client,
         db_config=db_config,
         topics=topics,
         kafka_bootstrap_servers=kafka_bootstrap_servers,
-        primary_key_fields=primary_key_fields,
+        delete_enabled=delete_enabled,
         custom_config=custom_config,
     )
 

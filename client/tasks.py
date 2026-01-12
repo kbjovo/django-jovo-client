@@ -179,7 +179,7 @@ def create_debezium_connector(self, replication_config_id):
             db_config=db_config,
             replication_config=config,
             tables_whitelist=tables_list,
-            kafka_bootstrap_servers='kafka-1:9092,kafka-2:9092,kafka-3:9092',
+            kafka_bootstrap_servers='kafka-1:29092,kafka-2:29092,kafka-3:29092',
             schema_registry_url='http://schema-registry:8081'
         )
         

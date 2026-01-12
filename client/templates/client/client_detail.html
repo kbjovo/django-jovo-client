@@ -301,21 +301,27 @@
           class="whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition">
           Basic Details
         </button>
-        
+
         <button
           @click="activeTab = 'databases'"
           :class="activeTab === 'databases' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
           class="whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition">
           Databases
         </button>
-        
+
+        <a
+          href="{% url 'client_connectors_list' client.pk %}"
+          class="whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300">
+          Connectors
+        </a>
+
         <button
           @click="activeTab = 'apis'"
           :class="activeTab === 'apis' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
           class="whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition">
           APIs
         </button>
-        
+
         <button
           @click="activeTab = 'thirdparty'"
           :class="activeTab === 'thirdparty' ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"

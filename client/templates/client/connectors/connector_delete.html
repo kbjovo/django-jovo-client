@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+
+<!-- Page Header -->
+<div class="flex justify-between items-center mb-6">
+    <div>
+        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">🗑️ Delete Connector v{{ replication_config.connector_version }}</h2>
+        <p class="text-gray-600 dark:text-gray-400 mt-1">
+            Database: <span class="font-semibold">{{ database.connection_name }}</span> |
+            Client: <span class="font-semibold">{{ client.name }}</span>
+        </p>
+    </div>
+    <div>
+        <a href="{% url 'connector_list' database.pk %}"
+           class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+            ← Back to Connectors
+        </a>
+    </div>
+</div>
+
+<!-- Confirmation Card -->
+<div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden border-2 border-red-500 dark:border-red-700">
+    <div class="bg-red-600 text-white px-6 py-4">
+        <h5 class="text-lg font-semibold">⚠️ Confirm Deletion</h5>
+    </div>
+    <div class="p-6">
+        <p class="text-lg text-gray-900 dark:text-white mb-6">
+            Are you sure you want to delete <span class="font-semibold">Source Connector v{{ replication_config.connector_version }}</span>?
+        </p>
+
+        <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-6">
+            <h6 class="font-semibold text-yellow-900 dark:text-yellow-100 mb-2">📋 Connector Details:</h6>
+            <ul class="text-yellow-800 dark:text-yellow-200 space-y-1">
+                <li><span class="font-semibold">Connector Name:</span> {{ replication_config.connector_name }}</li>
+                <li><span class="font-semibold">Tables:</span> {{ table_count }}</li>
+                <li><span class="font-semibold">Status:</span> {{ replication_config.get_status_display }}</li>
+                <li><span class="font-semibold">Created:</span> {{ replication_config.created_at|date:"Y-m-d H:i" }}</li>
+            </ul>
+        </div>
+
+        <!-- Warning if last connector -->
+        {% if is_last_connector %}
+        <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-6">
+            <h6 class="font-semibold text-red-900 dark:text-red-100 mb-2">🚨 Critical Warning:</h6>
+            <p class="text-red-800 dark:text-red-200 font-semibold mb-2">This is the LAST source connector for this database!</p>
+            <p class="text-red-800 dark:text-red-200 mb-2">Deleting it will also:</p>
+            <ul class="text-red-700 dark:text-red-300 list-disc list-inside space-y-1 mb-3">
+                <li>✅ Delete the source connector from Debezium</li>
+                <li>✅ Delete the shared sink connector ({{ database.get_sink_connector_name }})</li>
+                <li>✅ Stop all CDC replication for this database</li>
+                <li>🗑️ Delete all Kafka topics for this database</li>
+                <li>🗑️ Drop all target tables in the target database</li>
+            </ul>
+            <p class="text-red-900 dark:text-red-100 font-bold">
+                This action cannot be undone!
+            </p>
+        </div>
+        {% else %}
+        <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
+            <h6 class="font-semibold text-blue-900 dark:text-blue-100 mb-2">ℹ️ What will happen:</h6>
+            <ul class="text-blue-800 dark:text-blue-200 list-disc list-inside space-y-1">
+                <li>✅ This source connector will be deleted from Debezium</li>
+                <li>✅ The shared sink connector will continue running for other source connectors</li>
+                <li>🗑️ Kafka topics for this connector will be deleted</li>
+                <li>🗑️ Target tables for this connector will be dropped</li>
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Tables List -->
+        <h6 class="text-lg font-semibold text-gray-900 dark:text-white mb-3">📋 Tables in this connector ({{ table_count }}):</h6>
+        <div class="overflow-x-auto mb-6">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
+                <thead class="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Table Name</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Target Table</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Columns</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for mapping in replication_config.table_mappings.all %}
+                    {% if mapping.is_enabled %}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td class="px-4 py-3"><span class="font-semibold text-gray-900 dark:text-white">{{ mapping.source_table }}</span></td>
+                        <td class="px-4 py-3 text-gray-900 dark:text-white">{{ mapping.target_table }}</td>
+                        <td class="px-4 py-3 text-gray-900 dark:text-white">{{ mapping.get_column_count }} columns</td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if is_last_connector %}
+        <p class="text-sm text-gray-600 dark:text-gray-400 italic">
+            <span class="font-semibold">Warning:</span> The corresponding target tables will be permanently dropped from the target database.
+            You can recreate the CDC configuration later to replicate fresh data.
+        </p>
+        {% else %}
+        <p class="text-sm text-gray-600 dark:text-gray-400 italic">
+            <span class="font-semibold">Warning:</span> The corresponding target tables will be permanently dropped from the target database.
+            These source tables can be added to new connectors to replicate again.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Confirmation Form -->
+<form method="POST" id="delete-form">
+    {% csrf_token %}
+
+    <!-- Confirmation Checkbox -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+        <div class="p-6">
+            <div class="flex items-start">
+                <input type="checkbox"
+                       id="confirm-delete"
+                       required
+                       class="mt-1 w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
+                <label for="confirm-delete" class="ml-3 text-sm font-semibold text-gray-900 dark:text-white">
+                    I understand that this action cannot be undone and will permanently delete Kafka topics and target tables
+                    {% if is_last_connector %}
+                    and will stop ALL CDC replication for this database
+                    {% endif %}
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+        <div class="p-6">
+            <div class="flex justify-between">
+                <a href="{% url 'connector_list' database.pk %}"
+                   class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition text-lg font-semibold">
+                    ❌ Cancel
+                </a>
+                <button type="submit"
+                        class="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg transition text-lg font-semibold"
+                        id="delete-btn"
+                        disabled>
+                    🗑️ Delete Connector{% if is_last_connector %} and Sink Connector{% endif %}
+                </button>
+            </div>
+        </div>
+    </div>
+</form>
+
+<!-- Additional Info -->
+<div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+    <div class="bg-gray-100 dark:bg-gray-700 px-6 py-4">
+        <h6 class="font-semibold text-gray-900 dark:text-white">💡 What happens after deletion?</h6>
+    </div>
+    <div class="p-6">
+        <ul class="text-gray-700 dark:text-gray-300 list-disc list-inside space-y-2">
+            {% if is_last_connector %}
+            <li>All CDC replication for this database will stop</li>
+            <li>Both source and sink connectors will be removed from Debezium</li>
+            <li>All Kafka topics for this database will be permanently deleted</li>
+            <li>All target tables in the target database will be dropped</li>
+            <li>You can recreate the CDC configuration anytime with fresh data</li>
+            {% else %}
+            <li>Other source connectors will continue running normally</li>
+            <li>The sink connector will continue processing other topics</li>
+            <li>Kafka topics for this connector will be permanently deleted</li>
+            <li>Target tables for this connector will be dropped from the target database</li>
+            {% endif %}
+        </ul>
+    </div>
+</div>
+
+<script>
+// Enable delete button only when checkbox is checked
+document.getElementById('confirm-delete').addEventListener('change', function() {
+    document.getElementById('delete-btn').disabled = !this.checked;
+});
+
+// Confirm deletion with alert
+document.getElementById('delete-form').addEventListener('submit', function(e) {
+    const confirmed = confirm(
+        '⚠️ FINAL CONFIRMATION\n\n' +
+        'Are you absolutely sure you want to delete this connector?\n\n' +
+        '🗑️ This will PERMANENTLY DELETE:\n' +
+        '   - Kafka topics for this connector\n' +
+        '   - Target tables from the target database\n\n' +
+        {% if is_last_connector %}
+        '❌ This will STOP ALL CDC replication for this database!\n\n' +
+        {% endif %}
+        'This action CANNOT be undone!'
+    );
+
+    if (!confirmed) {
+        e.preventDefault();
+        return false;
+    }
+
+    // Disable button to prevent double submission
+    document.getElementById('delete-btn').disabled = true;
+    document.getElementById('delete-btn').innerHTML = '⏳ Deleting...';
+});
+</script>
+
+{% endblock %}

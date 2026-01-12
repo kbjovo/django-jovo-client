@@ -1,0 +1,344 @@
+{% extends "index.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto py-3 px-3 h-[calc(100vh-50px)] flex flex-col overflow-hidden">
+
+  <!-- Page Header -->
+  <div class="mb-4 flex-shrink-0">
+    <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Connectors</h1>
+    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Manage all CDC connectors across all clients</p>
+  </div>
+
+  <!-- Main Content Card -->
+  <div class="bg-white dark:bg-gray-900 shadow-md rounded-2xl border border-gray-100 dark:border-gray-700 flex flex-col flex-1 overflow-hidden">
+
+    <!-- Summary Cards -->
+    <div class="px-8 py-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+
+        <!-- Total Connectors -->
+        <div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 text-center">
+          <div class="text-2xl font-bold text-blue-600 dark:text-blue-400">{{ total_count }}</div>
+          <div class="text-xs text-blue-700 dark:text-blue-300 mt-1">Total</div>
+        </div>
+
+        <!-- Active -->
+        <div class="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 text-center">
+          <div class="text-2xl font-bold text-green-600 dark:text-green-400">{{ active_count }}</div>
+          <div class="text-xs text-green-700 dark:text-green-300 mt-1">Active</div>
+        </div>
+
+        <!-- Configured -->
+        <div class="bg-yellow-50 dark:bg-yellow-900/20 rounded-lg p-4 text-center">
+          <div class="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{{ configured_count }}</div>
+          <div class="text-xs text-yellow-700 dark:text-yellow-300 mt-1">Configured</div>
+        </div>
+
+        <!-- Paused -->
+        <div class="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-4 text-center">
+          <div class="text-2xl font-bold text-orange-600 dark:text-orange-400">{{ paused_count }}</div>
+          <div class="text-xs text-orange-700 dark:text-orange-300 mt-1">Paused</div>
+        </div>
+
+        <!-- Failed -->
+        <div class="bg-red-50 dark:bg-red-900/20 rounded-lg p-4 text-center">
+          <div class="text-2xl font-bold text-red-600 dark:text-red-400">{{ failed_count }}</div>
+          <div class="text-xs text-red-700 dark:text-red-300 mt-1">Failed</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filters & Search -->
+    <div class="px-8 py-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+      <form method="get" class="flex flex-wrap items-end gap-4">
+
+        <!-- Client Filter -->
+        <div class="flex-1 min-w-[200px]">
+          <label for="client" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Client</label>
+          <select name="client" id="client"
+                  class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="">All Clients</option>
+            {% for client in all_clients %}
+              <option value="{{ client.id }}" {% if client_filter == client.id|stringformat:"s" %}selected{% endif %}>
+                {{ client.name }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <!-- Database Filter -->
+        <div class="flex-1 min-w-[200px]">
+          <label for="database" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Database</label>
+          <select name="database" id="database"
+                  class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="">All Databases</option>
+            {% for db in all_databases %}
+              <option value="{{ db.id }}" {% if database_filter == db.id|stringformat:"s" %}selected{% endif %}>
+                {{ db.client.name }} - {{ db.db_name }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <!-- Status Filter -->
+        <div class="flex-1 min-w-[150px]">
+          <label for="status" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Status</label>
+          <select name="status" id="status"
+                  class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <option value="">All Statuses</option>
+            <option value="active" {% if status_filter == 'active' %}selected{% endif %}>Active</option>
+            <option value="configured" {% if status_filter == 'configured' %}selected{% endif %}>Configured</option>
+            <option value="paused" {% if status_filter == 'paused' %}selected{% endif %}>Paused</option>
+            <option value="error" {% if status_filter == 'error' %}selected{% endif %}>Error</option>
+          </select>
+        </div>
+
+        <!-- Search -->
+        <div class="flex-1 min-w-[200px]">
+          <label for="search" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Search</label>
+          <input type="text" name="search" id="search" value="{{ search_query }}" placeholder="Connector, client, database..."
+                 class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+        </div>
+
+        <!-- Buttons -->
+        <div class="flex gap-2">
+          <button type="submit"
+                  class="px-4 py-2 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 transition">
+            Apply
+          </button>
+          {% if client_filter or database_filter or status_filter or search_query %}
+          <a href="{% url 'connectors_list' %}"
+             class="px-4 py-2 text-sm font-semibold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition">
+            Clear
+          </a>
+          {% endif %}
+        </div>
+      </form>
+    </div>
+
+    <!-- Connectors Table -->
+    <div class="flex-1 overflow-y-auto">
+      {% if page_obj %}
+      <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+        <thead class="bg-gray-50 dark:bg-gray-800 sticky top-0">
+          <tr>
+            <th scope="col" class="px-6 py-3 text-left">
+              <a href="?{% for key, value in query_params.items %}{% if key != 'sort' and key != 'page' %}{{ key }}={{ value }}&{% endif %}{% endfor %}sort={% if sort_by == 'connector_name' %}-connector_name{% else %}connector_name{% endif %}"
+                 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hover:text-gray-900 dark:hover:text-white flex items-center gap-1">
+                Connector Name
+                {% if sort_by == 'connector_name' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5 10l5-5 5 5H5z"/></svg>
+                {% elif sort_by == '-connector_name' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M15 10l-5 5-5-5h10z"/></svg>
+                {% endif %}
+              </a>
+            </th>
+            <th scope="col" class="px-6 py-3 text-left">
+              <a href="?{% for key, value in query_params.items %}{% if key != 'sort' and key != 'page' %}{{ key }}={{ value }}&{% endif %}{% endfor %}sort={% if sort_by == 'client_database__client__name' %}-client_database__client__name{% else %}client_database__client__name{% endif %}"
+                 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hover:text-gray-900 dark:hover:text-white flex items-center gap-1">
+                Client
+                {% if sort_by == 'client_database__client__name' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5 10l5-5 5 5H5z"/></svg>
+                {% elif sort_by == '-client_database__client__name' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M15 10l-5 5-5-5h10z"/></svg>
+                {% endif %}
+              </a>
+            </th>
+            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Database
+            </th>
+            <th scope="col" class="px-6 py-3 text-left">
+              <a href="?{% for key, value in query_params.items %}{% if key != 'sort' and key != 'page' %}{{ key }}={{ value }}&{% endif %}{% endfor %}sort={% if sort_by == 'status' %}-status{% else %}status{% endif %}"
+                 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hover:text-gray-900 dark:hover:text-white flex items-center gap-1">
+                Status
+                {% if sort_by == 'status' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5 10l5-5 5 5H5z"/></svg>
+                {% elif sort_by == '-status' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M15 10l-5 5-5-5h10z"/></svg>
+                {% endif %}
+              </a>
+            </th>
+            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Tables
+            </th>
+            <th scope="col" class="px-6 py-3 text-left">
+              <a href="?{% for key, value in query_params.items %}{% if key != 'sort' and key != 'page' %}{{ key }}={{ value }}&{% endif %}{% endfor %}sort={% if sort_by == 'created_at' %}-created_at{% else %}created_at{% endif %}"
+                 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hover:text-gray-900 dark:hover:text-white flex items-center gap-1">
+                Created
+                {% if sort_by == 'created_at' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M5 10l5-5 5 5H5z"/></svg>
+                {% elif sort_by == '-created_at' %}
+                  <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M15 10l-5 5-5-5h10z"/></svg>
+                {% endif %}
+              </a>
+            </th>
+            <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              Actions
+            </th>
+          </tr>
+        </thead>
+        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+          {% for connector in page_obj %}
+          <tr class="hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+            <td class="px-6 py-4 whitespace-nowrap">
+              <div class="flex items-center">
+                <div>
+                  <div class="text-sm font-medium text-gray-900 dark:text-white">
+                    {{ connector.connector_name }}
+                  </div>
+                  <div class="text-xs text-gray-500 dark:text-gray-400">
+                    v{{ connector.connector_version }}
+                  </div>
+                </div>
+              </div>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <a href="{% url 'client_detail' connector.client_database.client.id %}"
+                 class="text-sm font-medium text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300">
+                {{ connector.client_database.client.name }}
+              </a>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <div class="text-sm text-gray-900 dark:text-white">{{ connector.client_database.db_name }}</div>
+              <div class="text-xs text-gray-500 dark:text-gray-400">{{ connector.client_database.get_db_type_display }}</div>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              {% if connector.debezium_status.state == 'RUNNING' %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                  <span class="w-2 h-2 mr-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                  RUNNING
+                </span>
+              {% elif connector.debezium_status.state == 'PAUSED' %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+                  <span class="w-2 h-2 mr-1.5 rounded-full bg-orange-500"></span>
+                  PAUSED
+                </span>
+              {% elif connector.debezium_status.state == 'FAILED' %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+                  <span class="w-2 h-2 mr-1.5 rounded-full bg-red-500"></span>
+                  FAILED
+                </span>
+              {% elif connector.status == 'configured' %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+                  <span class="w-2 h-2 mr-1.5 rounded-full bg-yellow-500"></span>
+                  CONFIGURED
+                </span>
+              {% else %}
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400">
+                  {{ connector.debezium_status.state|default:"UNKNOWN" }}
+                </span>
+              {% endif %}
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+              {{ connector.table_count }}
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+              {{ connector.created_at|date:"M d, Y" }}
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+              <div class="flex justify-end gap-2">
+                <a href="{% url 'connector_list' connector.client_database.id %}"
+                   class="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300">
+                  View
+                </a>
+
+                {% if connector.debezium_status.state == 'RUNNING' %}
+                <form method="post" action="{% url 'cdc_connector_action' connector.id 'pause' %}" class="inline">
+                  {% csrf_token %}
+                  <button type="submit" class="text-orange-600 hover:text-orange-900 dark:text-orange-400 dark:hover:text-orange-300">
+                    Pause
+                  </button>
+                </form>
+                {% elif connector.debezium_status.state == 'PAUSED' %}
+                <form method="post" action="{% url 'cdc_connector_action' connector.id 'resume' %}" class="inline">
+                  {% csrf_token %}
+                  <button type="submit" class="text-green-600 hover:text-green-900 dark:text-green-400 dark:hover:text-green-300">
+                    Resume
+                  </button>
+                </form>
+                {% endif %}
+
+                {% if connector.debezium_status.state == 'FAILED' %}
+                <form method="post" action="{% url 'cdc_connector_action' connector.id 'restart' %}" class="inline">
+                  {% csrf_token %}
+                  <button type="submit" class="text-purple-600 hover:text-purple-900 dark:text-purple-400 dark:hover:text-purple-300">
+                    Restart
+                  </button>
+                </form>
+                {% endif %}
+
+                <a href="{% url 'connector_delete_global' connector.id %}"
+                   class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
+                   onclick="return confirm('Are you sure you want to delete this connector? This action cannot be undone.')">
+                  Delete
+                </a>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="text-center py-12">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+        </svg>
+        <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No connectors found</h3>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          {% if client_filter or database_filter or status_filter or search_query %}
+            Try adjusting your filters or search query.
+          {% else %}
+            Get started by adding a connector to one of your client databases.
+          {% endif %}
+        </p>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Pagination -->
+    {% if page_obj.has_other_pages %}
+    <div class="px-8 py-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between flex-shrink-0">
+      <div class="text-sm text-gray-700 dark:text-gray-300">
+        Showing <span class="font-medium">{{ page_obj.start_index }}</span> to <span class="font-medium">{{ page_obj.end_index }}</span> of <span class="font-medium">{{ page_obj.paginator.count }}</span> connectors
+      </div>
+
+      <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+        {% if page_obj.has_previous %}
+        <a href="?{% for key, value in query_params.items %}{% if key != 'page' %}{{ key }}={{ value }}&{% endif %}{% endfor %}page={{ page_obj.previous_page_number }}"
+           class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700">
+          <span class="sr-only">Previous</span>
+          <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"/>
+          </svg>
+        </a>
+        {% endif %}
+
+        {% for num in page_obj.paginator.page_range %}
+          {% if page_obj.number == num %}
+            <span class="relative inline-flex items-center px-4 py-2 border border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-sm font-medium text-blue-600 dark:text-blue-400">
+              {{ num }}
+            </span>
+          {% elif num > page_obj.number|add:'-3' and num < page_obj.number|add:'3' %}
+            <a href="?{% for key, value in query_params.items %}{% if key != 'page' %}{{ key }}={{ value }}&{% endif %}{% endfor %}page={{ num }}"
+               class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+              {{ num }}
+            </a>
+          {% endif %}
+        {% endfor %}
+
+        {% if page_obj.has_next %}
+        <a href="?{% for key, value in query_params.items %}{% if key != 'page' %}{{ key }}={{ value }}&{% endif %}{% endfor %}page={{ page_obj.next_page_number }}"
+           class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700">
+          <span class="sr-only">Next</span>
+          <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+          </svg>
+        </a>
+        {% endif %}
+      </nav>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}

@@ -37,6 +37,19 @@ from .views import (
     list_topics,
 )
 
+# Import multi-connector management views
+from .views.connector_views import (
+    ajax_get_table_schema,
+    connectors_list,
+    client_connectors_list,
+    connector_list,
+    connector_add,
+    connector_create_debezium,
+    connector_edit_tables,
+    connector_delete,
+    connector_delete_global,
+)
+
 
 urlpatterns = [
     # ==========================================
@@ -44,7 +57,9 @@ urlpatterns = [
     # ==========================================
     path('', dashboard, name='main-dashboard'),
     path('clients/', clients_list, name='clients_list'),
-    path('replications/', replications_list, name='replications_list'),
+    path('connectors/', connectors_list, name='connectors_list'),  # Global connectors view (replaces replications)
+    path('connectors/<int:config_pk>/delete-global/', connector_delete_global, name='connector_delete_global'),  # Delete connector from global list
+    path('replications/', replications_list, name='replications_list'),  # Keep for now, will remove later
     path('monitoring/', monitoring_dashboard, name='monitoring_dashboard'),
 
     # ==========================================
@@ -54,6 +69,9 @@ urlpatterns = [
     path('clients/<int:pk>/', ClientDetailView.as_view(), name='client_detail'),
     path('clients/<int:pk>/update/', ClientUpdateView.as_view(), name='client_update'),
     path('clients/<int:pk>/delete/', client_soft_delete, name='client_soft_delete'),
+
+    # Client-level connectors view (all connectors across all databases)
+    path('clients/<int:client_pk>/connectors/', client_connectors_list, name='client_connectors_list'),
 
     path('api/check-client-unique/', check_client_unique_field, name='check_client_unique_field'),
 
@@ -121,6 +139,39 @@ urlpatterns = [
     # ==========================================
     path('cdc/config/<int:config_pk>/edit/', cdc_edit_config, name='cdc_edit_config'),
     path('cdc/config/<int:config_pk>/delete/', cdc_delete_config, name='cdc_delete_config'),
+
+    # ==========================================
+    # Multi-Source Connector Management (NEW)
+    # ==========================================
+    # List all connectors for a database
+    path('database/<int:database_pk>/connectors/',
+         connector_list,
+         name='connector_list'),
+
+    # Add new source connector
+    path('database/<int:database_pk>/connectors/add/',
+         connector_add,
+         name='connector_add'),
+
+    # AJAX: Get table schema for accordion UI
+    path('ajax/table-schema/<int:database_pk>/<str:table_name>/',
+         ajax_get_table_schema,
+         name='ajax_get_table_schema'),
+
+    # Create Debezium connectors (source + sink)
+    path('connector/<int:config_pk>/create-debezium/',
+         connector_create_debezium,
+         name='connector_create_debezium'),
+
+    # Edit tables in connector (add/remove with signals)
+    path('connector/<int:config_pk>/edit-tables/',
+         connector_edit_tables,
+         name='connector_edit_tables'),
+
+    # Delete connector with validations
+    path('connector/<int:config_pk>/delete/',
+         connector_delete,
+         name='connector_delete'),
 
     # ==========================================
     # AJAX Endpoints

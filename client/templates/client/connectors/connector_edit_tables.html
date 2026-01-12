@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+
+<!-- Page Header -->
+<div class="flex justify-between items-center mb-6">
+    <div>
+        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">✏️ Edit Tables - Connector v{{ replication_config.connector_version }}</h2>
+        <p class="text-gray-600 dark:text-gray-400 mt-1">
+            Database: <span class="font-semibold">{{ database.connection_name }}</span> |
+            Connector: <span class="font-semibold">{{ replication_config.connector_name }}</span>
+        </p>
+    </div>
+    <div>
+        <a href="{% url 'connector_list' database.pk %}"
+           class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+            ← Back to Connectors
+        </a>
+    </div>
+</div>
+
+<!-- Info Card -->
+<div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
+    <p class="text-blue-900 dark:text-blue-100">
+        <span class="font-semibold">ℹ️ How it works:</span><br>
+    </p>
+    <ul class="text-blue-800 dark:text-blue-200 list-disc list-inside mt-2 space-y-1">
+        <li><strong>Adding tables:</strong> Uses Debezium signals for incremental snapshot (no restart required!)</li>
+        <li><strong>Removing tables:</strong> Requires connector restart (brief interruption)</li>
+        <li><strong>Minimum requirement:</strong> Connector must have at least 1 table</li>
+    </ul>
+</div>
+
+<form method="POST">
+    {% csrf_token %}
+
+    <!-- Current Tables -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+        <div class="bg-blue-600 text-white px-6 py-4">
+            <h5 class="text-lg font-semibold">📋 Current Tables ({{ current_tables|length }})</h5>
+        </div>
+        <div class="p-6">
+            {% if current_tables %}
+            <p class="text-gray-600 dark:text-gray-400 mb-4">Select tables to remove from this connector. Removing tables requires a connector restart.</p>
+
+            {% if current_tables|length == 1 %}
+            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
+                <p class="text-yellow-800 dark:text-yellow-200">
+                    <span class="font-semibold">⚠️ Warning:</span> This connector has only 1 table. You cannot remove all tables.
+                    If you want to remove this table, you must delete the entire connector instead.
+                </p>
+            </div>
+            {% endif %}
+
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-50 dark:bg-gray-700">
+                        <tr>
+                            <th class="px-6 py-3 text-left" style="width: 50px;">
+                                {% if current_tables|length > 1 %}
+                                <input type="checkbox" id="remove-all-checkbox" onchange="toggleRemove(this)" class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
+                                {% endif %}
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Table Name</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        {% for table in current_tables %}
+                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                            <td class="px-6 py-4">
+                                {% if current_tables|length > 1 %}
+                                <input type="checkbox"
+                                       name="remove_tables"
+                                       value="{{ table }}"
+                                       class="remove-checkbox w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
+                                {% else %}
+                                <input type="checkbox" disabled title="Cannot remove the only table" class="w-4 h-4 text-gray-400 bg-gray-200 border-gray-300 rounded cursor-not-allowed">
+                                {% endif %}
+                            </td>
+                            <td class="px-6 py-4"><span class="font-semibold text-gray-900 dark:text-white">{{ table }}</span></td>
+                            <td class="px-6 py-4">
+                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">✅ Active</span>
+                            </td>
+                            <td class="px-6 py-4">
+                                {% if current_tables|length > 1 %}
+                                <span class="text-red-600 dark:text-red-400 text-sm">Remove (requires restart)</span>
+                                {% else %}
+                                <span class="text-gray-500 dark:text-gray-400 text-sm">Cannot remove</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-center text-gray-600 dark:text-gray-400 py-8">No tables currently assigned to this connector.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Available Tables to Add -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+        <div class="bg-green-600 text-white px-6 py-4">
+            <h5 class="text-lg font-semibold">➕ Available Tables to Add ({{ unassigned_tables|length }})</h5>
+        </div>
+        <div class="p-6">
+            {% if unassigned_tables %}
+            <p class="text-gray-600 dark:text-gray-400 mb-4">
+                Select tables to add to this connector. Adding tables uses incremental snapshot signals - no connector restart required!
+            </p>
+
+            <div class="flex gap-2 mb-4">
+                <button type="button" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition" onclick="selectAllAdd()">
+                    ☑️ Select All
+                </button>
+                <button type="button" class="px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-sm font-medium transition" onclick="deselectAllAdd()">
+                    ☐ Deselect All
+                </button>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-50 dark:bg-gray-700">
+                        <tr>
+                            <th class="px-6 py-3 text-left" style="width: 50px;">
+                                <input type="checkbox" id="add-all-checkbox" onchange="toggleAdd(this)" class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Table Name</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        {% for table in unassigned_tables %}
+                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                            <td class="px-6 py-4">
+                                <input type="checkbox"
+                                       name="add_tables"
+                                       value="{{ table }}"
+                                       class="add-checkbox w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
+                            </td>
+                            <td class="px-6 py-4"><span class="font-semibold text-gray-900 dark:text-white">{{ table }}</span></td>
+                            <td class="px-6 py-4">
+                                <span class="text-green-600 dark:text-green-400 text-sm">Add (no restart needed)</span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-center text-gray-600 dark:text-gray-400 py-8">
+                No unassigned tables available. All tables are already assigned to connectors.
+            </p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Warnings -->
+    <div id="warnings-container"></div>
+
+    <!-- Action Buttons -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
+        <div class="p-6">
+            <div class="flex justify-between">
+                <a href="{% url 'connector_list' database.pk %}"
+                   class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition">
+                    ❌ Cancel
+                </a>
+                <button type="submit"
+                        class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-lg font-semibold transition"
+                        id="submit-btn">
+                    💾 Save Changes
+                </button>
+            </div>
+        </div>
+    </div>
+</form>
+
+<script>
+// Toggle remove checkboxes
+function toggleRemove(checkbox) {
+    const checkboxes = document.querySelectorAll('.remove-checkbox');
+    checkboxes.forEach(cb => cb.checked = checkbox.checked);
+    updateWarnings();
+}
+
+// Toggle add checkboxes
+function toggleAdd(checkbox) {
+    const checkboxes = document.querySelectorAll('.add-checkbox');
+    checkboxes.forEach(cb => cb.checked = checkbox.checked);
+}
+
+// Select all add
+function selectAllAdd() {
+    const checkboxes = document.querySelectorAll('.add-checkbox');
+    checkboxes.forEach(cb => cb.checked = true);
+    document.getElementById('add-all-checkbox').checked = true;
+}
+
+// Deselect all add
+function deselectAllAdd() {
+    const checkboxes = document.querySelectorAll('.add-checkbox');
+    checkboxes.forEach(cb => cb.checked = false);
+    document.getElementById('add-all-checkbox').checked = false;
+}
+
+// Update warnings based on selections
+function updateWarnings() {
+    const removeChecked = document.querySelectorAll('.remove-checkbox:checked').length;
+    const totalTables = {{ current_tables|length }};
+    const remainingTables = totalTables - removeChecked;
+    const warningsContainer = document.getElementById('warnings-container');
+
+    if (remainingTables === 0) {
+        warningsContainer.innerHTML = `
+            <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-6">
+                <p class="text-red-800 dark:text-red-200">
+                    <span class="font-semibold">❌ Error:</span> You are trying to remove all tables.
+                    Connectors must have at least 1 table.
+                    If you want to remove this connector entirely, use the Delete button instead.
+                </p>
+            </div>
+        `;
+        document.getElementById('submit-btn').disabled = true;
+    } else if (removeChecked > 0) {
+        warningsContainer.innerHTML = `
+            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-6">
+                <p class="text-yellow-800 dark:text-yellow-200">
+                    <span class="font-semibold">⚠️ Warning:</span> Removing ${removeChecked} table(s) will restart the connector.
+                    This will cause a brief interruption (typically 10-30 seconds).
+                    ${remainingTables} table(s) will remain in this connector.
+                </p>
+            </div>
+        `;
+        document.getElementById('submit-btn').disabled = false;
+    } else {
+        warningsContainer.innerHTML = '';
+        document.getElementById('submit-btn').disabled = false;
+    }
+}
+
+// Add event listeners to remove checkboxes
+document.querySelectorAll('.remove-checkbox').forEach(cb => {
+    cb.addEventListener('change', updateWarnings);
+});
+
+// Form validation
+document.querySelector('form').addEventListener('submit', function(e) {
+    const removeChecked = document.querySelectorAll('.remove-checkbox:checked');
+    const addChecked = document.querySelectorAll('.add-checkbox:checked');
+
+    if (removeChecked.length === 0 && addChecked.length === 0) {
+        e.preventDefault();
+        alert('⚠️ No changes selected. Please select tables to add or remove.');
+        return false;
+    }
+
+    const totalTables = {{ current_tables|length }};
+    const remainingTables = totalTables - removeChecked.length;
+
+    if (remainingTables === 0) {
+        e.preventDefault();
+        alert('❌ Cannot remove all tables. Connectors must have at least 1 table.');
+        return false;
+    }
+
+    // Confirm removal
+    if (removeChecked.length > 0) {
+        if (!confirm(`⚠️ Are you sure you want to remove ${removeChecked.length} table(s)? This will restart the connector.`)) {
+            e.preventDefault();
+            return false;
+        }
+    }
+
+    // Disable submit button to prevent double submission
+    document.getElementById('submit-btn').disabled = true;
+    document.getElementById('submit-btn').innerHTML = '⏳ Saving...';
+});
+
+// Initialize warnings on page load
+updateWarnings();
+</script>
+
+{% endblock %}

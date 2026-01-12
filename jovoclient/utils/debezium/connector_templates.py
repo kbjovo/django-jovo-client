@@ -13,6 +13,71 @@ from sqlalchemy.sql import text
 logger = logging.getLogger(__name__)
 
 
+def build_column_include_list(replication_config: 'ReplicationConfig', db_config: ClientDatabase) -> Optional[str]:
+    """
+    Build column.include.list for Debezium based on enabled ColumnMappings.
+    Only includes columns where is_enabled=True.
+
+    Format: schema.table.column1,schema.table.column2,schema.table.column3
+
+    Args:
+        replication_config: ReplicationConfig instance with table and column mappings
+        db_config: ClientDatabase instance for determining schema
+
+    Returns:
+        Optional[str]: Comma-separated list of columns to include, or None if all columns enabled
+    """
+    if not replication_config:
+        return None
+
+    column_list = []
+    has_disabled_columns = False
+
+    # Get all enabled table mappings
+    table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+
+    for table_mapping in table_mappings:
+        # Determine schema name based on database type
+        if db_config.db_type == 'postgresql':
+            schema = table_mapping.source_schema or 'public'
+        elif db_config.db_type == 'oracle':
+            # For Oracle, use username as schema
+            schema = db_config.username.upper()
+            if schema.startswith('C##'):
+                schema = schema[3:]  # Remove C## prefix
+        elif db_config.db_type == 'mysql':
+            schema = db_config.database_name
+        elif db_config.db_type == 'mssql':
+            schema = table_mapping.source_schema or 'dbo'
+        else:
+            schema = table_mapping.source_schema or 'public'
+
+        table_name = table_mapping.source_table
+
+        # Get all columns for this table
+        all_columns = table_mapping.column_mappings.all()
+        enabled_columns = table_mapping.column_mappings.filter(is_enabled=True)
+
+        # Check if any columns are disabled
+        if enabled_columns.count() < all_columns.count():
+            has_disabled_columns = True
+
+        # Add enabled columns to the list
+        for col_mapping in enabled_columns:
+            column_spec = f"{schema}.{table_name}.{col_mapping.source_column}"
+            column_list.append(column_spec)
+
+    # Only return column.include.list if there are actually disabled columns
+    # Otherwise, let Debezium include all columns by default (more efficient)
+    if has_disabled_columns and column_list:
+        result = ",".join(column_list)
+        logger.info(f"Generated column.include.list with {len(column_list)} columns (some columns excluded for security)")
+        return result
+
+    logger.info("All columns enabled, skipping column.include.list (Debezium will include all)")
+    return None
+
+
 def generate_connector_name(client: Client, db_config: ClientDatabase, version: Optional[int] = None) -> str:
     """
     Generate connector name following the pattern: {client_name}_{db_name}_connector[_v_{version}]
@@ -177,7 +242,14 @@ def get_mysql_connector_config(
 
         config["table.include.list"] = ",".join(tables_full)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
-    
+
+    # Add column.include.list if there are disabled columns
+    if replication_config:
+        column_include_list = build_column_include_list(replication_config, db_config)
+        if column_include_list:
+            config["column.include.list"] = column_include_list
+            logger.info(f"Added column.include.list (some columns excluded)")
+
     # Add configuration from ReplicationConfig if provided
     if replication_config:
         # Snapshot mode from config
@@ -319,7 +391,14 @@ def get_postgresql_connector_config(
 
         config["table.include.list"] = ",".join(tables_full)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
-    
+
+    # Add column.include.list if there are disabled columns
+    if replication_config:
+        column_include_list = build_column_include_list(replication_config, db_config)
+        if column_include_list:
+            config["column.include.list"] = column_include_list
+            logger.info(f"Added column.include.list (some columns excluded)")
+
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
@@ -475,7 +554,14 @@ def get_sqlserver_connector_config(
         logger.info(f"✅ Table filter configured:")
         for table in tables_full:
             logger.info(f"   - {table}")
-    
+
+    # Add column.include.list if there are disabled columns
+    if replication_config:
+        column_include_list = build_column_include_list(replication_config, db_config)
+        if column_include_list:
+            config["column.include.list"] = column_include_list
+            logger.info(f"Added column.include.list (some columns excluded)")
+
     # Apply custom config from ReplicationConfig
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
@@ -662,6 +748,13 @@ def get_oracle_connector_config(
         config["table.include.list"] = ",".join(formatted_tables)
         logger.info(f"📋 Tables: {len(formatted_tables)}")
 
+    # Add column.include.list if there are disabled columns
+    if replication_config:
+        column_include_list = build_column_include_list(replication_config, db_config)
+        if column_include_list:
+            config["column.include.list"] = column_include_list
+            logger.info(f"Added column.include.list (some columns excluded)")
+
     # Apply custom config
     if replication_config:
         if getattr(replication_config, 'snapshot_mode', None):
@@ -678,7 +771,7 @@ def get_connector_config_for_database(
     db_config: ClientDatabase,
     replication_config: Optional[ReplicationConfig] = None,
     tables_whitelist: Optional[List[str]] = None,
-    kafka_bootstrap_servers: str = 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
+    kafka_bootstrap_servers: str = 'kafka-1:29092,kafka-2:29092,kafka-3:29092',
     schema_registry_url: str = 'http://localhost:8081',
     snapshot_mode: str = 'initial',
 ) -> Optional[Dict[str, Any]]:
