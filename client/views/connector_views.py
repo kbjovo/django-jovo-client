@@ -341,7 +341,7 @@ def connector_list(request, database_pk):
     # Get all tables across all connectors for combined view
     all_table_mappings = TableMapping.objects.filter(
         replication_config__client_database=database,
-        replication_config__status__in=['configured', 'active', 'paused'],
+        replication_config__status__in=['configured', 'active', 'paused', 'error'],
         is_enabled=True
     ).select_related('replication_config').order_by('source_table')
 
@@ -904,7 +904,7 @@ def connector_delete(request, config_pk):
 
     # Check if this is the last connector
     other_connectors = database.replication_configs.exclude(pk=config_pk).filter(
-        status__in=['configured', 'active', 'paused']
+        status__in=['configured', 'active', 'paused', 'error']
     )
 
     is_last_connector = not other_connectors.exists()
@@ -962,7 +962,7 @@ def connector_delete_global(request, config_pk):
 
     # Check if this is the last connector for this database
     other_connectors = database.replication_configs.exclude(pk=config_pk).filter(
-        status__in=['configured', 'active', 'paused']
+        status__in=['configured', 'active', 'paused', 'error']
     )
     is_last_connector = not other_connectors.exists()
 

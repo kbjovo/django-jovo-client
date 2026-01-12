@@ -319,9 +319,10 @@ def get_unassigned_tables(client_database_id: int, schema: Optional[str] = None)
         db_config = ClientDatabase.objects.get(id=client_database_id)
 
         # Get all assigned tables from active replication configs
+        # Include 'error' status to prevent showing tables from failed connectors as unassigned
         assigned_tables = TableMapping.objects.filter(
             replication_config__client_database_id=client_database_id,
-            replication_config__status__in=['configured', 'active', 'paused'],
+            replication_config__status__in=['configured', 'active', 'paused', 'error'],
             is_enabled=True
         ).values_list('source_table', flat=True)
 

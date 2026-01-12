@@ -311,10 +311,10 @@ class ClientDatabase(models.Model):
     def get_source_connectors(self):
         """
         Get all source connectors (ReplicationConfigs) for this database.
-        Returns only active, configured, or paused connectors (not deleted or disabled).
+        Returns active, configured, paused, or error connectors (not deleted or disabled).
         """
         return self.replication_configs.filter(
-            status__in=['configured', 'active', 'paused']
+            status__in=['configured', 'active', 'paused', 'error']
         ).order_by('connector_version')
 
     def get_sink_connector_name(self):
@@ -340,7 +340,7 @@ class ClientDatabase(models.Model):
 
         return TableMapping.objects.filter(
             replication_config__client_database=self,
-            replication_config__status__in=['configured', 'active', 'paused'],
+            replication_config__status__in=['configured', 'active', 'paused', 'error'],
             is_enabled=True
         ).count()
 
