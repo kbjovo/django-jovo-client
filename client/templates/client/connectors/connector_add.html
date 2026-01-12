@@ -109,8 +109,9 @@
                                onchange="handleTableCheckboxChange('{{ table.name }}')">
 
                         <!-- Expand/Collapse Icon -->
+                        {% with escaped_name=table.name|cut:'.' %}
                         <svg class="w-5 h-5 text-gray-500 dark:text-gray-400 mr-2 transition-transform accordion-icon"
-                             id="icon-{{ table.name }}"
+                             id="icon-{{ escaped_name }}"
                              fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
                         </svg>
@@ -136,11 +137,11 @@
                         </div>
 
                         <!-- Column count indicator (loaded dynamically) -->
-                        <span class="text-xs text-gray-500 dark:text-gray-400" id="column-count-{{ table.name }}"></span>
+                        <span class="text-xs text-gray-500 dark:text-gray-400" id="column-count-{{ escaped_name }}"></span>
                     </div>
 
                     <!-- Accordion Content (Columns Configuration) -->
-                    <div id="accordion-{{ table.name }}"
+                    <div id="accordion-{{ escaped_name }}"
                          class="accordion-content hidden bg-white dark:bg-gray-800 px-4 py-4 border-t border-gray-200 dark:border-gray-700">
 
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -159,7 +160,7 @@
                         </div>
 
                         <!-- Loading State -->
-                        <div id="loading-{{ table.name }}" class="flex items-center justify-center py-8">
+                        <div id="loading-{{ escaped_name }}" class="flex items-center justify-center py-8">
                             <svg class="animate-spin h-8 w-8 text-blue-600" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -168,7 +169,7 @@
                         </div>
 
                         <!-- Columns List (loaded via AJAX) -->
-                        <div id="columns-{{ table.name }}" class="hidden">
+                        <div id="columns-{{ escaped_name }}" class="hidden">
                             <div class="flex justify-between items-center mb-3">
                                 <h4 class="text-sm font-semibold text-gray-900 dark:text-white">Select Columns to Replicate</h4>
                                 <div class="flex gap-2">
@@ -185,14 +186,15 @@
                                 </div>
                             </div>
 
-                            <div id="column-list-{{ table.name }}" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-900 rounded-lg">
+                            <div id="column-list-{{ escaped_name }}" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-900 rounded-lg">
                                 <!-- Columns will be loaded here via AJAX -->
                             </div>
 
                             <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                                <span id="selected-count-{{ table.name }}"></span> columns selected
+                                <span id="selected-count-{{ escaped_name }}"></span> columns selected
                             </p>
                         </div>
+                        {% endwith %}
                     </div>
                 </div>
                 {% endfor %}
@@ -324,11 +326,19 @@ const DATABASE_ID = {{ database.pk }};
 const loadedTables = new Set(); // Track which tables have loaded their columns
 let allTablesSelected = false; // Track toggle state
 
+// Helper function to escape table names for use in CSS selectors
+// MS SQL table names contain dots (e.g., "dbo.Products") which break CSS selectors
+// Must match Django's cut:'.' filter which removes dots entirely
+function escapeTableName(tableName) {
+    return tableName.replace(/\./g, '');
+}
+
 // Handle table checkbox change - auto-expand accordion and load columns
 function handleTableCheckboxChange(tableName) {
     const checkbox = document.querySelector(`.table-checkbox[data-table-name="${tableName}"]`);
-    const accordion = document.getElementById(`accordion-${tableName}`);
-    const icon = document.getElementById(`icon-${tableName}`);
+    const escapedTableName = escapeTableName(tableName);
+    const accordion = document.getElementById(`accordion-${escapedTableName}`);
+    const icon = document.getElementById(`icon-${escapedTableName}`);
 
     // If checkbox is checked and accordion is hidden, expand it
     if (checkbox.checked && accordion.classList.contains('hidden')) {
@@ -370,8 +380,9 @@ function toggleAllTables() {
 
 // Toggle accordion for a table
 function toggleAccordion(tableName) {
-    const accordion = document.getElementById(`accordion-${tableName}`);
-    const icon = document.getElementById(`icon-${tableName}`);
+    const escapedName = escapeTableName(tableName);
+    const accordion = document.getElementById(`accordion-${escapedName}`);
+    const icon = document.getElementById(`icon-${escapedName}`);
 
     // Toggle visibility
     if (accordion.classList.contains('hidden')) {
@@ -390,8 +401,9 @@ function toggleAccordion(tableName) {
 
 // Load table schema via AJAX
 async function loadTableSchema(tableName) {
-    const loadingEl = document.getElementById(`loading-${tableName}`);
-    const columnsEl = document.getElementById(`columns-${tableName}`);
+    const escapedName = escapeTableName(tableName);
+    const loadingEl = document.getElementById(`loading-${escapedName}`);
+    const columnsEl = document.getElementById(`columns-${escapedName}`);
 
     try {
         const response = await fetch(`/ajax/table-schema/${DATABASE_ID}/${tableName}/`);
@@ -417,7 +429,7 @@ async function loadTableSchema(tableName) {
         loadedTables.add(tableName);
 
         // Update column count indicator
-        document.getElementById(`column-count-${tableName}`).textContent =
+        document.getElementById(`column-count-${escapedName}`).textContent =
             `${data.columns.length} columns`;
 
     } catch (error) {
@@ -432,7 +444,8 @@ async function loadTableSchema(tableName) {
 
 // Render column checkboxes
 function renderColumns(tableName, columns) {
-    const columnListEl = document.getElementById(`column-list-${tableName}`);
+    const escapedName = escapeTableName(tableName);
+    const columnListEl = document.getElementById(`column-list-${escapedName}`);
 
     columnListEl.innerHTML = columns.map(col => {
         const isPK = col.primary_key ?
@@ -449,7 +462,7 @@ function renderColumns(tableName, columns) {
                        name="column_${tableName}_${col.name}"
                        value="1"
                        checked
-                       class="column-checkbox column-checkbox-${tableName} w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500"
+                       class="column-checkbox column-checkbox-${escapedName} w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500"
                        onchange="updateColumnCount('${tableName}')">
                 <label class="ml-2 text-sm text-gray-900 dark:text-white flex-1 cursor-pointer">
                     <span class="font-medium">${col.name}</span>
@@ -466,25 +479,28 @@ function renderColumns(tableName, columns) {
 
 // Select all columns for a table
 function selectAllColumns(tableName) {
-    const checkboxes = document.querySelectorAll(`.column-checkbox-${tableName}`);
+    const escapedName = escapeTableName(tableName);
+    const checkboxes = document.querySelectorAll(`.column-checkbox-${escapedName}`);
     checkboxes.forEach(cb => cb.checked = true);
     updateColumnCount(tableName);
 }
 
 // Deselect all columns for a table
 function deselectAllColumns(tableName) {
-    const checkboxes = document.querySelectorAll(`.column-checkbox-${tableName}`);
+    const escapedName = escapeTableName(tableName);
+    const checkboxes = document.querySelectorAll(`.column-checkbox-${escapedName}`);
     checkboxes.forEach(cb => cb.checked = false);
     updateColumnCount(tableName);
 }
 
 // Update selected column count
 function updateColumnCount(tableName) {
-    const checkboxes = document.querySelectorAll(`.column-checkbox-${tableName}`);
+    const escapedName = escapeTableName(tableName);
+    const checkboxes = document.querySelectorAll(`.column-checkbox-${escapedName}`);
     const selected = Array.from(checkboxes).filter(cb => cb.checked).length;
     const total = checkboxes.length;
 
-    document.getElementById(`selected-count-${tableName}`).textContent =
+    document.getElementById(`selected-count-${escapedName}`).textContent =
         `${selected}/${total}`;
 
     // Show warning if no columns selected but table is checked
@@ -508,7 +524,8 @@ document.querySelector('form').addEventListener('submit', function(e) {
     let hasError = false;
     checkedTables.forEach(tableCheckbox => {
         const tableName = tableCheckbox.value;
-        const columnCheckboxes = document.querySelectorAll(`.column-checkbox-${tableName}:checked`);
+        const escapedName = escapeTableName(tableName);
+        const columnCheckboxes = document.querySelectorAll(`.column-checkbox-${escapedName}:checked`);
 
         if (columnCheckboxes.length === 0) {
             e.preventDefault();

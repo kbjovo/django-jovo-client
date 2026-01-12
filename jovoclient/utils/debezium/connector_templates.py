@@ -387,7 +387,7 @@ def get_postgresql_connector_config(
                 tables_full.append(table)
             else:
                 # Add schema prefix (e.g., 'busy_acc_greenera' -> 'public.busy_acc_greenera')
-                tables_full.append(f"{schema_name}.{table}")
+                tables_full.append(f"{db_config.database_name}.{table}")
 
         config["table.include.list"] = ",".join(tables_full)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")

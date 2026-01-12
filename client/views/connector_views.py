@@ -21,7 +21,7 @@ from jovoclient.utils.debezium.connector_templates import (
 )
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
-from jovoclient.utils.kafka.signal import DebeziumSignalManager
+from jovoclient.utils.kafka.signal import DebeziumSignalManager, KafkaSignalManager
 
 logger = logging.getLogger(__name__)
 
@@ -476,12 +476,21 @@ def connector_add(request, database_pk):
                         # Get target table name from form (editable field)
                         target_table_name = request.POST.get(f'target_table_{table_name}', table_name)
 
+                        # Parse schema and table name for MS SQL
+                        # MS SQL tables come as "schema.table" (e.g., "dbo.Customers")
+                        # We need to store them separately to avoid duplicate schema in topics
+                        if database.db_type == 'mssql' and '.' in table_name:
+                            source_schema, actual_table_name = table_name.split('.', 1)
+                        else:
+                            source_schema = schema.get('schema', '')
+                            actual_table_name = table_name
+
                         # Create TableMapping
                         table_mapping = TableMapping.objects.create(
                             replication_config=replication_config,
-                            source_table=table_name,
+                            source_table=actual_table_name,
                             target_table=target_table_name,
-                            source_schema=schema.get('schema', ''),
+                            source_schema=source_schema,
                             is_enabled=True,
                         )
 
@@ -633,10 +642,11 @@ def connector_create_debezium(request, config_pk):
                         primary_key_fields = ",".join([col.target_column for col in pk_columns])
                         logger.info(f"Using primary key fields from database: {primary_key_fields}")
 
-                # Generate sink connector config with regex to match all topics from this database
+                # Generate sink connector config with regex to match all DATA topics from this database
                 # Topic format: client_{client_id}_db_{db_id}.{database}.{table}
                 # or: client_{client_id}_db_{db_id}.{schema}.{table} (for PostgreSQL/Oracle)
-                topic_regex = f"client_{client.id}_db_{database.id}\\..*"
+                # IMPORTANT: Exclude .signals topic (used for Debezium signaling)
+                topic_regex = f"client_{client.id}_db_{database.id}\\.(?!signals$).*"
 
                 # Configure sink connector to handle tables with and without PKs
                 # - primary.key.mode=record_key: Extract PK from message key (Debezium adds this automatically)
@@ -785,12 +795,21 @@ def connector_edit_tables(request, config_pk):
 
                             logger.info(f"Table {table_name}: {len(columns)} columns, {len(primary_keys)} primary keys: {primary_keys}")
 
+                            # Parse schema and table name for MS SQL
+                            # MS SQL tables come as "schema.table" (e.g., "dbo.Customers")
+                            # We need to store them separately to avoid duplicate schema in topics
+                            if database.db_type == 'mssql' and '.' in table_name:
+                                source_schema, actual_table_name = table_name.split('.', 1)
+                            else:
+                                source_schema = schema.get('schema', '')
+                                actual_table_name = table_name
+
                             # Create TableMapping
                             table_mapping = TableMapping.objects.create(
                                 replication_config=replication_config,
-                                source_table=table_name,
-                                target_table=table_name,
-                                source_schema=schema.get('schema', ''),
+                                source_table=actual_table_name,
+                                target_table=actual_table_name,
+                                source_schema=source_schema,
                                 is_enabled=True,
                             )
 
@@ -814,39 +833,91 @@ def connector_edit_tables(request, config_pk):
                             raise
 
                     # Try to add tables using signals (no restart)
+                    # For MySQL: Use Kafka signals (no database write access required)
+                    # For other databases: Use database-based signals (requires write access)
                     try:
-                        from client.utils.database_utils import get_database_engine
-                        engine = get_database_engine(database)
+                        if database.db_type == 'mysql':
+                            # Use Kafka-based signaling for MySQL (no write access required)
+                            from django.conf import settings
 
-                        signal_manager = DebeziumSignalManager(engine)
+                            logger.info("Using Kafka-based signaling for MySQL (no database write access required)")
 
-                        # Format tables for signal
-                        formatted_tables = []
-                        for table in tables_to_add:
-                            if '.' in table:
-                                formatted_tables.append(table)
-                            else:
-                                # Add schema prefix based on db type
-                                if database.db_type == 'postgresql':
-                                    formatted_tables.append(f"public.{table}")
-                                elif database.db_type == 'oracle':
-                                    schema = database.username.upper()
-                                    if schema.startswith('C##'):
-                                        schema = schema[3:]
-                                    formatted_tables.append(f"{schema}.{table}")
-                                else:
+                            # Get Kafka configuration
+                            kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
+                                'KAFKA_INTERNAL_SERVERS',
+                                settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
+                            )
+
+                            # Signal topic format: client_{client_id}_db_{db_id}.signals
+                            signal_topic = f"client_{client.id}_db_{database.id}.signals"
+
+                            # Create Kafka signal manager with topic prefix
+                            # IMPORTANT: Use topic_prefix (e.g., 'client_1_db_2'), NOT connector_name
+                            # Debezium routes signals based on topic.prefix, not connector name!
+                            signal_manager = KafkaSignalManager(
+                                bootstrap_servers=kafka_bootstrap_servers,
+                                signal_topic=signal_topic,
+                                connector_name=replication_config.kafka_topic_prefix  # Use topic prefix for signal routing
+                            )
+
+                            # Format tables for signal
+                            # For MySQL: database.table format
+                            formatted_tables = []
+                            for table in tables_to_add:
+                                if '.' in table:
                                     formatted_tables.append(table)
+                                else:
+                                    # MySQL format: database.table
+                                    formatted_tables.append(f"{database.database_name}.{table}")
 
-                        # Send incremental snapshot signal
-                        signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
+                            # Send incremental snapshot signal via Kafka
+                            signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
 
-                        engine.dispose()
+                            # Close producer
+                            signal_manager.close()
 
-                        messages.success(
-                            request,
-                            f"Added {len(tables_to_add)} tables using incremental snapshot (Signal ID: {signal_id}). "
-                            "No connector restart required!"
-                        )
+                            messages.success(
+                                request,
+                                f"Added {len(tables_to_add)} tables using Kafka-based incremental snapshot (Signal ID: {signal_id}). "
+                                "No connector restart required! No database write access needed."
+                            )
+
+                        else:
+                            # For non-MySQL databases: Use database-based signals (requires write access)
+                            from client.utils.database_utils import get_database_engine
+
+                            logger.info(f"Using database-based signaling for {database.db_type} (requires write access)")
+
+                            engine = get_database_engine(database)
+                            signal_manager = DebeziumSignalManager(engine)
+
+                            # Format tables for signal
+                            formatted_tables = []
+                            for table in tables_to_add:
+                                if '.' in table:
+                                    formatted_tables.append(table)
+                                else:
+                                    # Add schema prefix based on db type
+                                    if database.db_type == 'postgresql':
+                                        formatted_tables.append(f"public.{table}")
+                                    elif database.db_type == 'oracle':
+                                        schema = database.username.upper()
+                                        if schema.startswith('C##'):
+                                            schema = schema[3:]
+                                        formatted_tables.append(f"{schema}.{table}")
+                                    else:
+                                        formatted_tables.append(table)
+
+                            # Send incremental snapshot signal via database
+                            signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
+
+                            engine.dispose()
+
+                            messages.success(
+                                request,
+                                f"Added {len(tables_to_add)} tables using incremental snapshot (Signal ID: {signal_id}). "
+                                "No connector restart required!"
+                            )
 
                     except Exception as e:
                         logger.warning(f"Could not use signals, falling back to restart: {e}")

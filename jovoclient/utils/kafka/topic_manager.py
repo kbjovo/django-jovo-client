@@ -428,6 +428,11 @@ class KafkaTopicManager:
         signal_topic = f"{topic_prefix}.signals"
         topics.append(signal_topic)
 
+        # Add heartbeat topic (for connector health monitoring)
+        # Debezium uses this topic to track connector progress and detect stalls
+        heartbeat_topic = f"__debezium-heartbeat.{topic_prefix}"
+        topics.append(heartbeat_topic)
+
         return topics
 
     def create_topics_for_config(self, replication_config) -> Tuple[bool, str]:
@@ -518,8 +523,14 @@ class KafkaTopicManager:
             logger.info("DELETING KAFKA TOPICS (DESTRUCTIVE)")
             logger.info("=" * 60)
 
-            # List topics to delete
+            # List topics to delete (data topics, schema change, and signals)
             topics = self.list_topics(prefix=topic_prefix)
+
+            # Also add heartbeat topic (has different prefix)
+            heartbeat_topic = f"__debezium-heartbeat.{topic_prefix}"
+            if self.topic_exists(heartbeat_topic):
+                topics.append(heartbeat_topic)
+                logger.info(f"Found heartbeat topic to delete: {heartbeat_topic}")
 
             if not topics:
                 logger.info("No topics found to delete")
