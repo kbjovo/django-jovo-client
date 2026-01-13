@@ -41,11 +41,22 @@ def build_connection_string(db_config: ClientDatabase) -> str:
     password = quote_plus(db_config.get_decrypted_password())
     database = db_config.database_name
 
+    # ✅ FIXED: Oracle connection string respects oracle_connection_mode
+    if db_type == 'oracle':
+        # Check oracle_connection_mode to determine whether to use service_name or sid
+        mode = getattr(db_config, 'oracle_connection_mode', None) or 'service'
+        if mode == 'sid':
+            oracle_conn_str = f"oracle+oracledb://{username}:{password}@{host}:{port}/?sid={database}"
+        else:
+            oracle_conn_str = f"oracle+oracledb://{username}:{password}@{host}:{port}/?service_name={database}"
+    else:
+        oracle_conn_str = f"oracle+oracledb://{username}:{password}@{host}:{port}/?service_name={database}"
+
     connection_strings = {
         'mysql': f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}",
         'postgresql': f"postgresql+psycopg2://{username}:{password}@{host}:{port}/{database}",
         'mssql': f"mssql+pymssql://{username}:{password}@{host}:{port}/{database}",
-        'oracle': f"oracle+oracledb://{username}:{password}@{host}:{port}/?service_name={database}",
+        'oracle': oracle_conn_str,
         'sqlite': f"sqlite:///{database}",
     }
 
@@ -264,15 +275,20 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
         elif db_type == 'oracle':
             # ✅ Oracle: Get tables from user schema with SCHEMA.TABLE format
             if schema:
-                schema_name = schema.upper()
+                schema_name = schema.upper().lstrip('C##')
+                print("User1", schema_name)
+
             else:
-                schema_name = db_config.username.upper()
-            
+                schema_name = db_config.username.upper().removeprefix('C##')
+                print("User2", schema_name)
+
             try:
                 # Get tables from specified schema
                 oracle_tables = inspector.get_table_names(schema=schema_name)
+                # CRITICAL: Oracle table names must be uppercase for Debezium
+                # SQLAlchemy inspector returns lowercase, but Debezium expects uppercase
                 # Return in SCHEMA.TABLE format for consistency
-                tables = [f"{schema_name}.{table}" for table in oracle_tables]
+                tables = [f"{schema_name}.{table.upper()}" for table in oracle_tables]
                 logger.info(f"Oracle: Found {len(tables)} tables in schema '{schema_name}'")
             except Exception as e:
                 logger.error(f"Oracle: Failed to get tables from schema '{schema_name}': {e}")

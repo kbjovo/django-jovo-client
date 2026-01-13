@@ -58,9 +58,16 @@ def build_column_include_list(replication_config: 'ReplicationConfig', db_config
         all_columns = table_mapping.column_mappings.all()
         enabled_columns = table_mapping.column_mappings.filter(is_enabled=True)
 
+        # Debug logging
+        all_count = all_columns.count()
+        enabled_count = enabled_columns.count()
+        logger.debug(f"Table {table_name}: {enabled_count}/{all_count} columns enabled")
+
         # Check if any columns are disabled
-        if enabled_columns.count() < all_columns.count():
+        if enabled_count < all_count:
             has_disabled_columns = True
+            disabled_cols = [c.source_column for c in all_columns if not c.is_enabled]
+            logger.info(f"Table {table_name} has disabled columns: {disabled_cols}")
 
         # Add enabled columns to the list
         for col_mapping in enabled_columns:
@@ -628,8 +635,30 @@ def get_oracle_connector_config(
 
     connection_username = db_config.username.upper()
     schema_name = connection_username[3:] if connection_username.startswith('C##') else connection_username
+
+    # ✅ FIXED: Use service_name from frontend (stored in database_name field)
+    # For Oracle, database_name contains either:
+    # - Service Name (e.g., XEPDB1) when oracle_connection_mode = 'service'
+    # - SID (e.g., XE) when oracle_connection_mode = 'sid'
     pdb_name = db_config.database_name.upper()
-    cdb_service = 'XE'
+
+    # ✅ FIXED: Use the service name from frontend instead of hardcoded 'XE'
+    # The service_name/SID is stored in db_config.database_name
+    oracle_connection_mode = getattr(db_config, 'oracle_connection_mode', 'service')
+
+    if oracle_connection_mode == 'sid':
+        # SID mode: Use database_name as SID directly
+        cdb_service = pdb_name  # e.g., 'XE', 'ORCL'
+    else:
+        # Service Name mode: Use database_name as service name
+        # For JDBC URL with service name, extract CDB from PDB name or use as-is
+        if 'PDB' in pdb_name:
+            # If it's a PDB name (e.g., XEPDB1), extract the CDB part (XE)
+            # But for service name connection, we use the full service name
+            cdb_service = pdb_name  # e.g., 'XEPDB1', 'ORCLPDB1'
+        else:
+            # Not a PDB, use as-is (e.g., 'XE' used as service name)
+            cdb_service = pdb_name
 
     logger.info(f"🔧 Oracle CDC Configuration")
     logger.info(f"   Connector: {connector_name}")

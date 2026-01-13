@@ -298,3 +298,145 @@ def get_schema_field_info(topic_prefix: str, table_name: str) -> Dict[str, Any]:
             'schema_exists': False,
             'error': str(e)
         }
+
+
+def delete_schema_subject(subject_name: str, permanent: bool = True) -> bool:
+    """
+    Delete a schema subject from Schema Registry
+
+    Args:
+        subject_name: Schema subject name (e.g., 'client_1_db_2.kbe.busyuk_items-key')
+        permanent: If True, performs hard delete (removes all versions permanently)
+                  If False, performs soft delete (can be restored)
+
+    Returns:
+        True if deletion was successful, False otherwise
+    """
+    try:
+        schema_registry_url = get_schema_registry_url()
+
+        # First, soft delete the subject
+        url = f"{schema_registry_url}/subjects/{subject_name}"
+        response = requests.delete(url, timeout=10)
+
+        if response.status_code == 404:
+            logger.info(f"Schema subject does not exist (already deleted?): {subject_name}")
+            return True
+
+        response.raise_for_status()
+        logger.info(f"Soft deleted schema subject: {subject_name}")
+
+        # If permanent deletion is requested, hard delete
+        if permanent:
+            url_permanent = f"{schema_registry_url}/subjects/{subject_name}?permanent=true"
+            response = requests.delete(url_permanent, timeout=10)
+            response.raise_for_status()
+            logger.info(f"Permanently deleted schema subject: {subject_name}")
+
+        return True
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            logger.info(f"Schema subject not found (already deleted?): {subject_name}")
+            return True
+        else:
+            logger.error(f"HTTP error deleting schema subject {subject_name}: {e}")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to delete schema subject {subject_name}: {e}")
+        return False
+
+
+def delete_table_schemas(topic_prefix: str, table_name: str, permanent: bool = True) -> Dict[str, bool]:
+    """
+    Delete both key and value schemas for a table
+
+    Args:
+        topic_prefix: Debezium topic prefix (e.g., 'client_1_db_2')
+        table_name: Full table name including database (e.g., 'kbe.busyuk_items')
+        permanent: If True, performs hard delete (default: True)
+
+    Returns:
+        Dict with deletion results for key and value schemas
+        Example: {'key': True, 'value': True}
+    """
+    key_subject = f"{topic_prefix}.{table_name}-key"
+    value_subject = f"{topic_prefix}.{table_name}-value"
+
+    results = {
+        'key': delete_schema_subject(key_subject, permanent=permanent),
+        'value': delete_schema_subject(value_subject, permanent=permanent)
+    }
+
+    if results['key'] and results['value']:
+        logger.info(f"Successfully deleted schemas for table: {table_name}")
+    else:
+        logger.warning(f"Some schemas could not be deleted for table: {table_name} - Results: {results}")
+
+    return results
+
+
+def delete_schemas_for_tables(topic_prefix: str, table_names: List[str], permanent: bool = True) -> Dict[str, Dict[str, bool]]:
+    """
+    Delete schemas for multiple tables
+
+    Args:
+        topic_prefix: Debezium topic prefix
+        table_names: List of table names
+        permanent: If True, performs hard delete
+
+    Returns:
+        Dict mapping table names to their deletion results
+    """
+    results = {}
+
+    for table_name in table_names:
+        results[table_name] = delete_table_schemas(topic_prefix, table_name, permanent=permanent)
+
+    success_count = sum(1 for r in results.values() if r['key'] and r['value'])
+    logger.info(f"Deleted schemas for {success_count}/{len(table_names)} tables")
+
+    return results
+
+
+def set_compatibility_mode(subject_name: str, compatibility: str = "NONE") -> bool:
+    """
+    Set schema compatibility mode for a subject
+
+    Args:
+        subject_name: Schema subject name, or None to set globally
+        compatibility: Compatibility mode - BACKWARD, FORWARD, FULL, NONE (default: NONE)
+
+    Returns:
+        True if successful, False otherwise
+
+    Common compatibility modes:
+        - BACKWARD: New schema can read old data (default in most systems)
+        - FORWARD: Old schema can read new data
+        - FULL: Both backward and forward compatible
+        - NONE: No compatibility checks (allows any schema changes)
+    """
+    try:
+        schema_registry_url = get_schema_registry_url()
+
+        # Set at subject level or global level
+        if subject_name:
+            url = f"{schema_registry_url}/config/{subject_name}"
+        else:
+            url = f"{schema_registry_url}/config"
+
+        response = requests.put(
+            url,
+            json={"compatibility": compatibility},
+            headers={"Content-Type": "application/vnd.schemaregistry.v1+json"},
+            timeout=10
+        )
+        response.raise_for_status()
+
+        level = f"subject '{subject_name}'" if subject_name else "global"
+        logger.info(f"Set compatibility mode to {compatibility} for {level}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to set compatibility mode: {e}")
+        return False

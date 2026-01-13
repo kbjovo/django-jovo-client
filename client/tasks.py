@@ -231,11 +231,6 @@ def create_debezium_connector(self, replication_config_id):
             raise self.retry(countdown=60 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
             logger.error(f"❌ Max retries exceeded for connector creation")
-            send_error_notification(
-                error_title="Connector Creation Failed",
-                error_message=str(e),
-                context={'replication_config_id': replication_config_id}
-            )
         
         return {'success': False, 'error': str(e)}
 
@@ -361,11 +356,6 @@ def start_kafka_consumer(self, replication_config_id, consumer_group_override=No
         except:
             pass
 
-        send_error_notification(
-            error_title="Kafka Consumer Failed",
-            error_message=str(e),
-            context={'replication_config_id': replication_config_id}
-        )
 
         return {'success': False, 'error': str(e)}
 
@@ -564,10 +554,6 @@ def monitor_connectors():
         
         if not is_healthy:
             logger.error(f"❌ Kafka Connect is unhealthy: {error}")
-            send_error_notification(
-                error_title="Kafka Connect Unhealthy",
-                error_message=error or "Unknown error"
-            )
             return {'success': False, 'error': error}
         
         # Get all active replication configs

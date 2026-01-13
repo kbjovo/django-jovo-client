@@ -16,7 +16,6 @@ from .database_utils import (
 )
 
 from .notification_utils import (
-    send_error_notification,
     send_replication_status_email,
     log_and_notify_error,
 )
@@ -39,7 +38,6 @@ __all__ = [
     'get_database_size',
 
     # Notifications
-    'send_error_notification',
     'send_replication_status_email',
     'log_and_notify_error',
 

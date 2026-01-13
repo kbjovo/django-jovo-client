@@ -476,10 +476,11 @@ def connector_add(request, database_pk):
                         # Get target table name from form (editable field)
                         target_table_name = request.POST.get(f'target_table_{table_name}', table_name)
 
-                        # Parse schema and table name for MS SQL
+                        # Parse schema and table name for MS SQL and Oracle
                         # MS SQL tables come as "schema.table" (e.g., "dbo.Customers")
+                        # Oracle tables come as "SCHEMA.TABLE" (e.g., "CDC_USER.CUSTOMERS")
                         # We need to store them separately to avoid duplicate schema in topics
-                        if database.db_type == 'mssql' and '.' in table_name:
+                        if (database.db_type == 'mssql' or database.db_type == 'oracle') and '.' in table_name:
                             source_schema, actual_table_name = table_name.split('.', 1)
                         else:
                             source_schema = schema.get('schema', '')
@@ -498,11 +499,18 @@ def connector_add(request, database_pk):
 
                         # Create ColumnMappings with is_enabled based on user selection
                         enabled_columns_count = 0
+                        disabled_columns = []
                         for col in columns:
                             # Check if column checkbox was checked
                             # Checkbox name format: column_{table_name}_{column_name}
                             checkbox_name = f"column_{table_name}_{col['name']}"
-                            is_column_enabled = request.POST.get(checkbox_name) == '1'
+                            checkbox_value = request.POST.get(checkbox_name)
+                            is_column_enabled = checkbox_value == '1'
+
+                            # Debug logging
+                            if not is_column_enabled:
+                                disabled_columns.append(col['name'])
+                                logger.debug(f"Column {col['name']}: checkbox_name={checkbox_name}, value={checkbox_value}, enabled={is_column_enabled}")
 
                             ColumnMapping.objects.create(
                                 table_mapping=table_mapping,
@@ -519,6 +527,8 @@ def connector_add(request, database_pk):
                                 enabled_columns_count += 1
 
                         logger.info(f"Created {enabled_columns_count}/{len(columns)} enabled ColumnMappings for {table_name}")
+                        if disabled_columns:
+                            logger.info(f"Disabled columns for {table_name}: {disabled_columns}")
 
                         # Validate at least one column is enabled
                         if enabled_columns_count == 0:
@@ -599,6 +609,60 @@ def connector_create_debezium(request, config_pk):
             tables_whitelist=tables_list
         )
 
+        # Debug: Check if column.include.list was generated
+        has_column_filtering = "column.include.list" in source_config
+        if has_column_filtering:
+            logger.info(f"✅ column.include.list was generated with value: {source_config['column.include.list']}")
+
+            # Delete old schemas to prevent compatibility issues
+            # When column filtering is used, the new schema may have fewer fields than the old schema
+            # which causes BACKWARD compatibility errors in Schema Registry
+            from jovoclient.utils.debezium.schema_registry_utils import delete_schemas_for_tables
+
+            logger.info(f"🗑️  Deleting old schemas for tables with column filtering to prevent compatibility issues")
+
+            # Build topic names for schema deletion
+            # For MySQL: database.table (e.g., kbe.busyuk_items)
+            # For PostgreSQL: schema.table (e.g., public.users)
+            # For MS SQL: database.schema.table (e.g., AppDB.dbo.Customers)
+            # For Oracle: pdb.schema.table (e.g., XEPDB1.CDC_USER.CUSTOMERS)
+            topic_prefix = replication_config.kafka_topic_prefix
+            schema_table_names = []
+
+            for tm in table_mappings:
+                if database.db_type == 'mysql':
+                    # MySQL: database.table
+                    table_name_for_schema = f"{database.database_name}.{tm.source_table}"
+                elif database.db_type == 'postgresql':
+                    # PostgreSQL: schema.table
+                    schema = tm.source_schema or 'public'
+                    table_name_for_schema = f"{schema}.{tm.source_table}"
+                elif database.db_type == 'mssql':
+                    # MS SQL: database.schema.table
+                    schema = tm.source_schema or 'dbo'
+                    table_name_for_schema = f"{database.database_name}.{schema}.{tm.source_table}"
+                elif database.db_type == 'oracle':
+                    # Oracle: pdb.schema.table
+                    schema = database.username.upper()
+                    if schema.startswith('C##'):
+                        schema = schema[3:]
+                    pdb = database.database_name.upper()
+                    table_name_for_schema = f"{pdb}.{schema}.{tm.source_table}"
+                else:
+                    table_name_for_schema = tm.source_table
+
+                schema_table_names.append(table_name_for_schema)
+
+            # Delete schemas for all tables
+            try:
+                delete_results = delete_schemas_for_tables(topic_prefix, schema_table_names, permanent=True)
+                deleted_count = sum(1 for r in delete_results.values() if r.get('key') and r.get('value'))
+                logger.info(f"✅ Deleted schemas for {deleted_count}/{len(schema_table_names)} tables")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete some schemas (will try to create connector anyway): {e}")
+        else:
+            logger.warning(f"⚠️ column.include.list was NOT generated - all columns will be replicated")
+
         # Create source connector
         connector_manager.create_connector(replication_config.connector_name, source_config)
 
@@ -626,22 +690,6 @@ def connector_create_debezium(request, config_pk):
             if not target_database:
                 messages.warning(request, "No target database configured. Sink connector not created.")
             else:
-                # Extract primary key fields from the first enabled table
-                # This is needed because Schema Registry doesn't have schemas yet (source connector just started)
-                primary_key_fields = None
-                enabled_tables = replication_config.table_mappings.filter(is_enabled=True)
-
-                if enabled_tables.exists():
-                    first_table = enabled_tables.first()
-                    pk_columns = first_table.column_mappings.filter(
-                        is_primary_key=True,
-                        is_enabled=True
-                    )
-
-                    if pk_columns.exists():
-                        primary_key_fields = ",".join([col.target_column for col in pk_columns])
-                        logger.info(f"Using primary key fields from database: {primary_key_fields}")
-
                 # Generate sink connector config with regex to match all DATA topics from this database
                 # Topic format: client_{client_id}_db_{db_id}.{database}.{table}
                 # or: client_{client_id}_db_{db_id}.{schema}.{table} (for PostgreSQL/Oracle)
@@ -649,8 +697,9 @@ def connector_create_debezium(request, config_pk):
                 topic_regex = f"client_{client.id}_db_{database.id}\\.(?!signals$).*"
 
                 # Configure sink connector to handle tables with and without PKs
-                # - primary.key.mode=record_key: Extract PK from message key (Debezium adds this automatically)
-                # - primary.key.fields: Explicit primary key fields from database metadata
+                # - primary.key.mode=record_key: Extract PK from message key (Debezium extracts automatically)
+                # - DO NOT specify primary.key.fields when using record_key mode - it auto-extracts from key schema
+                # - This allows different tables with different PKs to work correctly
                 # - delete_enabled=True: Process tombstone delete events
                 # - schema.evolution=basic: Allow table schema to evolve with source changes
                 sink_config = get_sink_connector_config_for_database(
@@ -660,7 +709,7 @@ def connector_create_debezium(request, config_pk):
                     custom_config={
                         'name': sink_connector_name,
                         'topics.regex': topic_regex,  # Regex to match all data topics from this database
-                        'primary.key.fields': primary_key_fields or "",  # Explicit PK fields
+                        # Do NOT include 'primary.key.fields' - record_key mode extracts keys automatically
                     }
                 )
 
@@ -795,10 +844,11 @@ def connector_edit_tables(request, config_pk):
 
                             logger.info(f"Table {table_name}: {len(columns)} columns, {len(primary_keys)} primary keys: {primary_keys}")
 
-                            # Parse schema and table name for MS SQL
+                            # Parse schema and table name for MS SQL and Oracle
                             # MS SQL tables come as "schema.table" (e.g., "dbo.Customers")
+                            # Oracle tables come as "SCHEMA.TABLE" (e.g., "CDC_USER.CUSTOMERS")
                             # We need to store them separately to avoid duplicate schema in topics
-                            if database.db_type == 'mssql' and '.' in table_name:
+                            if (database.db_type == 'mssql' or database.db_type == 'oracle') and '.' in table_name:
                                 source_schema, actual_table_name = table_name.split('.', 1)
                             else:
                                 source_schema = schema.get('schema', '')

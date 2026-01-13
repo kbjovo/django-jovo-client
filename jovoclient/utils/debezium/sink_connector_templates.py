@@ -94,8 +94,7 @@ def get_mysql_sink_connector_config(
 
         # Insert mode
         "insert.mode": "upsert",  # Options: insert, upsert, update
-        "primary.key.mode": "record_key",  # Fixed: was pk.mode
-        "primary.key.fields": primary_key_fields or "",  # Primary key fields (comma-separated)
+        "primary.key.mode": "record_key",  # Extract PK from Kafka message key
         "delete.enabled": str(delete_enabled).lower(),  # Enable/disable delete operations (requires PKs)
 
         # Batch settings
@@ -112,6 +111,11 @@ def get_mysql_sink_connector_config(
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
     }
+
+    # Add primary.key.fields only if explicitly provided
+    # When using record_key mode, omitting this allows auto-detection from message key schema
+    if primary_key_fields:
+        config["primary.key.fields"] = primary_key_fields
 
     # Override with custom configuration if provided
     if custom_config:
@@ -194,8 +198,7 @@ def get_postgresql_sink_connector_config(
 
         # Insert mode
         "insert.mode": "upsert",  # Options: insert, upsert, update
-        "primary.key.mode": "record_key",  # Fixed: was pk.mode
-        "primary.key.fields": primary_key_fields or "",  # Primary key fields (comma-separated)
+        "primary.key.mode": "record_key",  # Extract PK from Kafka message key
         "delete.enabled": str(delete_enabled).lower(),  # Enable/disable delete operations (requires PKs)
 
         # Batch settings
@@ -212,6 +215,11 @@ def get_postgresql_sink_connector_config(
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
     }
+
+    # Add primary.key.fields only if explicitly provided
+    # When using record_key mode, omitting this allows auto-detection from message key schema
+    if primary_key_fields:
+        config["primary.key.fields"] = primary_key_fields
 
     # Override with custom configuration if provided
     if custom_config:
