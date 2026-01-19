@@ -67,14 +67,14 @@ def get_kafka_topics_for_replication(replication_config):
             logger.info(f"   ✓ SQL Server: {source_table} → {topic_name}")
             
         elif db_type == 'postgresql':
-            # ✅ PostgreSQL: {prefix}.{schema}.{table}
+            # ✅ PostgreSQL: {prefix}.{database}.{table}
+            # Use database name instead of schema to match connector's RegexRouter transform
             if '.' in source_table:
-                schema, table = source_table.rsplit('.', 1)
+                _, table = source_table.rsplit('.', 1)
             else:
-                schema = 'public'
                 table = source_table
-            
-            topic_name = f"{kafka_topic_prefix}.{schema}.{table}"
+
+            topic_name = f"{kafka_topic_prefix}.{db_config.database_name}.{table}"
             logger.info(f"   ✓ PostgreSQL: {source_table} → {topic_name}")
             
         elif db_type == 'mysql':

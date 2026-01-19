@@ -5,6 +5,7 @@ from typing import List, Optional
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+
 logger = logging.getLogger(__name__)
 
 class DebeziumSignalManager:
@@ -162,6 +163,8 @@ class KafkaSignalManager:
                 value=json.dumps(signal_message).encode('utf-8'),
                 callback=self._delivery_callback
             )
+            logger.info(f"signal-msg= topic: {self.signal_topic}, \
+                        key={self.connector_name.encode('utf-8')}, value={json.dumps(signal_message).encode('utf-8')},")
 
             # Wait for message to be delivered
             self.producer.flush(timeout=10)

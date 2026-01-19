@@ -211,17 +211,26 @@ LOGGING = {
             'backupCount': 48,          # Keep last 48 hours (optional)
             'formatter': 'verbose',
             'encoding': 'utf-8',
-        },  
+        },
         'console': {
             'level': 'DEBUG',
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
         },
     },
+    'root': {
+        'handlers': ['file', 'console'],
+        'level': 'INFO',
+    },
     'loggers': {
-        'client.utils': {
-            'handlers': ['file', 'console'],
+        'django': {
+            'handlers': ['console'],
             'level': 'INFO',
+            'propagate': False,
+        },
+        'django.db.backends': {
+            'handlers': ['console'],
+            'level': 'WARNING',
             'propagate': False,
         },
     },
@@ -244,33 +253,6 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_CONNECTION_RETRY = True
 CELERY_BROKER_CONNECTION_MAX_RETRIES = 10
-
-# # Broker transport options - CRITICAL FOR PREVENTING IDLE TIMEOUTS
-# CELERY_BROKER_TRANSPORT_OPTIONS = {
-#     'visibility_timeout': int(os.getenv('CELERY_VISIBILITY_TIMEOUT', '43200')),  # 12 hours
-#     'socket_timeout': int(os.getenv('CELERY_SOCKET_TIMEOUT', '120')),  # 2 minutes
-#     'socket_connect_timeout': int(os.getenv('CELERY_SOCKET_CONNECT_TIMEOUT', '30')),  # 30 seconds
-#     'socket_keepalive': True,
-#     'socket_keepalive_options': {
-#         1: 1,  # TCP_KEEPIDLE
-#         2: 3,  # TCP_KEEPINTVL  
-#         3: 5,  # TCP_KEEPCNT
-#     },
-#     'retry_on_timeout': True,
-#     'health_check_interval': int(os.getenv('CELERY_HEALTH_CHECK_INTERVAL', '30')),  # 30 seconds
-# }
-
-# # Result backend transport options
-# CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = {
-#     'visibility_timeout': int(os.getenv('CELERY_VISIBILITY_TIMEOUT', '43200')),  # 12 hours
-#     'socket_timeout': int(os.getenv('CELERY_SOCKET_TIMEOUT', '120')),  # 2 minutes
-#     'socket_connect_timeout': int(os.getenv('CELERY_SOCKET_CONNECT_TIMEOUT', '30')),  # 30 seconds
-#     'socket_keepalive': True,
-#     'retry_on_timeout': True,
-#     'retry_policy': {
-#         'timeout': 5.0,
-#     }
-# }
 
 # Global visibility timeout (set all three for Redis)
 CELERY_VISIBILITY_TIMEOUT = int(os.getenv('CELERY_VISIBILITY_TIMEOUT', '43200'))  # 12 hours

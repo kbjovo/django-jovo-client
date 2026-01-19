@@ -389,14 +389,14 @@ def get_kafka_topics_for_tables(db_config, replication_config, table_mappings):
             logger.info(f"   ✓ SQL Server: {source_table} → {topic_name}")
             
         elif db_type == 'postgresql':
-            # ✅ PostgreSQL: {prefix}.{schema}.{table}
+            # ✅ PostgreSQL: {prefix}.{database}.{table}
+            # Use database name instead of schema to match connector's RegexRouter transform
             if '.' in source_table:
-                schema, table = source_table.rsplit('.', 1)
+                _, table = source_table.rsplit('.', 1)
             else:
-                schema = 'public'
                 table = source_table
-            
-            topic_name = f"{topic_prefix}.{schema}.{table}"
+
+            topic_name = f"{topic_prefix}.{db_config.database_name}.{table}"
             logger.info(f"   ✓ PostgreSQL: {source_table} → {topic_name}")
             
         elif db_type == 'mysql':
@@ -3236,11 +3236,12 @@ def _create_kafka_topics(request, replication_config, db_config, client, newly_a
             )
 
         elif db_type == 'postgresql':
-            # PostgreSQL: {prefix}.{schema}.{table}
+            # PostgreSQL: {prefix}.{database}.{table}
+            # Use database name instead of schema to match connector's RegexRouter transform
             table_names_stripped = [t.split('.')[-1] for t in newly_added_tables]
             topic_results = topic_manager.create_cdc_topics_for_tables(
                 server_name=topic_prefix,
-                database='public',
+                database=db_config.database_name,
                 table_names=table_names_stripped
             )
 

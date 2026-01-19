@@ -406,8 +406,10 @@ class KafkaTopicManager:
             if db_config.db_type == 'mysql':
                 topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
             elif db_config.db_type == 'postgresql':
-                schema = table_mapping.source_schema or 'public'
-                topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
+                # Use database name instead of schema for topic naming
+                # This matches the RegexRouter transform in the connector config
+                # Format: {topic_prefix}.{database_name}.{table}
+                topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
             elif db_config.db_type == 'mssql':
                 schema = table_mapping.source_schema or 'dbo'
                 topic = f"{topic_prefix}.{db_config.database_name}.{schema}.{table_mapping.source_table}"
@@ -424,9 +426,37 @@ class KafkaTopicManager:
         schema_change_topic = topic_prefix
         topics.append(schema_change_topic)
 
-        # Add signal topic for incremental snapshots
+        # Add signal topic for incremental snapshots (Kafka-based signaling)
         signal_topic = f"{topic_prefix}.signals"
         topics.append(signal_topic)
+
+        # Add debezium_signal table CDC topic (for source-based signaling)
+        # When using source-based signals, Debezium captures changes from the debezium_signal table
+        # and publishes them to a topic. For PostgreSQL with RegexRouter, this becomes:
+        # {topic_prefix}.{database_name}.debezium_signal
+        if db_config.db_type == 'postgresql':
+            # PostgreSQL uses RegexRouter to replace schema with database name
+            signal_data_topic = f"{topic_prefix}.{db_config.database_name}.debezium_signal"
+            topics.append(signal_data_topic)
+            logger.info(f"Added debezium_signal data topic for PostgreSQL: {signal_data_topic}")
+        elif db_config.db_type == 'mysql':
+            # MySQL: database.table format
+            signal_data_topic = f"{topic_prefix}.{db_config.database_name}.debezium_signal"
+            topics.append(signal_data_topic)
+            logger.info(f"Added debezium_signal data topic for MySQL: {signal_data_topic}")
+        elif db_config.db_type == 'mssql':
+            # SQL Server: database.schema.table format
+            signal_data_topic = f"{topic_prefix}.{db_config.database_name}.dbo.debezium_signal"
+            topics.append(signal_data_topic)
+            logger.info(f"Added debezium_signal data topic for SQL Server: {signal_data_topic}")
+        elif db_config.db_type == 'oracle':
+            # Oracle: pdb.schema.table format
+            schema = db_config.username.upper()
+            if schema.startswith('C##'):
+                schema = schema[3:]
+            signal_data_topic = f"{topic_prefix}.{schema}.DEBEZIUM_SIGNAL"
+            topics.append(signal_data_topic)
+            logger.info(f"Added debezium_signal data topic for Oracle: {signal_data_topic}")
 
         # Add heartbeat topic (for connector health monitoring)
         # Debezium uses this topic to track connector progress and detect stalls

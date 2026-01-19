@@ -240,7 +240,32 @@ class DebeziumConnectorManager:
         except Exception as e:
             logger.error(f"Error getting connector config: {str(e)}")
             return None
-    
+
+    def get_connector_topics(self, connector_name: str) -> Optional[Dict]:
+        """
+        Get topics that a connector is producing to or consuming from.
+
+        Args:
+            connector_name: Name of the connector
+
+        Returns:
+            Optional[Dict]: Topics info with format {connector_name: {topics: [...]}} or None
+        """
+        try:
+            url = f"{self.connectors_url}/{connector_name}/topics"
+            success, data, error = self._make_request('GET', url)
+
+            if success and data:
+                logger.debug(f"Retrieved topics for connector {connector_name}: {data}")
+                return data
+            else:
+                logger.error(f"Failed to get connector topics: {error}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error getting connector topics: {str(e)}")
+            return None
+
     def create_connector(
         self, 
         connector_name: str, 

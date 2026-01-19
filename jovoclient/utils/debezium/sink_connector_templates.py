@@ -63,6 +63,10 @@ def get_mysql_sink_connector_config(
     # No longer extracting from Schema Registry as it may not have schemas yet
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
 
+    # Topic regex matches ALL databases for this client (not just one database)
+    # This allows a single sink connector to handle topics from all source databases
+    topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
+
     # Build JDBC connection URL
     jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}"
 
@@ -78,7 +82,7 @@ def get_mysql_sink_connector_config(
         "connection.password": db_config.get_decrypted_password(),
 
         # Topics to consume
-        "topics": ",".join(topics) if topics else "",
+        "topics.regex": topic_regex,
 
         # ✅ FIX: Extract {database}_{table} from topic using RegexRouter SMT
         # Example: 'client_2_db_5.kbe.busyuk_items' → 'kbe_busyuk_items'
@@ -110,6 +114,14 @@ def get_mysql_sink_connector_config(
         # Connection pool settings
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
+
+        # Topic discovery settings - reduce delay for new topics matching regex
+        # Default is 300000ms (5 min), set to 5 seconds for faster discovery
+        "topic.tracking.refresh.interval.ms": "5000",
+
+        # Consumer metadata refresh - speeds up initial topic subscription
+        # Default is 300000ms (5 min), set to 10 seconds for faster initial discovery
+        "consumer.override.metadata.max.age.ms": "10000",
     }
 
     # Add primary.key.fields only if explicitly provided
@@ -171,6 +183,10 @@ def get_postgresql_sink_connector_config(
     # Build JDBC connection URL
     jdbc_url = f"jdbc:postgresql://{db_config.host}:{db_config.port}/{db_config.database_name}"
 
+    # Topic regex matches ALL databases for this client (not just one database)
+    # This allows a single sink connector to handle topics from all source databases
+    topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
+
     # Default configuration
     config = {
         # Connector class
@@ -181,8 +197,9 @@ def get_postgresql_sink_connector_config(
         "connection.username": db_config.username,  # Fixed: was connection.user
         "connection.password": db_config.get_decrypted_password(),
 
-        # Topics to consume
-        "topics": ",".join(topics) if topics else "",
+        # Topics to consume - use regex by default for auto-discovery of new topics
+        # If explicit topics list is provided, it will be overridden via custom_config
+        "topics.regex": topic_regex,
 
         # ✅ FIX: Extract {schema}_{table} from topic using RegexRouter SMT
         # Example: 'client_2_db_5.public.orders' → 'public_orders'
@@ -214,6 +231,14 @@ def get_postgresql_sink_connector_config(
         # Connection pool settings
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
+
+        # Topic discovery settings - reduce delay for new topics matching regex
+        # Default is 300000ms (5 min), set to 5 seconds for faster discovery
+        "topic.tracking.refresh.interval.ms": "5000",
+
+        # Consumer metadata refresh - speeds up initial topic subscription
+        # Default is 300000ms (5 min), set to 10 seconds for faster initial discovery
+        "consumer.override.metadata.max.age.ms": "10000",
     }
 
     # Add primary.key.fields only if explicitly provided

@@ -168,7 +168,7 @@ def get_mysql_connector_config(
         elif db_host == 'mysql_wsl':
             db_host = 'mysql'  # Use hostname instead of container name
             logger.info(f"Converting {db_config.host} to 'mysql' for Docker internal connection")
-    
+
     # Base configuration
     config = {
         # Connector class
@@ -214,9 +214,12 @@ def get_mysql_connector_config(
         "incremental.snapshot.chunk.size": str(replication_config.incremental_snapshot_chunk_size) if replication_config and hasattr(replication_config, 'incremental_snapshot_chunk_size') else "1024",
 
         # Kafka-based signals (for connector control and incremental snapshots on read-only databases)
-        "signal.enabled.channels": "kafka",
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        "signal.enabled.channels": "kafka",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "signal.kafka.groupId": f"dbz-signal-{connector_name}",  # CRITICAL: Must be unique per connector (camelCase!)
+        "signal.poll.interval.ms": "1000",  # Check for signals every 1 second
+        "signal.kafka.consumer.auto.offset.reset": "earliest",  # Don't miss signals during restarts
 
         # Decimal handling
         "decimal.handling.mode": "precise",  # Options: precise, double, string
@@ -234,6 +237,17 @@ def get_mysql_connector_config(
         "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
         "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
         "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "500",
+        
+        "key.converter": "io.confluent.connect.avro.AvroConverter",
+        "key.converter.schema.registry.url": "http://schema-registry:8081",
+        "key.converter.schemas.enable": "true",
+
+        "value.converter": "io.confluent.connect.avro.AvroConverter",
+        "value.converter.schema.registry.url": "http://schema-registry:8081",
+        "value.converter.schemas.enable": "true",
+
+        "key.converter.enhanced.avro.schema.support": "true",
+        "value.converter.enhanced.avro.schema.support": "true",
 
         # Connection timeouts
         "connect.timeout.ms": "30000",
@@ -321,16 +335,25 @@ def get_postgresql_connector_config(
     
     config = {
         "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-        
+
         "database.hostname": db_config.host,
         "database.port": str(db_config.port),
         "database.user": db_config.username,
         "database.password": db_config.get_decrypted_password(),
         "database.dbname": db_config.database_name,
-        
+
         "database.server.name": connector_name.replace('_connector', ''),
         "topic.prefix": f"client_{client.id}_db_{db_config.id}",
-        
+
+        # ✅ CRITICAL FIX: Replace schema with database name in topic
+        # Default format: {topic.prefix}.{schema}.{table} → client_1_db_3.public.my_table
+        # Fixed format:  {topic.prefix}.{database}.{table} → client_1_db_3.mydb.my_table
+        # This ensures sink connectors can properly subscribe to topics
+        "transforms": "routeTopic",
+        "transforms.routeTopic.type": "org.apache.kafka.connect.transforms.RegexRouter",
+        "transforms.routeTopic.regex": f"(client_{client.id}_db_{db_config.id})\\.[^.]+\\.(.+)",
+        "transforms.routeTopic.replacement": f"$1.{db_config.database_name}.$2",
+
         "plugin.name": "pgoutput",
         
         "slot.name": safe_slot_name,
@@ -386,7 +409,8 @@ def get_postgresql_connector_config(
     }
     
     if tables_whitelist:
-        # ✅ FIX: Don't add schema prefix if table already has it
+        # PostgreSQL table.include.list uses SCHEMA.TABLE format (e.g., 'public.busy_acc_greenera')
+        # NOTE: Topic names use DATABASE.TABLE (via RegexRouter transform), but table filter uses SCHEMA
         tables_full = []
         for table in tables_whitelist:
             if '.' in table:
@@ -394,7 +418,7 @@ def get_postgresql_connector_config(
                 tables_full.append(table)
             else:
                 # Add schema prefix (e.g., 'busy_acc_greenera' -> 'public.busy_acc_greenera')
-                tables_full.append(f"{db_config.database_name}.{table}")
+                tables_full.append(f"{schema_name}.{table}")
 
         config["table.include.list"] = ",".join(tables_full)
         logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")

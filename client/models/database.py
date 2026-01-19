@@ -319,10 +319,11 @@ class ClientDatabase(models.Model):
 
     def get_sink_connector_name(self):
         """
-        Get the shared sink connector name for this database.
-        Format: client_{client_id}_db_{database_id}_sink
+        Get the shared sink connector name for this CLIENT.
+        All source databases for a client share a single sink connector.
+        Format: client_{client_id}_sink
         """
-        return f"client_{self.client.id}_db_{self.id}_sink"
+        return f"client_{self.client.id}_sink"
 
     def has_active_connectors(self):
         """

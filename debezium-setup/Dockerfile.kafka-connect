@@ -1,5 +1,5 @@
 # Use official Debezium 3.3 image (Java 17, MySQL 8.0.26+ compatible)
-FROM quay.io/debezium/connect:3.0
+FROM quay.io/debezium/connect:3.3
 
 # Switch to root to install Avro converter
 USER root
