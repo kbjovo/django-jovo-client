@@ -141,10 +141,12 @@ class KafkaSignalManager:
 
         # Create signal message in Debezium format
         # The message contains id, type, and data fields
+        # IMPORTANT: The 'data' field must be a JSON object, NOT a JSON string
+        # See: https://debezium.io/documentation/reference/stable/configuration/signalling.html
         signal_message = {
             "id": signal_id,
             "type": signal_type,
-            "data": json.dumps(data) if isinstance(data, dict) else data
+            "data": data  # data is already a dict, will be serialized with the whole message
         }
 
         # Add any additional data fields
@@ -154,9 +156,9 @@ class KafkaSignalManager:
         try:
             # Send message to Kafka signal topic
             # CRITICAL: For Kafka signals, Debezium expects:
-            # - Key: The CONNECTOR NAME (not UUID!) - this is how Debezium routes signals
+            # - Key: The topic.prefix value (e.g., "client_1_db_2") - this is how Debezium routes signals
             # - Value: JSON with 'id', 'type' and 'data' fields
-            # - The 'data' field should be a JSON string, not an object
+            # - The 'data' field must be a JSON object (NOT a string)
             self.producer.produce(
                 topic=self.signal_topic,
                 key=self.connector_name.encode('utf-8'),  # ✅ Use connector name as key

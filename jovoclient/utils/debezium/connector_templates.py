@@ -221,6 +221,9 @@ def get_mysql_connector_config(
         "signal.poll.interval.ms": "1000",  # Check for signals every 1 second
         "signal.kafka.consumer.auto.offset.reset": "earliest",  # Don't miss signals during restarts
 
+        "signal.kafka.consumer.key.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+        "signal.kafka.consumer.value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+        
         # Decimal handling
         "decimal.handling.mode": "precise",  # Options: precise, double, string
 
