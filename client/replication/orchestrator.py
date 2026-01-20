@@ -916,6 +916,255 @@ class ReplicationOrchestrator:
             return False, error_msg
 
     # ==========================================
+    # Table Management (Add/Remove)
+    # ==========================================
+
+    def remove_tables(self, table_names: list) -> Tuple[bool, str]:
+        """
+        Remove tables from a connector with full cleanup.
+
+        This will:
+        1. Delete Kafka topics for the removed tables
+        2. Drop target tables from target database
+        3. Disable table mappings in database
+        4. Update source connector config
+        5. Restart source connector
+        6. Restart sink connector
+
+        Args:
+            table_names: List of source table names to remove
+
+        Returns:
+            (success, message)
+        """
+        self._log_info("=" * 60)
+        self._log_info("REMOVING TABLES FROM CONNECTOR")
+        self._log_info(f"Tables to remove: {', '.join(table_names)}")
+        self._log_info("=" * 60)
+
+        try:
+            db_config = self.config.client_database
+            client = db_config.client
+
+            # Get table mappings for the tables being removed
+            table_mappings_to_remove = self.config.table_mappings.filter(
+                source_table__in=table_names,
+                is_enabled=True
+            )
+
+            if not table_mappings_to_remove.exists():
+                return False, "No matching enabled tables found to remove"
+
+            # ========================================
+            # STEP 1: Delete Kafka topics for removed tables
+            # ========================================
+            self._log_info("STEP 1/5: Deleting Kafka topics for removed tables...")
+
+            topics_to_delete = []
+            for table_mapping in table_mappings_to_remove:
+                topic_prefix = self.config.kafka_topic_prefix
+
+                if db_config.db_type == 'mysql':
+                    topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
+                elif db_config.db_type == 'postgresql':
+                    schema = table_mapping.source_schema or 'public'
+                    topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
+                elif db_config.db_type == 'mssql':
+                    schema = table_mapping.source_schema or 'dbo'
+                    topic = f"{topic_prefix}.{db_config.database_name}.{schema}.{table_mapping.source_table}"
+                elif db_config.db_type == 'oracle':
+                    schema = table_mapping.source_schema
+                    topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
+                else:
+                    continue
+
+                topics_to_delete.append(topic)
+
+            deleted_topics = []
+            for topic in topics_to_delete:
+                try:
+                    success, error = self.topic_manager.delete_topic(topic)
+                    if success:
+                        deleted_topics.append(topic)
+                        self._log_info(f"  ✓ Deleted topic: {topic}")
+                    else:
+                        self._log_warning(f"  ⚠️ Failed to delete topic {topic}: {error}")
+                except Exception as e:
+                    self._log_warning(f"  ⚠️ Error deleting topic {topic}: {e}")
+
+            self._log_info(f"✓ Deleted {len(deleted_topics)}/{len(topics_to_delete)} topics")
+
+            # ========================================
+            # STEP 2: Drop target tables
+            # ========================================
+            self._log_info("STEP 2/5: Dropping target database tables...")
+
+            success, message = self._drop_specific_target_tables(table_mappings_to_remove)
+            if success:
+                self._log_info(f"✓ {message}")
+            else:
+                self._log_warning(f"⚠️ {message}")
+
+            # ========================================
+            # STEP 3: Disable table mappings in database
+            # ========================================
+            self._log_info("STEP 3/5: Disabling table mappings...")
+
+            disabled_count = table_mappings_to_remove.update(is_enabled=False)
+            self._log_info(f"✓ Disabled {disabled_count} table mappings")
+
+            # Check if any tables remain
+            remaining_tables = list(
+                self.config.table_mappings.filter(is_enabled=True)
+                .values_list('source_table', flat=True)
+            )
+
+            if not remaining_tables:
+                return False, "Cannot remove all tables. Delete the connector instead."
+
+            # ========================================
+            # STEP 4: Update and restart source connector
+            # ========================================
+            self._log_info("STEP 4/5: Updating source connector configuration...")
+
+            source_config = get_connector_config_for_database(
+                db_config=db_config,
+                replication_config=self.config,
+                tables_whitelist=remaining_tables
+            )
+
+            success, error = self.connector_manager.update_connector_config(
+                self.config.connector_name,
+                source_config
+            )
+            if not success:
+                return False, f"Failed to update source connector: {error}"
+
+            self._log_info(f"✓ Source connector updated with {len(remaining_tables)} tables")
+
+            # Restart source connector
+            success, error = self.connector_manager.restart_connector(self.config.connector_name)
+            if success:
+                self._log_info(f"✓ Source connector restarted")
+            else:
+                self._log_warning(f"⚠️ Source connector restart failed: {error}")
+
+            # ========================================
+            # STEP 5: Restart sink connector
+            # ========================================
+            self._log_info("STEP 5/5: Restarting sink connector...")
+
+            if self.config.sink_connector_name:
+                success, error = self.connector_manager.restart_connector(
+                    self.config.sink_connector_name
+                )
+                if success:
+                    self._log_info(f"✓ Sink connector restarted")
+                else:
+                    self._log_warning(f"⚠️ Sink connector restart failed: {error}")
+
+            self._log_info("=" * 60)
+            self._log_info("✓ TABLES REMOVED SUCCESSFULLY")
+            self._log_info("=" * 60)
+
+            return True, f"Removed {len(table_names)} tables (topics deleted, target tables dropped)"
+
+        except Exception as e:
+            error_msg = f"Failed to remove tables: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def _drop_specific_target_tables(self, table_mappings) -> Tuple[bool, str]:
+        """
+        Drop specific target database tables.
+
+        Args:
+            table_mappings: QuerySet of TableMapping objects to drop
+
+        Returns:
+            (success, message)
+        """
+        try:
+            from client.models.database import ClientDatabase
+            from client.utils.database_utils import get_database_engine
+
+            client = self.config.client_database.client
+            target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+
+            if not target_db:
+                return False, "No target database configured"
+
+            engine = get_database_engine(target_db)
+
+            dropped_tables = []
+            failed_tables = []
+
+            try:
+                with engine.connect() as conn:
+                    for table_mapping in table_mappings:
+                        target_table = table_mapping.target_table
+                        target_schema = table_mapping.target_schema or None
+
+                        try:
+                            if target_schema:
+                                full_table_name = f"{target_schema}.{target_table}"
+                            else:
+                                full_table_name = target_table
+
+                            # Build DROP statement based on database type
+                            if target_db.db_type == 'mysql':
+                                drop_sql = f"DROP TABLE IF EXISTS `{target_table}`"
+                            elif target_db.db_type == 'postgresql':
+                                if target_schema:
+                                    drop_sql = f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}" CASCADE'
+                                else:
+                                    drop_sql = f'DROP TABLE IF EXISTS "{target_table}" CASCADE'
+                            elif target_db.db_type == 'mssql':
+                                if target_schema:
+                                    drop_sql = f"DROP TABLE IF EXISTS [{target_schema}].[{target_table}]"
+                                else:
+                                    drop_sql = f"DROP TABLE IF EXISTS [{target_table}]"
+                            elif target_db.db_type == 'oracle':
+                                if target_schema:
+                                    drop_sql = f'DROP TABLE "{target_schema}"."{target_table}" CASCADE CONSTRAINTS'
+                                else:
+                                    drop_sql = f'DROP TABLE "{target_table}" CASCADE CONSTRAINTS'
+                            else:
+                                drop_sql = f"DROP TABLE IF EXISTS {target_table}"
+
+                            conn.execute(text(drop_sql))
+                            conn.commit()
+
+                            dropped_tables.append(full_table_name)
+                            self._log_info(f"  ✓ Dropped table: {full_table_name}")
+
+                        except Exception as e:
+                            if target_db.db_type == 'oracle' and ('ORA-00942' in str(e) or 'does not exist' in str(e)):
+                                self._log_info(f"  ○ Table already dropped: {full_table_name}")
+                            else:
+                                failed_tables.append(f"{full_table_name}: {str(e)}")
+                                self._log_warning(f"  ⚠️ Failed to drop {full_table_name}: {e}")
+
+            finally:
+                engine.dispose()
+
+            if dropped_tables:
+                message = f"Dropped {len(dropped_tables)} table(s)"
+            else:
+                message = "No tables were dropped"
+
+            if failed_tables:
+                message += f" | {len(failed_tables)} failed"
+                return False, message
+
+            return True, message
+
+        except Exception as e:
+            error_msg = f"Failed to drop target tables: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    # ==========================================
     # Status and Health
     # ==========================================
 

@@ -112,7 +112,7 @@ def generate_connector_name(client: Client, db_config: ClientDatabase, version: 
     if version is not None:
         connector_name = f"{connector_name}_v_{version}"
 
-    logger.info(f"Generated connector name: {connector_name}")
+    logger.debug(f"Generated connector name: {connector_name}")
     return connector_name
 
 
@@ -164,10 +164,10 @@ def get_mysql_connector_config(
     if use_docker_internal_host:
         if db_host in ['localhost', '127.0.0.1']:
             db_host = 'mysql'  # Docker service name
-            logger.info(f"Converting {db_config.host} to 'mysql' for Docker internal connection")
+            logger.debug(f"Converting {db_config.host} to 'mysql' for Docker internal connection")
         elif db_host == 'mysql_wsl':
             db_host = 'mysql'  # Use hostname instead of container name
-            logger.info(f"Converting {db_config.host} to 'mysql' for Docker internal connection")
+            logger.debug(f"Converting {db_config.host} to 'mysql' for Docker internal connection")
 
     # Base configuration
     config = {
@@ -265,14 +265,14 @@ def get_mysql_connector_config(
         tables_full = [f"{db_config.database_name}.{table}" for table in tables_whitelist]
 
         config["table.include.list"] = ",".join(tables_full)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
+        logger.debug(f"Adding table whitelist: {len(tables_whitelist)} tables")
 
     # Add column.include.list if there are disabled columns
     if replication_config:
         column_include_list = build_column_include_list(replication_config, db_config)
         if column_include_list:
             config["column.include.list"] = column_include_list
-            logger.info(f"Added column.include.list (some columns excluded)")
+            logger.debug(f"Added column.include.list (some columns excluded)")
 
     # Add configuration from ReplicationConfig if provided
     if replication_config:
@@ -283,8 +283,8 @@ def get_mysql_connector_config(
         # Custom configuration (JSON field in ReplicationConfig)
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
-    
-    logger.info(f"Generated MySQL connector config for: {connector_name} along with replication_config: {replication_config}")
+
+    logger.debug(f"Generated MySQL connector config for: {connector_name}")
     return config
 
 
@@ -329,12 +329,7 @@ def get_postgresql_connector_config(
     # ✅ CRITICAL FIX: Create signal table name
     signal_table = f"{schema_name}.debezium_signal"
     
-    logger.info(f"PostgreSQL connector configuration:")
-    logger.info(f"  Connector name: {connector_name}")
-    logger.info(f"  Replication slot: {safe_slot_name}")
-    logger.info(f"  Publication: {publication_name}")
-    logger.info(f"  Signal table: {signal_table}")
-    logger.info(f"  Snapshot mode: {snapshot_mode}")
+    logger.debug(f"PostgreSQL connector: {connector_name}, slot: {safe_slot_name}, publication: {publication_name}")
     
     config = {
         "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
@@ -424,23 +419,23 @@ def get_postgresql_connector_config(
                 tables_full.append(f"{schema_name}.{table}")
 
         config["table.include.list"] = ",".join(tables_full)
-        logger.info(f"Adding table whitelist: {len(tables_whitelist)} tables")
+        logger.debug(f"Adding table whitelist: {len(tables_whitelist)} tables")
 
     # Add column.include.list if there are disabled columns
     if replication_config:
         column_include_list = build_column_include_list(replication_config, db_config)
         if column_include_list:
             config["column.include.list"] = column_include_list
-            logger.info(f"Added column.include.list (some columns excluded)")
+            logger.debug(f"Added column.include.list (some columns excluded)")
 
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
             config["snapshot.mode"] = replication_config.snapshot_mode
-        
+
         if hasattr(replication_config, 'custom_config') and replication_config.custom_config:
             config.update(replication_config.custom_config)
-    
-    logger.info(f"✅ Generated PostgreSQL connector config with incremental snapshot support")
+
+    logger.debug(f"Generated PostgreSQL connector config for: {connector_name}")
     return config
 
 

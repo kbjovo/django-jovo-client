@@ -133,7 +133,7 @@ def get_mysql_sink_connector_config(
     if custom_config:
         config.update(custom_config)
 
-    logger.info(f"Generated MySQL JDBC Sink connector config: {connector_name}")
+    logger.debug(f"Generated MySQL JDBC Sink connector config: {connector_name}")
     return config
 
 
@@ -305,7 +305,7 @@ def get_sink_connector_config_for_database(
         logger.error(f"Unsupported target database type for sink connector: {db_type}")
         return None
 
-    logger.info(f"Generating {db_type} sink connector config (primary keys from custom_config)")
+    logger.debug(f"Generating {db_type} sink connector config")
 
     return generator(
         client=client,

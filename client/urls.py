@@ -47,7 +47,6 @@ from .views.connector_views import (
     connector_create_debezium,
     connector_edit_tables,
     connector_delete,
-    connector_delete_global,
 )
 
 
@@ -58,7 +57,6 @@ urlpatterns = [
     path('', dashboard, name='main-dashboard'),
     path('clients/', clients_list, name='clients_list'),
     path('connectors/', connectors_list, name='connectors_list'),  # Global connectors view (replaces replications)
-    path('connectors/<int:config_pk>/delete-global/', connector_delete_global, name='connector_delete_global'),  # Delete connector from global list
     path('replications/', replications_list, name='replications_list'),  # Keep for now, will remove later
     path('monitoring/', monitoring_dashboard, name='monitoring_dashboard'),
 

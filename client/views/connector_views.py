@@ -788,40 +788,29 @@ def connector_edit_tables(request, config_pk):
                 return redirect('connector_edit_tables', config_pk=config_pk)
 
             with transaction.atomic():
-                # Handle removals (requires restart)
+                # Handle removals - use orchestrator for full cleanup
                 if tables_to_remove:
-                    # Disable table mappings
-                    disabled_count = TableMapping.objects.filter(
-                        replication_config=replication_config,
-                        source_table__in=tables_to_remove
-                    ).update(is_enabled=False)
+                    from client.replication.orchestrator import ReplicationOrchestrator
 
-                    logger.info(f"Disabled {disabled_count} tables from connector")
+                    # Check if removing all tables
+                    remaining_count = replication_config.table_mappings.filter(
+                        is_enabled=True
+                    ).exclude(source_table__in=tables_to_remove).count()
 
-                    # Update connector config and restart
-                    connector_manager = DebeziumConnectorManager()
-
-                    # Get remaining enabled tables
-                    remaining_tables = list(
-                        replication_config.table_mappings.filter(is_enabled=True)
-                        .values_list('source_table', flat=True)
-                    )
-
-                    if not remaining_tables:
+                    if remaining_count == 0:
                         messages.error(request, "Cannot remove all tables. Delete the connector instead.")
                         return redirect('connector_edit_tables', config_pk=config_pk)
 
-                    # Update connector config
-                    source_config = get_connector_config_for_database(
-                        db_config=database,
-                        replication_config=replication_config,
-                        tables_whitelist=remaining_tables
-                    )
+                    # Use orchestrator to remove tables with full cleanup
+                    # (deletes topics, drops target tables, updates connectors)
+                    orchestrator = ReplicationOrchestrator(replication_config)
+                    success, message = orchestrator.remove_tables(tables_to_remove)
 
-                    connector_manager.update_connector_config(replication_config.connector_name, source_config)
-                    connector_manager.restart_connector(replication_config.connector_name)
-
-                    messages.success(request, f"Removed {len(tables_to_remove)} tables and restarted connector")
+                    if success:
+                        messages.success(request, message)
+                    else:
+                        messages.error(request, f"Error removing tables: {message}")
+                        return redirect('connector_edit_tables', config_pk=config_pk)
 
                 # Handle additions (try signals first)
                 if tables_to_add:
@@ -839,7 +828,7 @@ def connector_edit_tables(request, config_pk):
                                 messages.error(request, f"Table {table} is already assigned")
                                 return redirect('connector_edit_tables', config_pk=config_pk)
 
-                        # Create table mappings
+                        # Create or re-enable table mappings
                         for table_name in tables_to_add:
                             try:
                                 schema = get_table_schema(database, table_name)
@@ -857,14 +846,35 @@ def connector_edit_tables(request, config_pk):
                                     source_schema = schema.get('schema', '')
                                     actual_table_name = table_name
 
-                                table_mapping = TableMapping.objects.create(
+                                # Check if a disabled mapping already exists (from previous removal)
+                                existing_mapping = TableMapping.objects.filter(
                                     replication_config=replication_config,
                                     source_table=actual_table_name,
-                                    target_table=actual_table_name,
-                                    source_schema=source_schema,
-                                    is_enabled=True,
-                                )
+                                    is_enabled=False
+                                ).first()
 
+                                if existing_mapping:
+                                    # Re-enable the existing mapping
+                                    existing_mapping.is_enabled = True
+                                    existing_mapping.source_schema = source_schema
+                                    existing_mapping.save()
+                                    table_mapping = existing_mapping
+
+                                    # Delete old column mappings and recreate fresh ones
+                                    table_mapping.column_mappings.all().delete()
+                                    logger.info(f"Re-enabled existing mapping for table {table_name}")
+                                else:
+                                    # Create new table mapping
+                                    table_mapping = TableMapping.objects.create(
+                                        replication_config=replication_config,
+                                        source_table=actual_table_name,
+                                        target_table=actual_table_name,
+                                        source_schema=source_schema,
+                                        is_enabled=True,
+                                    )
+                                    logger.info(f"Created new mapping for table {table_name}")
+
+                                # Create column mappings
                                 for col in columns:
                                     ColumnMapping.objects.create(
                                         table_mapping=table_mapping,
@@ -877,7 +887,7 @@ def connector_edit_tables(request, config_pk):
                                         is_nullable=col.get('nullable', True),
                                     )
 
-                                logger.info(f"Created mappings for table {table_name}")
+                                logger.info(f"Created {len(columns)} column mappings for table {table_name}")
 
                             except Exception as e:
                                 logger.error(f"Error creating mappings for {table_name}: {e}")
@@ -980,12 +990,12 @@ def connector_edit_tables(request, config_pk):
                                     signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
 
                                     logger.info(f"✅ Database signal sent - ID: {signal_id}")
-                                    logger.info(f"   Signal table: {signal_table}")
-                                    logger.info(f"   Tables: {formatted_tables}")
+                                    logger.debug(f"   Signal table: {signal_table}")
+                                    logger.debug(f"   Tables: {formatted_tables}")
 
                                     # Wait for Debezium to process the signal and confirm source connector is producing
                                     # Poll the source connector topics endpoint to verify new topics appear
-                                    logger.info("Waiting for source connector to process signal and produce to new topics...")
+                                    logger.debug("Waiting for source connector to process signal and produce to new topics...")
                                     max_wait_retries = 15  # 15 * 1 second = 15 seconds max
                                     expected_topic_count = len(all_tables) + 1  # data tables + signal table
                                     for retry in range(max_wait_retries):
@@ -994,21 +1004,21 @@ def connector_edit_tables(request, config_pk):
                                             topics_response = connector_manager.get_connector_topics(replication_config.connector_name)
                                             if topics_response:
                                                 current_topics = topics_response.get(replication_config.connector_name, {}).get('topics', [])
-                                                logger.info(f"⏳ Retry {retry + 1}: Source connector has {len(current_topics)} topics")
+                                                logger.debug(f"Retry {retry + 1}: Source connector has {len(current_topics)} topics")
                                                 # Check if we have topics for the new tables
                                                 if len(current_topics) >= expected_topic_count:
-                                                    logger.info(f"✅ Source connector now producing to {len(current_topics)} topics")
+                                                    logger.debug(f"Source connector now producing to {len(current_topics)} topics")
                                                     break
                                         except Exception as poll_err:
                                             logger.debug(f"Poll error: {poll_err}")
                                     else:
-                                        logger.warning("⚠️ Timeout waiting for new topics, proceeding anyway")
+                                        logger.debug("Timeout waiting for new topics, proceeding anyway")
 
                                     # Reconfigure and restart sink connector to pick up new topics
                                     # Need to update config (not just restart) to force re-evaluation of topics.regex
                                     if replication_config.sink_connector_name:
                                         try:
-                                            logger.info(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
+                                            logger.debug(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
 
                                             # Get target database
                                             target_db = ClientDatabase.objects.filter(
@@ -1074,7 +1084,7 @@ def connector_edit_tables(request, config_pk):
 
                                     # Wait for Debezium to process the signal and confirm source connector is producing
                                     # Poll the source connector topics endpoint to verify new topics appear
-                                    logger.info("Waiting for source connector to process signal and produce to new topics...")
+                                    logger.debug("Waiting for source connector to process signal and produce to new topics...")
                                     max_wait_retries = 15  # 15 * 1 second = 15 seconds max
                                     expected_topic_count = len(all_tables) + 1  # data tables + signal table
                                     for retry in range(max_wait_retries):
@@ -1083,20 +1093,20 @@ def connector_edit_tables(request, config_pk):
                                             topics_response = connector_manager.get_connector_topics(replication_config.connector_name)
                                             if topics_response:
                                                 current_topics = topics_response.get(replication_config.connector_name, {}).get('topics', [])
-                                                logger.info(f"⏳ Retry {retry + 1}: Source connector has {len(current_topics)} topics")
+                                                logger.debug(f"Retry {retry + 1}: Source connector has {len(current_topics)} topics")
                                                 # Check if we have topics for the new tables
                                                 if len(current_topics) >= expected_topic_count:
-                                                    logger.info(f"✅ Source connector now producing to {len(current_topics)} topics")
+                                                    logger.debug(f"Source connector now producing to {len(current_topics)} topics")
                                                     break
                                         except Exception as poll_err:
                                             logger.debug(f"Poll error: {poll_err}")
                                     else:
-                                        logger.warning("⚠️ Timeout waiting for new topics, proceeding anyway")
+                                        logger.debug("Timeout waiting for new topics, proceeding anyway")
 
                                     # Reconfigure and restart sink connector to pick up new topics
                                     if replication_config.sink_connector_name:
                                         try:
-                                            logger.info(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
+                                            logger.debug(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
 
                                             # Get target database
                                             target_db = ClientDatabase.objects.filter(
@@ -1159,12 +1169,12 @@ def connector_edit_tables(request, config_pk):
                                     signal_manager.close()
 
                                     # Restart connector to ensure SignalProcessor polls and processes the signal
-                                    logger.info("Restarting connector to ensure signal is processed...")
+                                    logger.debug("Restarting connector to ensure signal is processed...")
                                     connector_manager.restart_connector(replication_config.connector_name)
 
                                     # Wait for source connector to process signal and produce to new topics
                                     # Poll the source connector topics endpoint to verify new topics appear
-                                    logger.info("Waiting for source connector to process signal and produce to new topics...")
+                                    logger.debug("Waiting for source connector to process signal and produce to new topics...")
                                     max_wait_retries = 15  # 15 * 1 second = 15 seconds max
                                     expected_topic_count = len(all_tables) + 1  # data tables + signal table
                                     for retry in range(max_wait_retries):
@@ -1173,20 +1183,20 @@ def connector_edit_tables(request, config_pk):
                                             topics_response = connector_manager.get_connector_topics(replication_config.connector_name)
                                             if topics_response:
                                                 current_topics = topics_response.get(replication_config.connector_name, {}).get('topics', [])
-                                                logger.info(f"⏳ Retry {retry + 1}: Source connector has {len(current_topics)} topics")
+                                                logger.debug(f"Retry {retry + 1}: Source connector has {len(current_topics)} topics")
                                                 # Check if we have topics for the new tables
                                                 if len(current_topics) >= expected_topic_count:
-                                                    logger.info(f"✅ Source connector now producing to {len(current_topics)} topics")
+                                                    logger.debug(f"Source connector now producing to {len(current_topics)} topics")
                                                     break
                                         except Exception as poll_err:
                                             logger.debug(f"Poll error: {poll_err}")
                                     else:
-                                        logger.warning("⚠️ Timeout waiting for new topics, proceeding anyway")
+                                        logger.debug("Timeout waiting for new topics, proceeding anyway")
 
                                     # Reconfigure sink connector to pick up new topics
                                     if replication_config.sink_connector_name:
                                         try:
-                                            logger.info(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
+                                            logger.debug(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
 
                                             # Get target database
                                             target_db = ClientDatabase.objects.filter(
@@ -1322,77 +1332,23 @@ def connector_edit_tables(request, config_pk):
 
 
 # ========================================
-# Delete Connector with Validations
+# Delete Connector (Global - handles all delete cases)
 # ========================================
 
 def connector_delete(request, config_pk):
     """
     Delete a source connector with validations.
     Uses orchestrator for proper cleanup including topics and target tables.
+    Handles redirect based on 'next' parameter or defaults to global connectors list.
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     database = replication_config.client_database
     client = database.client
+
+    # Determine redirect destination
+    next_url = request.GET.get('next') or request.POST.get('next')
 
     # Check if this is the last connector
-    other_connectors = database.replication_configs.exclude(pk=config_pk).filter(
-        status__in=['configured', 'active', 'paused', 'error']
-    )
-
-    is_last_connector = not other_connectors.exists()
-
-    # POST: Confirm and delete
-    if request.method == 'POST':
-        try:
-            from client.replication.orchestrator import ReplicationOrchestrator
-
-            # Always delete topics and target tables
-            # Use orchestrator for proper cleanup
-            orchestrator = ReplicationOrchestrator(replication_config)
-            success, message = orchestrator.delete_replication(delete_topics=True)
-
-            if success:
-                messages.success(
-                    request,
-                    f"Connector v{replication_config.connector_version} deleted successfully "
-                    "(Topics and target tables deleted)"
-                )
-            else:
-                messages.error(request, f"Error deleting connector: {message}")
-
-            return redirect('connector_list', database_pk=database.id)
-
-        except Exception as e:
-            logger.error(f"Error deleting connector: {e}", exc_info=True)
-            messages.error(request, f"Error deleting connector: {str(e)}")
-            return redirect('connector_delete', config_pk=config_pk)
-
-    # GET: Show confirmation
-    context = {
-        'replication_config': replication_config,
-        'database': database,
-        'client': client,
-        'is_last_connector': is_last_connector,
-        'table_count': replication_config.get_table_count(),
-    }
-
-    return render(request, 'client/connectors/connector_delete.html', context)
-
-
-# ========================================
-# Delete Connector from Global List (Uses Orchestrator)
-# ========================================
-
-def connector_delete_global(request, config_pk):
-    """
-    Delete a connector from the global connectors list using the orchestrator.
-    Provides option to delete topics and target tables.
-    """
-    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-    database = replication_config.client_database
-    client = database.client
-
-    # Check if this is the last connector for this database
     other_connectors = database.replication_configs.exclude(pk=config_pk).filter(
         status__in=['configured', 'active', 'paused', 'error']
     )
@@ -1417,12 +1373,18 @@ def connector_delete_global(request, config_pk):
             else:
                 messages.error(request, f"Error deleting connector: {message}")
 
-            return redirect('connectors_list')
+            # Redirect based on 'next' parameter
+            if next_url == 'database':
+                return redirect('connector_list', database_pk=database.id)
+            elif next_url == 'client':
+                return redirect('client_connectors_list', client_pk=client.id)
+            else:
+                return redirect('connectors_list')
 
         except Exception as e:
             logger.error(f"Error deleting connector: {e}", exc_info=True)
             messages.error(request, f"Error deleting connector: {str(e)}")
-            return redirect('connector_delete_global', config_pk=config_pk)
+            return redirect('connector_delete', config_pk=config_pk)
 
     # GET: Show confirmation
     context = {
@@ -1431,7 +1393,7 @@ def connector_delete_global(request, config_pk):
         'client': client,
         'is_last_connector': is_last_connector,
         'table_count': replication_config.get_table_count(),
-        'from_global_list': True,  # Flag to show different messaging
+        'next': next_url,
     }
 
     return render(request, 'client/connectors/connector_delete.html', context)
