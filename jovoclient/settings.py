@@ -14,6 +14,9 @@ from pathlib import Path
 import pymysql
 import os
 pymysql.install_as_MySQLdb()
+import json
+import logging
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv(".env")
@@ -53,6 +56,7 @@ INSTALLED_APPS = [
     'django_cotton',
     'django_celery_beat',
     'django_celery_results',
+    'django_prometheus',
    
     # local app
     'client',
@@ -67,6 +71,7 @@ if DEBUG:
 
 
 MIDDLEWARE = [    
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -74,6 +79,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
     
 ]
 
@@ -108,7 +114,7 @@ WSGI_APPLICATION = 'jovoclient.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.mysql',
+        'ENGINE': 'django_prometheus.db.backends.mysql',  # Changed from django.db.backends.mysql
         'NAME': os.getenv('DB_NAME', 'client'),
         'USER': os.getenv('DB_USER', 'root'),
         'PASSWORD': os.getenv('DB_PASSWORD', 'root'),
@@ -117,6 +123,17 @@ DATABASES = {
         'CONN_MAX_AGE': 600,
     }
 }
+
+PROMETHEUS_METRIC_NAMESPACE = 'jovoclient'
+
+PROMETHEUS_LATENCY_BUCKETS = (
+    0.1, 0.25, 0.5, 0.75, 1.0,      # Fast queries (< 1s)
+    2.0, 3.0, 5.0, 7.5, 10.0,       # Medium queries (1-10s)
+    15.0, 30.0, 60.0, 120.0, 300.0, # Slow queries (1-5 min)
+    float("inf")
+)
+
+PROMETHEUS_EXPORT_MIGRATIONS = False
 
 
 # Password validation
@@ -192,45 +209,202 @@ ENVIRONMENT = 'development'  # or 'staging', 'production'
 
 
 
+# Custom JSON formatter for structured logging
+class JSONFormatter(logging.Formatter):
+    """
+    Custom formatter that outputs logs in JSON format for Loki
+    """
+    def format(self, record):
+        log_data = {
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'level': record.levelname,
+            'logger': record.name,
+            'message': record.getMessage(),
+            'module': record.module,
+            'function': record.funcName,
+            'line': record.lineno,
+        }
+        
+        # Add exception info if present
+        if record.exc_info:
+            log_data['exception'] = self.formatException(record.exc_info)
+        
+        # Add extra fields if present
+        if hasattr(record, 'client_id'):
+            log_data['client_id'] = record.client_id
+        if hasattr(record, 'connector_name'):
+            log_data['connector_name'] = record.connector_name
+        if hasattr(record, 'table_name'):
+            log_data['table_name'] = record.table_name
+        if hasattr(record, 'operation'):
+            log_data['operation'] = record.operation
+        if hasattr(record, 'duration'):
+            log_data['duration_seconds'] = record.duration
+            
+        return json.dumps(log_data)
+
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    
     'formatters': {
+        # JSON formatter for production/monitoring
+        'json': {
+            '()': JSONFormatter,
+        },
+        # Human-readable formatter for console during development
         'verbose': {
-            'format': '{levelname} {asctime} {module} {message}',
+            'format': '[{levelname}] {asctime} {name} {module}.{funcName}:{lineno} - {message}',
+            'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S',
+        },
+        # Simple formatter for console
+        'simple': {
+            'format': '[{levelname}] {name} - {message}',
             'style': '{',
         },
     },
+    
+    'filters': {
+        'require_debug_false': {
+            '()': 'django.utils.log.RequireDebugFalse',
+        },
+        'require_debug_true': {
+            '()': 'django.utils.log.RequireDebugTrue',
+        },
+    },
+    
     'handlers': {
+        # Console output - human readable for development
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        
+        # JSON file - for Promtail to collect
+        'json_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.TimedRotatingFileHandler',
+            'filename': 'logs/application.json',
+            'when': 'H',              # Rotate every hour
+            'interval': 1,
+            'backupCount': 48,        # Keep 48 hours
+            'formatter': 'json',
+            'encoding': 'utf-8',
+        },
+        
+        # Standard file - for backward compatibility
         'file': {
             'level': 'INFO',
             'class': 'logging.handlers.TimedRotatingFileHandler',
             'filename': 'logs/replication.log',
-            'when': 'H',                # Rotate every hour
-            'interval': 1,              # 1 hour
-            'backupCount': 48,          # Keep last 48 hours (optional)
+            'when': 'H',
+            'interval': 1,
+            'backupCount': 48,
             'formatter': 'verbose',
             'encoding': 'utf-8',
         },
-        'console': {
-            'level': 'DEBUG',
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
+        
+        # Error-only file - JSON format
+        'error_json_file': {
+            'level': 'ERROR',
+            'class': 'logging.handlers.TimedRotatingFileHandler',
+            'filename': 'logs/errors.json',
+            'when': 'D',              # Daily rotation for errors
+            'interval': 1,
+            'backupCount': 30,        # Keep 30 days
+            'formatter': 'json',
+            'encoding': 'utf-8',
+        },
+        
+        # Celery task logs - JSON format
+        'celery_json_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.TimedRotatingFileHandler',
+            'filename': 'logs/celery.json',
+            'when': 'H',
+            'interval': 1,
+            'backupCount': 48,
+            'formatter': 'json',
+            'encoding': 'utf-8',
+        },
+        
+        # CDC-specific logs - JSON format
+        'cdc_json_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.TimedRotatingFileHandler',
+            'filename': 'logs/cdc.json',
+            'when': 'H',
+            'interval': 1,
+            'backupCount': 72,        # Keep 3 days for CDC logs
+            'formatter': 'json',
+            'encoding': 'utf-8',
         },
     },
-    'root': {
-        'handlers': ['file', 'console'],
-        'level': 'INFO',
-    },
+    
     'loggers': {
+        # Root logger - catches everything
+        '': {
+            'handlers': ['console', 'json_file', 'error_json_file'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        
+        # Django framework logs
         'django': {
-            'handlers': ['console'],
+            'handlers': ['console', 'json_file'],
             'level': 'INFO',
             'propagate': False,
         },
+        
+        # Django database queries (set to WARNING to reduce noise)
         'django.db.backends': {
             'handlers': ['console'],
             'level': 'WARNING',
+            'propagate': False,
+        },
+        
+        # Django request logs
+        'django.request': {
+            'handlers': ['console', 'json_file', 'error_json_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        
+        # Celery logs
+        'celery': {
+            'handlers': ['console', 'celery_json_file', 'error_json_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        
+        # Your application logs
+        'client': {
+            'handlers': ['console', 'json_file', 'error_json_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        
+        # CDC-specific logger
+        'client.cdc': {
+            'handlers': ['console', 'cdc_json_file', 'error_json_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        
+        # Kafka/Debezium logs
+        'client.kafka': {
+            'handlers': ['console', 'cdc_json_file', 'error_json_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        
+        # Database operations
+        'client.database': {
+            'handlers': ['console', 'json_file', 'error_json_file'],
+            'level': 'INFO',
             'propagate': False,
         },
     },
@@ -338,7 +512,7 @@ DEBEZIUM_CONFIG = {
         'kafka-1:29092,kafka-2:29092,kafka-3:29092'
     ),
     
-    'SCHEMA_REGISTRY_URL': os.getenv('SCHEMA_REGISTRY_URL', 'http://localhost:8081'),
+    'SCHEMA_REGISTRY_URL': os.getenv('SCHEMA_REGISTRY_URL', 'http://localhost:8082'),
     'CONSUMER_GROUP_PREFIX': 'cdc_consumer',
 }
 

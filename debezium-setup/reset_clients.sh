@@ -4,8 +4,8 @@ set -e
 echo "🔻 Stopping and removing containers + volumes..."
 docker compose down -v
 
-echo "🚀 Starting containers..."
-docker compose up -d
+echo "🚀 Starting containers (rebuild image)..."
+docker compose up -d --build
 
 echo "🧹 Removing old migrations..."
 docker compose exec django bash -c "rm -rf client/migrations/"
@@ -14,11 +14,6 @@ echo "✔️ Deleted client/migrations/"
 echo "🛠 Running makemigrations + migrate..."
 docker compose exec django python manage.py makemigrations client
 docker compose exec django python manage.py migrate
-
-echo "📦 Installing database drivers..."
-docker compose exec django pip install --upgrade pip
-docker compose exec django pip install pymssql
-docker compose exec django pip install oracledb   # ✅ install only
 
 echo "➕ Resetting client & adding DB connectors..."
 
@@ -84,9 +79,9 @@ ClientDatabase.objects.create(
     password="cdc_pass",
     database_name="XEPDB1",
     oracle_connection_mode="service",
-    )
+)
 
-print("✔️ Client and database connectors created (Oracle skipped)")
+print("✔️ Client and database connectors created")
 EOF
 
 echo "🎉 Reset complete!"

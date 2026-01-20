@@ -1,0 +1,323 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # ============================================
+  # Docker Container Logs
+  # ============================================
+  - job_name: docker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*-json.log
+
+    pipeline_stages:
+      # Parse JSON log from Docker
+      - json:
+          expressions:
+            output: log
+            stream: stream
+            attrs: attrs
+            tag: attrs.tag
+
+      # Extract container name from tag
+      - regex:
+          source: tag
+          expression: '^(?P<container_name>[^/]+)'
+
+      # Add labels based on container name
+      - labels:
+          container_name:
+          stream:
+
+      # Rename containers to service names
+      - replace:
+          expression: '(?P<service>django|celery-worker|celery-consumer|celery-beat|mysql|redis|kafka-.*|prometheus|grafana|loki)'
+          source: container_name
+          target: service
+
+      # Set log level if found in the log
+      - regex:
+          source: output
+          expression: '\[(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\]'
+
+      - labels:
+          level:
+
+      # Output the actual log message
+      - output:
+          source: output
+
+  # ============================================
+  # Django Application Logs - JSON Format
+  # ============================================
+  - job_name: django-json-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: django
+          service: django
+          __path__: /app/logs/application.json
+
+    pipeline_stages:
+      # Parse JSON log
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            logger: logger
+            message: message
+            module: module
+            function: function
+            client_id: client_id
+            connector_name: connector_name
+            table_name: table_name
+            operation: operation
+            duration: duration_seconds
+            error_type: error_type
+            status: status
+
+      # Set labels from parsed fields
+      - labels:
+          level:
+          logger:
+          module:
+          operation:
+          status:
+
+      # Parse timestamp
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+
+      # Output the message
+      - output:
+          source: message
+
+  # ============================================
+  # CDC-Specific Logs - JSON Format
+  # ============================================
+  - job_name: cdc-json-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: cdc
+          service: cdc
+          __path__: /app/logs/cdc.json
+
+    pipeline_stages:
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            message: message
+            client_id: client_id
+            connector_name: connector_name
+            table_name: table_name
+            operation: operation
+            duration: duration_seconds
+            status: status
+
+      - labels:
+          level:
+          operation:
+          status:
+
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+
+      - output:
+          source: message
+
+  # ============================================
+  # Celery Logs - JSON Format
+  # ============================================
+  - job_name: celery-json-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: celery
+          service: celery
+          __path__: /app/logs/celery.json
+
+    pipeline_stages:
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            message: message
+            task_name: task_name
+            task_id: task_id
+            queue: queue
+            operation: operation
+            duration: duration_seconds
+            status: status
+
+      - labels:
+          level:
+          queue:
+          operation:
+          status:
+
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+
+      - output:
+          source: message
+
+  # ============================================
+  # Error Logs - JSON Format
+  # ============================================
+  - job_name: error-json-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: errors
+          service: django
+          severity: error
+          __path__: /app/logs/errors.json
+
+    pipeline_stages:
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            message: message
+            error_type: error_type
+            error_message: error_message
+            client_id: client_id
+            operation: operation
+
+      - labels:
+          level:
+          error_type:
+          operation:
+
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+
+      - output:
+          source: message
+
+  # ============================================
+  # Celery Worker Logs
+  # ============================================
+  - job_name: celery-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: celery
+          __path__: /var/lib/docker/containers/*/*-json.log
+
+    pipeline_stages:
+      - json:
+          expressions:
+            output: log
+            tag: attrs.tag
+
+      # Only process celery containers
+      - match:
+          selector: '{tag=~"celery.*"}'
+          stages:
+            - regex:
+                source: output
+                expression: '\[(?P<timestamp>[\d-]+\s+[\d:,]+)\:\s*(?P<level>\w+)/(?P<worker>[\w@]+)\]\s+(?P<message>.*)$'
+
+            - labels:
+                level:
+                worker:
+
+            - timestamp:
+                source: timestamp
+                format: '2006-01-02 15:04:05,000'
+
+            - output:
+                source: message
+
+  # ============================================
+  # Kafka Logs
+  # ============================================
+  - job_name: kafka-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: kafka
+          __path__: /var/lib/docker/containers/*/*-json.log
+
+    pipeline_stages:
+      - json:
+          expressions:
+            output: log
+            tag: attrs.tag
+
+      # Only process kafka containers
+      - match:
+          selector: '{tag=~"kafka.*"}'
+          stages:
+            - regex:
+                source: output
+                expression: '^\[(?P<timestamp>[\d-]+\s+[\d:,]+)\]\s+(?P<level>\w+)\s+(?P<message>.*)$'
+
+            - labels:
+                level:
+
+            - timestamp:
+                source: timestamp
+                format: '2006-01-02 15:04:05,000'
+
+            - output:
+                source: message
+
+  # ============================================
+  # MySQL Logs
+  # ============================================
+  - job_name: mysql-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: mysql
+          service: mysql
+          __path__: /var/lib/docker/containers/*/*-json.log
+
+    pipeline_stages:
+      - json:
+          expressions:
+            output: log
+            tag: attrs.tag
+
+      # Only process mysql container
+      - match:
+          selector: '{tag="mysql_wsl"}'
+          stages:
+            - regex:
+                source: output
+                expression: '^(?P<timestamp>[\d-]+T[\d:\.]+Z)\s+(?P<thread>\d+)\s+\[(?P<level>\w+)\]\s+(?P<message>.*)$'
+
+            - labels:
+                level:
+
+            - timestamp:
+                source: timestamp
+                format: RFC3339Nano
+
+            - output:
+                source: message

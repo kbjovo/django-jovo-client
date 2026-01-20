@@ -1,68 +1,70 @@
 # ============================================
 # Multi-stage Dockerfile for Django + Tailwind
-# Uses uv for Python dependencies
+# Uses uv + uv.lock
+# Compatible with uv versions without --system
 # ============================================
 
-FROM python:3.11-slim AS base
+FROM python:3.13-slim AS base
 
-# Install system dependencies
+# -----------------------------
+# System dependencies
+# -----------------------------
 RUN apt-get update && apt-get install -y \
     curl \
     gcc \
     g++ \
-    default-libmysqlclient-dev \
     pkg-config \
-    # ADD FreeTDS Development package here:
+    default-libmysqlclient-dev \
     freetds-dev \
-    # You might also need the runtime library if it's not pulled in automatically:
     freetds-bin \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 20.x for Tailwind
+# -----------------------------
+# Node.js 20.x for Tailwind
+# -----------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# -----------------------------
 # Install uv
+# -----------------------------
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Set environment variables
+# -----------------------------
+# Env
+# -----------------------------
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    UV_SYSTEM_PYTHON=1
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
 # ============================================
-# Stage 1: Install Python dependencies
+# Stage 1: Install Python dependencies (locked)
 # ============================================
 FROM base AS python-deps
 
-# Copy dependency files
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
-# Install Python dependencies using uv
-RUN uv pip install --system -r pyproject.toml
-RUN uv sync
+# Create venv + install deps from lock
+RUN uv sync --frozen --no-dev
 
 # ============================================
 # Stage 2: Build Tailwind CSS
 # ============================================
 FROM base AS tailwind-builder
 
-# Copy Python dependencies from previous stage
-COPY --from=python-deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=python-deps /usr/local/bin /usr/local/bin
+# Copy the venv from deps stage
+COPY --from=python-deps /opt/venv /opt/venv
 
-# Copy application code
 COPY . .
 
-# Install Tailwind dependencies
 RUN if [ -f theme/static_src/package.json ]; then \
-        cd theme/static_src && npm install; \
+        cd theme/static_src && npm ci; \
     fi
 
-# Build Tailwind CSS for production
 RUN python manage.py tailwind build || echo "Tailwind build skipped"
 
 # ============================================
@@ -70,24 +72,19 @@ RUN python manage.py tailwind build || echo "Tailwind build skipped"
 # ============================================
 FROM base AS production
 
-# Copy Python dependencies
-COPY --from=python-deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=python-deps /usr/local/bin /usr/local/bin
+# Copy venv
+COPY --from=python-deps /opt/venv /opt/venv
 
-# Copy application code
+# Copy app code
 COPY . .
 
-# Copy built Tailwind assets
+# Copy built Tailwind output
 COPY --from=tailwind-builder /app/theme/static/css /app/theme/static/css
 
-# Create necessary directories
 RUN mkdir -p /app/staticfiles /app/mediafiles
 
-# Collect static files
 RUN python manage.py collectstatic --noinput || echo "Static collection skipped"
 
-# Expose port
 EXPOSE 8000
 
-# Default command (can be overridden in docker-compose)
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

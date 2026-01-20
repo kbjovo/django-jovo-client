@@ -48,7 +48,6 @@ services:
       - redis-data:/data
     networks:
       - replication-network
-    # Change this line:
     command: redis-server --appendonly yes --bind 0.0.0.0 --protected-mode no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -227,7 +226,7 @@ services:
       kafka-3:
         condition: service_healthy
     ports:
-      - "8081:8081"
+      - "8082:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
@@ -328,6 +327,7 @@ services:
       - ..:/app
       - django-static:/app/staticfiles
       - django-media:/app/mediafiles
+      - ../logs:/app/logs
     networks:
       - replication-network
     command: python manage.py runserver 0.0.0.0:8000
@@ -357,18 +357,14 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=jovoclient.settings
       - HOSTNAME=celery-worker
-      # Redis connection settings to prevent idle timeouts
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      # Visibility timeout must be longer than longest task
       - CELERY_VISIBILITY_TIMEOUT=43200
       - CELERY_SOCKET_TIMEOUT=120
       - CELERY_SOCKET_CONNECT_TIMEOUT=30
       - CELERY_HEALTH_CHECK_INTERVAL=30
-      # Task time limits
       - CELERY_TASK_TIME_LIMIT=3600
       - CELERY_TASK_SOFT_TIME_LIMIT=3300
-      # Worker settings
       - CELERY_WORKER_PREFETCH_MULTIPLIER=1
       - CELERY_WORKER_MAX_TASKS_PER_CHILD=1000
       - CELERY_TASK_ACKS_LATE=True
@@ -377,6 +373,7 @@ services:
       - ../.env.docker
     volumes:
       - ..:/app
+      - ../logs:/app/logs 
     networks:
       - replication-network
     command: 
@@ -421,18 +418,14 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=jovoclient.settings
       - HOSTNAME=celery-consumer
-      # Redis connection settings to prevent idle timeouts
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      # Visibility timeout must be longer than longest task (12 hours default)
       - CELERY_VISIBILITY_TIMEOUT=43200
       - CELERY_SOCKET_TIMEOUT=120
       - CELERY_SOCKET_CONNECT_TIMEOUT=30
       - CELERY_HEALTH_CHECK_INTERVAL=30
-      # Task time limits
       - CELERY_TASK_TIME_LIMIT=7200
       - CELERY_TASK_SOFT_TIME_LIMIT=6900
-      # Worker settings
       - CELERY_WORKER_PREFETCH_MULTIPLIER=1
       - CELERY_WORKER_MAX_TASKS_PER_CHILD=1000
       - CELERY_TASK_ACKS_LATE=True
@@ -441,6 +434,7 @@ services:
       - ../.env.docker
     volumes:
       - ..:/app
+      - ../logs:/app/logs 
     networks:
       - replication-network
     command:
@@ -485,9 +479,208 @@ services:
       - ../.env.docker
     volumes:
       - ..:/app
+      - ../logs:/app/logs 
     networks:
       - replication-network
     command: celery -A jovoclient beat -l info
+    restart: unless-stopped
+
+  # ============================================
+  # MONITORING STACK - NEW SERVICES BELOW
+  # ============================================
+
+  # ============================================
+  # Prometheus - Metrics Collection & Storage
+  # ============================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: prometheus
+    hostname: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - replication-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ============================================
+  # Grafana - Visualization Dashboard
+  # ============================================
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: grafana
+    hostname: grafana
+    depends_on:
+      - prometheus
+      - loki
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=redis-datasource
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - replication-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ============================================
+  # Loki - Log Aggregation System
+  # ============================================
+  loki:
+    image: grafana/loki:2.9.3
+    container_name: loki
+    hostname: loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - replication-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ============================================
+  # Promtail - Log Shipping Agent
+  # ============================================
+  promtail:
+    image: grafana/promtail:2.9.3
+    container_name: promtail
+    hostname: promtail
+    depends_on:
+      - loki
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../logs:/app/logs:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - replication-network
+    restart: unless-stopped
+
+  # ============================================
+  # EXPORTERS FOR INFRASTRUCTURE METRICS
+  # ============================================
+
+  # ============================================
+  # Redis Exporter - Metrics for Redis
+  # ============================================
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.55.0-alpine
+    container_name: redis-exporter
+    hostname: redis-exporter
+    depends_on:
+      - redis
+    ports:
+      - "9121:9121"
+    environment:
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ""
+    networks:
+      - replication-network
+    restart: unless-stopped
+
+  # ============================================
+  # MySQL Exporter - Metrics for MySQL
+  # ============================================
+  mysql-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: mysql-exporter
+    hostname: mysql-exporter
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "9104:9104"
+    environment:
+      DATA_SOURCE_NAME: "root:root@(mysql:3306)/"
+    command:
+      - "--collect.info_schema.processlist"
+      - "--collect.info_schema.innodb_metrics"
+      - "--collect.info_schema.tablestats"
+      - "--collect.info_schema.tables"
+      - "--collect.info_schema.userstats"
+      - "--collect.engine_innodb_status"
+    networks:
+      - replication-network
+    restart: unless-stopped
+
+  # ============================================
+  # cAdvisor - Container Metrics
+  # ============================================
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    container_name: cadvisor
+    hostname: cadvisor
+    ports:
+      - "8085:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg
+    networks:
+      - replication-network
+    restart: unless-stopped
+
+  # ============================================
+  # Node Exporter - Host Machine Metrics
+  # ============================================
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: node-exporter
+    hostname: node-exporter
+    ports:
+      - "9100:9100"
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - replication-network
     restart: unless-stopped
 
 volumes:
@@ -507,11 +700,15 @@ volumes:
     driver: local
   celery-beat-schedule:
     driver: local
+  # New volumes for monitoring
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  loki-data:
+    driver: local
 
 networks:
   replication-network:
     driver: bridge
     name: replication-network
-
-  
-
