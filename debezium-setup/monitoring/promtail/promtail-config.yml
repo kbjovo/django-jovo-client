@@ -10,50 +10,101 @@ clients:
 
 scrape_configs:
   # ============================================
-  # Docker Container Logs
+  # ALL Docker Container Logs - Unified Capture
   # ============================================
-  - job_name: docker
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: docker
-          __path__: /var/lib/docker/containers/*/*-json.log
+  - job_name: docker-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=jovoclient"]
+    
+    relabel_configs:
+      # Extract container name
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container_name'
+      
+      # Extract container ID
+      - source_labels: ['__meta_docker_container_id']
+        target_label: 'container_id'
+      
+      # Map container names to service names
+      - source_labels: ['container_name']
+        regex: '(django).*'
+        target_label: 'service'
+        replacement: 'django'
+      
+      - source_labels: ['container_name']
+        regex: '(celery-worker).*'
+        target_label: 'service'
+        replacement: 'celery-worker'
+      
+      - source_labels: ['container_name']
+        regex: '(celery-consumer).*'
+        target_label: 'service'
+        replacement: 'celery-consumer'
+      
+      - source_labels: ['container_name']
+        regex: '(celery-beat).*'
+        target_label: 'service'
+        replacement: 'celery-beat'
+      
+      - source_labels: ['container_name']
+        regex: '(kafka-connect).*'
+        target_label: 'service'
+        replacement: 'kafka-connect'
+      
+      - source_labels: ['container_name']
+        regex: '(kafka-[123]).*'
+        target_label: 'service'
+        replacement: 'kafka'
+      
+      - source_labels: ['container_name']
+        regex: '(schema-registry).*'
+        target_label: 'service'
+        replacement: 'schema-registry'
+      
+      - source_labels: ['container_name']
+        regex: '(mysql.*).*'
+        target_label: 'service'
+        replacement: 'mysql'
+      
+      - source_labels: ['container_name']
+        regex: '(redis).*'
+        target_label: 'service'
+        replacement: 'redis'
 
     pipeline_stages:
-      # Parse JSON log from Docker
+      # Parse Docker JSON logs
       - json:
           expressions:
             output: log
             stream: stream
-            attrs: attrs
-            tag: attrs.tag
-
-      # Extract container name from tag
-      - regex:
-          source: tag
-          expression: '^(?P<container_name>[^/]+)'
-
-      # Add labels based on container name
-      - labels:
-          container_name:
-          stream:
-
-      # Rename containers to service names
-      - replace:
-          expression: '(?P<service>django|celery-worker|celery-consumer|celery-beat|mysql|redis|kafka-.*|prometheus|grafana|loki)'
-          source: container_name
-          target: service
-
-      # Set log level if found in the log
+            timestamp: time
+      
+      # Parse timestamp
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+      
+      # Try to extract log level from various formats
       - regex:
           source: output
-          expression: '\[(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\]'
-
+          expression: '.*\[(?P<level>DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL|FATAL)\].*'
+      
+      # If level not found, try another pattern
+      - regex:
+          source: output
+          expression: '.*(?P<level>DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL|FATAL)\s.*'
+      
+      # Add level as label if found
       - labels:
           level:
-
-      # Output the actual log message
+          stream:
+      
+      # Output the log message
       - output:
           source: output
 
@@ -65,12 +116,12 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          job: django
+          job: django-json
           service: django
+          log_type: application
           __path__: /app/logs/application.json
 
     pipeline_stages:
-      # Parse JSON log
       - json:
           expressions:
             timestamp: timestamp
@@ -79,15 +130,16 @@ scrape_configs:
             message: message
             module: module
             function: function
+            line: line
             client_id: client_id
             connector_name: connector_name
             table_name: table_name
             operation: operation
             duration: duration_seconds
             error_type: error_type
+            error_message: error_message
             status: status
 
-      # Set labels from parsed fields
       - labels:
           level:
           logger:
@@ -95,12 +147,10 @@ scrape_configs:
           operation:
           status:
 
-      # Parse timestamp
       - timestamp:
           source: timestamp
           format: RFC3339Nano
 
-      # Output the message
       - output:
           source: message
 
@@ -112,8 +162,9 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          job: cdc
+          job: cdc-json
           service: cdc
+          log_type: cdc
           __path__: /app/logs/cdc.json
 
     pipeline_stages:
@@ -121,16 +172,20 @@ scrape_configs:
           expressions:
             timestamp: timestamp
             level: level
+            logger: logger
             message: message
+            module: module
             client_id: client_id
             connector_name: connector_name
             table_name: table_name
             operation: operation
             duration: duration_seconds
             status: status
+            error_type: error_type
 
       - labels:
           level:
+          logger:
           operation:
           status:
 
@@ -149,8 +204,9 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          job: celery
+          job: celery-json
           service: celery
+          log_type: celery
           __path__: /app/logs/celery.json
 
     pipeline_stages:
@@ -158,6 +214,7 @@ scrape_configs:
           expressions:
             timestamp: timestamp
             level: level
+            logger: logger
             message: message
             task_name: task_name
             task_id: task_id
@@ -165,9 +222,11 @@ scrape_configs:
             operation: operation
             duration: duration_seconds
             status: status
+            error_type: error_type
 
       - labels:
           level:
+          logger:
           queue:
           operation:
           status:
@@ -187,8 +246,9 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          job: errors
-          service: django
+          job: error-json
+          service: errors
+          log_type: error
           severity: error
           __path__: /app/logs/errors.json
 
@@ -197,14 +257,18 @@ scrape_configs:
           expressions:
             timestamp: timestamp
             level: level
+            logger: logger
             message: message
+            module: module
             error_type: error_type
             error_message: error_message
+            exception: exception
             client_id: client_id
             operation: operation
 
       - labels:
           level:
+          logger:
           error_type:
           operation:
 
@@ -216,108 +280,180 @@ scrape_configs:
           source: message
 
   # ============================================
-  # Celery Worker Logs
+  # Kafka Connect Specific Parsing
   # ============================================
-  - job_name: celery-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: celery
-          __path__: /var/lib/docker/containers/*/*-json.log
+  - job_name: kafka-connect-logs
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["kafka-connect"]
+    
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        target_label: 'container_name'
+      - replacement: 'kafka-connect'
+        target_label: 'service'
 
     pipeline_stages:
       - json:
           expressions:
             output: log
-            tag: attrs.tag
-
-      # Only process celery containers
-      - match:
-          selector: '{tag=~"celery.*"}'
-          stages:
-            - regex:
-                source: output
-                expression: '\[(?P<timestamp>[\d-]+\s+[\d:,]+)\:\s*(?P<level>\w+)/(?P<worker>[\w@]+)\]\s+(?P<message>.*)$'
-
-            - labels:
-                level:
-                worker:
-
-            - timestamp:
-                source: timestamp
-                format: '2006-01-02 15:04:05,000'
-
-            - output:
-                source: message
+            stream: stream
+      
+      # Parse Kafka Connect log format
+      - regex:
+          source: output
+          expression: '^\[(?P<timestamp>[\d-]+\s+[\d:,]+)\]\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?P<logger>[\w\.]+)\s+-\s+(?P<message>.*)$'
+      
+      - labels:
+          level:
+          logger:
+      
+      - timestamp:
+          source: timestamp
+          format: '2006-01-02 15:04:05,000'
+      
+      - output:
+          source: message
 
   # ============================================
-  # Kafka Logs
+  # Kafka Broker Logs
   # ============================================
-  - job_name: kafka-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: kafka
-          __path__: /var/lib/docker/containers/*/*-json.log
+  - job_name: kafka-broker-logs
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["kafka-1", "kafka-2", "kafka-3"]
+    
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        target_label: 'container_name'
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(kafka-[123])'
+        target_label: 'broker_id'
+      - replacement: 'kafka'
+        target_label: 'service'
 
     pipeline_stages:
       - json:
           expressions:
             output: log
-            tag: attrs.tag
-
-      # Only process kafka containers
-      - match:
-          selector: '{tag=~"kafka.*"}'
-          stages:
-            - regex:
-                source: output
-                expression: '^\[(?P<timestamp>[\d-]+\s+[\d:,]+)\]\s+(?P<level>\w+)\s+(?P<message>.*)$'
-
-            - labels:
-                level:
-
-            - timestamp:
-                source: timestamp
-                format: '2006-01-02 15:04:05,000'
-
-            - output:
-                source: message
+            stream: stream
+      
+      # Parse Kafka log format
+      - regex:
+          source: output
+          expression: '^\[(?P<timestamp>[\d-]+\s+[\d:,]+)\]\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\s+(?P<message>.*)$'
+      
+      - labels:
+          level:
+      
+      - timestamp:
+          source: timestamp
+          format: '2006-01-02 15:04:05,000'
+      
+      - output:
+          source: message
 
   # ============================================
   # MySQL Logs
   # ============================================
   - job_name: mysql-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: mysql
-          service: mysql
-          __path__: /var/lib/docker/containers/*/*-json.log
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["mysql_wsl"]
+    
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        target_label: 'container_name'
+      - replacement: 'mysql'
+        target_label: 'service'
 
     pipeline_stages:
       - json:
           expressions:
             output: log
-            tag: attrs.tag
+            stream: stream
+      
+      # Parse MySQL log format
+      - regex:
+          source: output
+          expression: '^(?P<timestamp>[\d-]+T[\d:\.]+Z)\s+(?P<thread>\d+)\s+\[(?P<level>\w+)\]\s+(\[(?P<subsystem>[\w\.]+)\]\s+)?(?P<message>.*)$'
+      
+      - labels:
+          level:
+          subsystem:
+      
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+      
+      - output:
+          source: message
 
-      # Only process mysql container
-      - match:
-          selector: '{tag="mysql_wsl"}'
-          stages:
-            - regex:
-                source: output
-                expression: '^(?P<timestamp>[\d-]+T[\d:\.]+Z)\s+(?P<thread>\d+)\s+\[(?P<level>\w+)\]\s+(?P<message>.*)$'
+  # ============================================
+  # Redis Logs
+  # ============================================
+  - job_name: redis-logs
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["redis"]
+    
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        target_label: 'container_name'
+      - replacement: 'redis'
+        target_label: 'service'
 
-            - labels:
-                level:
-
-            - timestamp:
-                source: timestamp
-                format: RFC3339Nano
-
-            - output:
-                source: message
+    pipeline_stages:
+      - json:
+          expressions:
+            output: log
+            stream: stream
+      
+      # Parse Redis log format
+      - regex:
+          source: output
+          expression: '^(?P<pid>\d+):(?P<role>\w)\s+(?P<timestamp>[\d]+\s+[\w]+\s+[\d]+\s+[\d:]+)\s+(?P<level>[\.\*\-#])\s+(?P<message>.*)$'
+      
+      # Map Redis log symbols to levels
+      - replace:
+          expression: '^\.$'
+          source: level
+          target: level
+          replace: 'DEBUG'
+      
+      - replace:
+          expression: '^\*$'
+          source: level
+          target: level
+          replace: 'INFO'
+      
+      - replace:
+          expression: '^-$'
+          source: level
+          target: level
+          replace: 'WARNING'
+      
+      - replace:
+          expression: '^#$'
+          source: level
+          target: level
+          replace: 'ERROR'
+      
+      - labels:
+          level:
+          role:
+      
+      - output:
+          source: message

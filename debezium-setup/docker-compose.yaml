@@ -576,21 +576,33 @@ services:
   # ============================================
   # Promtail - Log Shipping Agent
   # ============================================
+  # ============================================
+  # Promtail - ENHANCED Log Shipping Agent
+  # ============================================
   promtail:
     image: grafana/promtail:2.9.3
     container_name: promtail
     hostname: promtail
+    user: root  # Important for Docker socket access
     depends_on:
       - loki
     volumes:
+      # Promtail config
       - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      # Docker container logs
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # Docker socket for service discovery
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Application JSON logs
       - ../logs:/app/logs:ro
+      # Promtail positions file
+      - promtail-positions:/tmp
     command: -config.file=/etc/promtail/config.yml
     networks:
       - replication-network
     restart: unless-stopped
+    environment:
+      - HOSTNAME=promtail
 
   # ============================================
   # EXPORTERS FOR INFRASTRUCTURE METRICS
@@ -706,6 +718,9 @@ volumes:
   grafana-data:
     driver: local
   loki-data:
+    driver: local
+
+  promtail-positions:
     driver: local
 
 networks:
