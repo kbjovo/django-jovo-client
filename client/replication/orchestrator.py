@@ -14,9 +14,10 @@ from django.utils import timezone
 from django.conf import settings
 
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
-from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
+from jovoclient.utils.kafka.topic_manager import KafkaTopicManager, format_topic_name
 from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
+from client.utils.table_creator import drop_tables_for_mappings
 from .validators import ReplicationValidator
 from sqlalchemy import text
 
@@ -342,13 +343,21 @@ class ReplicationOrchestrator:
                 else:
                     self._log_warning(f"⚠️ {message}")
 
-                # Also drop target database tables for these topics
+                # Also drop target database tables
                 self._log_info("Dropping target database tables...")
-                success, message = self._drop_target_tables()
-                if success:
-                    self._log_info(f"✓ {message}")
+                from client.models.database import ClientDatabase
+                client = self.config.client_database.client
+                target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+
+                if target_db:
+                    enabled_tables = self.config.table_mappings.filter(is_enabled=True)
+                    success, message = drop_tables_for_mappings(target_db, enabled_tables)
+                    if success:
+                        self._log_info(f"✓ {message}")
+                    else:
+                        self._log_warning(f"⚠️ {message}")
                 else:
-                    self._log_warning(f"⚠️ {message}")
+                    self._log_warning("⚠️ No target database configured")
 
             # Delete config
             from client.models import ReplicationConfig
@@ -445,30 +454,22 @@ class ReplicationOrchestrator:
         """
         Get set of Kafka topics for currently enabled tables.
 
+        Uses unified format_topic_name() for consistent topic naming.
+
         Returns:
             Set of topic names
         """
         topics = set()
-        enabled_tables = self.config.table_mappings.filter(is_enabled=True)
-        
-        for table_mapping in enabled_tables:
-            db_config = self.config.client_database
-            topic_prefix = self.config.kafka_topic_prefix
+        db_config = self.config.client_database
+        topic_prefix = self.config.kafka_topic_prefix
 
-            if db_config.db_type == 'mysql':
-                topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
-            elif db_config.db_type == 'postgresql':
-                schema = table_mapping.source_schema or 'public'
-                topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
-            elif db_config.db_type == 'mssql':
-                schema = table_mapping.source_schema or 'dbo'
-                topic = f"{topic_prefix}.{db_config.database_name}.{schema}.{table_mapping.source_table}"
-            elif db_config.db_type == 'oracle':
-                schema = table_mapping.source_schema
-                topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
-            else:
-                continue
-
+        for table_mapping in self.config.table_mappings.filter(is_enabled=True):
+            topic = format_topic_name(
+                db_config=db_config,
+                table_name=table_mapping.source_table,
+                topic_prefix=topic_prefix,
+                schema=table_mapping.source_schema
+            )
             topics.add(topic)
 
         return topics
@@ -809,111 +810,6 @@ class ReplicationOrchestrator:
             error_msg = f"Failed to delete topics: {str(e)}"
             self._log_error(error_msg)
             return False, error_msg
-        
-
-    def _drop_target_tables(self) -> Tuple[bool, str]:
-        """
-        Drop target database tables corresponding to the replicated tables.
-
-        This is called when deleting replication with delete_topics=True
-        to clean up the target database tables that were receiving data.
-
-        Returns:
-            (success, message)
-        """
-        try:
-            # Get target database
-            from client.models.database import ClientDatabase
-            from client.utils.database_utils import get_database_engine
-            
-            client = self.config.client_database.client
-            target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
-
-            if not target_db:
-                return False, "No target database configured"
-
-            # Get enabled table mappings
-            enabled_tables = self.config.table_mappings.filter(is_enabled=True)
-
-            if not enabled_tables.exists():
-                return True, "No tables to drop"
-
-            # Get target database engine using the utility function
-            engine = get_database_engine(target_db)
-
-            dropped_tables = []
-            failed_tables = []
-
-            try:
-                with engine.connect() as conn:
-                    for table_mapping in enabled_tables:
-                        target_table = table_mapping.target_table
-                        target_schema = table_mapping.target_schema or None
-
-                        try:
-                            # Build fully qualified table name
-                            if target_schema:
-                                full_table_name = f"{target_schema}.{target_table}"
-                            else:
-                                full_table_name = target_table
-
-                            # Drop table with appropriate syntax for each database type
-                            if target_db.db_type == 'mysql':
-                                drop_sql = f"DROP TABLE IF EXISTS `{target_table}`"
-                            elif target_db.db_type == 'postgresql':
-                                if target_schema:
-                                    drop_sql = f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}" CASCADE'
-                                else:
-                                    drop_sql = f'DROP TABLE IF EXISTS "{target_table}" CASCADE'
-                            elif target_db.db_type == 'mssql':
-                                if target_schema:
-                                    drop_sql = f"DROP TABLE IF EXISTS [{target_schema}].[{target_table}]"
-                                else:
-                                    drop_sql = f"DROP TABLE IF EXISTS [{target_table}]"
-                            elif target_db.db_type == 'oracle':
-                                # Oracle doesn't support IF EXISTS, need to handle exception
-                                if target_schema:
-                                    drop_sql = f'DROP TABLE "{target_schema}"."{target_table}" CASCADE CONSTRAINTS'
-                                else:
-                                    drop_sql = f'DROP TABLE "{target_table}" CASCADE CONSTRAINTS'
-                            else:
-                                drop_sql = f"DROP TABLE IF EXISTS {target_table}"
-
-                            # Execute drop
-                            conn.execute(text(drop_sql))
-                            conn.commit()
-
-                            dropped_tables.append(full_table_name)
-                            self._log_info(f"  ✓ Dropped table: {full_table_name}")
-
-                        except Exception as e:
-                            # For Oracle, if table doesn't exist, it's okay
-                            if target_db.db_type == 'oracle' and ('ORA-00942' in str(e) or 'does not exist' in str(e)):
-                                self._log_info(f"  ○ Table already dropped: {full_table_name}")
-                            else:
-                                failed_tables.append(f"{full_table_name}: {str(e)}")
-                                self._log_warning(f"  ⚠️ Failed to drop {full_table_name}: {e}")
-
-            finally:
-                # Always dispose of the engine
-                engine.dispose()
-
-            # Build result message
-            if dropped_tables:
-                message = f"Dropped {len(dropped_tables)} table(s): {', '.join(dropped_tables)}"
-            else:
-                message = "No tables were dropped"
-
-            if failed_tables:
-                message += f" | {len(failed_tables)} failed"
-                return False, message
-
-            return True, message
-
-        except Exception as e:
-            error_msg = f"Failed to drop target tables: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
 
     # ==========================================
     # Table Management (Add/Remove)
@@ -960,25 +856,16 @@ class ReplicationOrchestrator:
             # ========================================
             self._log_info("STEP 1/5: Deleting Kafka topics for removed tables...")
 
-            topics_to_delete = []
-            for table_mapping in table_mappings_to_remove:
-                topic_prefix = self.config.kafka_topic_prefix
-
-                if db_config.db_type == 'mysql':
-                    topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
-                elif db_config.db_type == 'postgresql':
-                    schema = table_mapping.source_schema or 'public'
-                    topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
-                elif db_config.db_type == 'mssql':
-                    schema = table_mapping.source_schema or 'dbo'
-                    topic = f"{topic_prefix}.{db_config.database_name}.{schema}.{table_mapping.source_table}"
-                elif db_config.db_type == 'oracle':
-                    schema = table_mapping.source_schema
-                    topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
-                else:
-                    continue
-
-                topics_to_delete.append(topic)
+            topic_prefix = self.config.kafka_topic_prefix
+            topics_to_delete = [
+                format_topic_name(
+                    db_config=db_config,
+                    table_name=tm.source_table,
+                    topic_prefix=topic_prefix,
+                    schema=tm.source_schema
+                )
+                for tm in table_mappings_to_remove
+            ]
 
             deleted_topics = []
             for topic in topics_to_delete:
@@ -999,11 +886,17 @@ class ReplicationOrchestrator:
             # ========================================
             self._log_info("STEP 2/5: Dropping target database tables...")
 
-            success, message = self._drop_specific_target_tables(table_mappings_to_remove)
-            if success:
-                self._log_info(f"✓ {message}")
+            from client.models.database import ClientDatabase
+            target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+
+            if target_db:
+                success, message = drop_tables_for_mappings(target_db, table_mappings_to_remove)
+                if success:
+                    self._log_info(f"✓ {message}")
+                else:
+                    self._log_warning(f"⚠️ {message}")
             else:
-                self._log_warning(f"⚠️ {message}")
+                self._log_warning("⚠️ No target database configured - skipping table drop")
 
             # ========================================
             # STEP 3: Disable table mappings in database
@@ -1074,93 +967,220 @@ class ReplicationOrchestrator:
             self._log_error(error_msg)
             return False, error_msg
 
-    def _drop_specific_target_tables(self, table_mappings) -> Tuple[bool, str]:
+    def add_tables(self, table_names: list) -> Tuple[bool, str]:
         """
-        Drop specific target database tables.
+        Add tables to a connector with incremental snapshot.
+
+        This will:
+        1. Create/re-enable table mappings (all columns enabled)
+        2. Create Kafka topics for new tables
+        3. Update source connector config
+        4. Send incremental snapshot signal (db-based or Kafka-based)
+        5. Restart sink connector to pick up new topics
 
         Args:
-            table_mappings: QuerySet of TableMapping objects to drop
+            table_names: List of source table names to add
 
         Returns:
             (success, message)
         """
+        self._log_info("=" * 60)
+        self._log_info("ADDING TABLES TO CONNECTOR")
+        self._log_info(f"Tables to add: {', '.join(table_names)}")
+        self._log_info("=" * 60)
+
+        db_config = self.config.client_database
+        client = db_config.client
+        added_tables = []
+        failed_tables = []
+
         try:
-            from client.models.database import ClientDatabase
-            from client.utils.database_utils import get_database_engine
+            # ========================================
+            # STEP 1: Create/re-enable table mappings
+            # ========================================
+            self._log_info("STEP 1/5: Creating table mappings...")
 
-            client = self.config.client_database.client
-            target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+            from client.models.replication import TableMapping, ColumnMapping
+            from client.utils.database_utils import get_table_schema
 
-            if not target_db:
-                return False, "No target database configured"
+            for table_name in table_names:
+                try:
+                    schema = get_table_schema(db_config, table_name)
+                    columns = schema.get('columns', [])
+                    primary_keys = schema.get('primary_keys', [])
 
-            engine = get_database_engine(target_db)
+                    for col in columns:
+                        col['primary_key'] = col['name'] in primary_keys
 
-            dropped_tables = []
-            failed_tables = []
+                    # Parse schema and table name
+                    if (db_config.db_type in ['mssql', 'oracle']) and '.' in table_name:
+                        source_schema, actual_table_name = table_name.split('.', 1)
+                    else:
+                        source_schema = schema.get('schema', '')
+                        actual_table_name = table_name
 
-            try:
-                with engine.connect() as conn:
-                    for table_mapping in table_mappings:
-                        target_table = table_mapping.target_table
-                        target_schema = table_mapping.target_schema or None
+                    # Check for existing disabled mapping
+                    existing_mapping = TableMapping.objects.filter(
+                        replication_config=self.config,
+                        source_table=actual_table_name,
+                        is_enabled=False
+                    ).first()
 
-                        try:
-                            if target_schema:
-                                full_table_name = f"{target_schema}.{target_table}"
-                            else:
-                                full_table_name = target_table
+                    if existing_mapping:
+                        existing_mapping.is_enabled = True
+                        existing_mapping.source_schema = source_schema
+                        existing_mapping.save()
+                        table_mapping = existing_mapping
+                        table_mapping.column_mappings.all().delete()
+                        self._log_info(f"  ✓ Re-enabled mapping: {table_name}")
+                    else:
+                        table_mapping = TableMapping.objects.create(
+                            replication_config=self.config,
+                            source_table=actual_table_name,
+                            target_table=actual_table_name,
+                            source_schema=source_schema,
+                            is_enabled=True,
+                        )
+                        self._log_info(f"  ✓ Created mapping: {table_name}")
 
-                            # Build DROP statement based on database type
-                            if target_db.db_type == 'mysql':
-                                drop_sql = f"DROP TABLE IF EXISTS `{target_table}`"
-                            elif target_db.db_type == 'postgresql':
-                                if target_schema:
-                                    drop_sql = f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}" CASCADE'
-                                else:
-                                    drop_sql = f'DROP TABLE IF EXISTS "{target_table}" CASCADE'
-                            elif target_db.db_type == 'mssql':
-                                if target_schema:
-                                    drop_sql = f"DROP TABLE IF EXISTS [{target_schema}].[{target_table}]"
-                                else:
-                                    drop_sql = f"DROP TABLE IF EXISTS [{target_table}]"
-                            elif target_db.db_type == 'oracle':
-                                if target_schema:
-                                    drop_sql = f'DROP TABLE "{target_schema}"."{target_table}" CASCADE CONSTRAINTS'
-                                else:
-                                    drop_sql = f'DROP TABLE "{target_table}" CASCADE CONSTRAINTS'
-                            else:
-                                drop_sql = f"DROP TABLE IF EXISTS {target_table}"
+                    # Create column mappings (all enabled)
+                    for col in columns:
+                        ColumnMapping.objects.create(
+                            table_mapping=table_mapping,
+                            source_column=col['name'],
+                            target_column=col['name'],
+                            source_type=col.get('type', ''),
+                            target_type=col.get('type', ''),
+                            is_enabled=True,
+                            is_primary_key=col.get('primary_key', False),
+                            is_nullable=col.get('nullable', True),
+                        )
 
-                            conn.execute(text(drop_sql))
-                            conn.commit()
+                    added_tables.append(table_name)
 
-                            dropped_tables.append(full_table_name)
-                            self._log_info(f"  ✓ Dropped table: {full_table_name}")
+                except Exception as e:
+                    self._log_warning(f"  ⚠️ Failed to create mapping for {table_name}: {e}")
+                    failed_tables.append(table_name)
 
-                        except Exception as e:
-                            if target_db.db_type == 'oracle' and ('ORA-00942' in str(e) or 'does not exist' in str(e)):
-                                self._log_info(f"  ○ Table already dropped: {full_table_name}")
-                            else:
-                                failed_tables.append(f"{full_table_name}: {str(e)}")
-                                self._log_warning(f"  ⚠️ Failed to drop {full_table_name}: {e}")
+            if not added_tables:
+                return False, "No tables could be added"
 
-            finally:
-                engine.dispose()
+            self._log_info(f"✓ Created mappings for {len(added_tables)} tables")
 
-            if dropped_tables:
-                message = f"Dropped {len(dropped_tables)} table(s)"
+            # ========================================
+            # STEP 2: Create Kafka topics
+            # ========================================
+            self._log_info("STEP 2/5: Creating Kafka topics...")
+
+            success, message = self.create_topics()
+            if success:
+                self._log_info(f"✓ {message}")
             else:
-                message = "No tables were dropped"
+                self._log_warning(f"⚠️ Topic creation warning: {message}")
 
+            # ========================================
+            # STEP 3: Update source connector config
+            # ========================================
+            self._log_info("STEP 3/5: Updating source connector...")
+
+            all_tables = list(
+                self.config.table_mappings.filter(is_enabled=True)
+                .values_list('source_table', flat=True)
+            )
+
+            source_config = get_connector_config_for_database(
+                db_config=db_config,
+                replication_config=self.config,
+                tables_whitelist=all_tables
+            )
+
+            success, error = self.connector_manager.update_connector_config(
+                self.config.connector_name,
+                source_config
+            )
+            if not success:
+                return False, f"Failed to update source connector: {error}"
+
+            self._log_info(f"✓ Source connector updated with {len(all_tables)} tables")
+
+            # Wait for connector to reload
+            import time
+            for i in range(6):
+                time.sleep(0.5)
+                exists, status_data = self.connector_manager.get_connector_status(self.config.connector_name)
+                if exists and status_data:
+                    state = status_data.get('connector', {}).get('state', '')
+                    if state == 'RUNNING':
+                        self._log_info("✓ Connector is RUNNING")
+                        break
+
+            # ========================================
+            # STEP 4: Send incremental snapshot signal
+            # ========================================
+            self._log_info("STEP 4/5: Sending incremental snapshot signal...")
+
+            from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
+
+            signal_id, method = send_incremental_snapshot_signal(
+                database=db_config,
+                replication_config=self.config,
+                tables=added_tables
+            )
+
+            self._log_info(f"✓ Signal sent via {method} - ID: {signal_id}")
+
+            # For Kafka signals, restart connector to process
+            if method == 'kafka':
+                self.connector_manager.restart_connector(self.config.connector_name)
+                self._log_info("✓ Connector restarted to process Kafka signal")
+
+            # ========================================
+            # STEP 5: Restart sink connector
+            # ========================================
+            self._log_info("STEP 5/5: Restarting sink connector...")
+
+            if self.config.sink_connector_name:
+                # Update sink config with topics.regex and restart
+                from client.models.database import ClientDatabase
+
+                target_db = ClientDatabase.objects.filter(
+                    client=client,
+                    is_target=True
+                ).first()
+
+                if target_db:
+                    topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
+
+                    sink_config = get_sink_connector_config_for_database(
+                        db_config=target_db,
+                        topics=None,
+                        delete_enabled=True,
+                        custom_config={
+                            'name': self.config.sink_connector_name,
+                            'topics.regex': topic_regex,
+                        }
+                    )
+
+                    if sink_config:
+                        self.connector_manager.update_connector_config(
+                            self.config.sink_connector_name,
+                            sink_config
+                        )
+                        self.connector_manager.restart_connector(self.config.sink_connector_name)
+                        self._log_info("✓ Sink connector reconfigured and restarted")
+
+            self._log_info("=" * 60)
+            self._log_info("✓ TABLES ADDED SUCCESSFULLY")
+            self._log_info("=" * 60)
+
+            result_msg = f"Added {len(added_tables)} tables via {method} signal (ID: {signal_id})"
             if failed_tables:
-                message += f" | {len(failed_tables)} failed"
-                return False, message
+                result_msg += f" | {len(failed_tables)} failed: {', '.join(failed_tables)}"
 
-            return True, message
+            return True, result_msg
 
         except Exception as e:
-            error_msg = f"Failed to drop target tables: {str(e)}"
+            error_msg = f"Failed to add tables: {str(e)}"
             self._log_error(error_msg)
             return False, error_msg
 

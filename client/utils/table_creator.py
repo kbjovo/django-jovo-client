@@ -408,9 +408,9 @@ def map_type_to_sqlalchemy(type_str: str):
     """Map database type string to SQLAlchemy type"""
     if not type_str:
         return String(255)
-    
+
     type_lower = str(type_str).lower()
-    
+
     if 'tinyint' in type_lower:
         return TINYINT
     elif 'bigint' in type_lower:
@@ -440,3 +440,98 @@ def map_type_to_sqlalchemy(type_str: str):
         return Time
     else:
         return String(255)
+
+
+def drop_tables_for_mappings(target_db, table_mappings):
+    """
+    Drop specific target tables given table mappings.
+
+    Supports: MySQL, PostgreSQL, MS SQL, Oracle
+    Uses database-specific DROP syntax with proper error handling.
+
+    Args:
+        target_db: ClientDatabase instance for the target database
+        table_mappings: QuerySet or list of TableMapping objects
+
+    Returns:
+        Tuple[bool, str]: (success, message)
+    """
+    if not table_mappings:
+        return True, "No tables to drop"
+
+    # Convert QuerySet to list if needed
+    mappings_list = list(table_mappings)
+    logger.info(f"Dropping {len(mappings_list)} target tables...")
+
+    engine = get_database_engine(target_db)
+    db_type = target_db.db_type.lower()
+
+    dropped_tables = []
+    failed_tables = []
+
+    try:
+        with engine.connect() as conn:
+            for table_mapping in mappings_list:
+                target_table = table_mapping.target_table
+                target_schema = table_mapping.target_schema or None
+
+                try:
+                    # Build fully qualified table name
+                    if target_schema:
+                        full_table_name = f"{target_schema}.{target_table}"
+                    else:
+                        full_table_name = target_table
+
+                    # Build DROP statement based on database type
+                    if db_type == 'mysql':
+                        drop_sql = f"DROP TABLE IF EXISTS `{target_table}`"
+
+                    elif db_type == 'postgresql':
+                        if target_schema:
+                            drop_sql = f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}" CASCADE'
+                        else:
+                            drop_sql = f'DROP TABLE IF EXISTS "{target_table}" CASCADE'
+
+                    elif db_type == 'mssql':
+                        if target_schema:
+                            drop_sql = f"DROP TABLE IF EXISTS [{target_schema}].[{target_table}]"
+                        else:
+                            drop_sql = f"DROP TABLE IF EXISTS [{target_table}]"
+
+                    elif db_type == 'oracle':
+                        if target_schema:
+                            drop_sql = f'DROP TABLE "{target_schema}"."{target_table}" CASCADE CONSTRAINTS'
+                        else:
+                            drop_sql = f'DROP TABLE "{target_table}" CASCADE CONSTRAINTS'
+
+                    else:
+                        drop_sql = f"DROP TABLE IF EXISTS {target_table}"
+
+                    conn.execute(text(drop_sql))
+                    conn.commit()
+
+                    dropped_tables.append(full_table_name)
+                    logger.info(f"  Dropped table: {full_table_name}")
+
+                except Exception as e:
+                    # Handle Oracle's "table does not exist" error gracefully
+                    if db_type == 'oracle' and ('ORA-00942' in str(e) or 'does not exist' in str(e)):
+                        logger.info(f"  Table already dropped: {full_table_name}")
+                    else:
+                        failed_tables.append(f"{full_table_name}: {str(e)}")
+                        logger.warning(f"  Failed to drop {full_table_name}: {e}")
+
+    finally:
+        engine.dispose()
+
+    # Build result message
+    if dropped_tables:
+        message = f"Dropped {len(dropped_tables)} table(s)"
+    else:
+        message = "No tables were dropped"
+
+    if failed_tables:
+        message += f" | {len(failed_tables)} failed"
+        return False, message
+
+    return True, message

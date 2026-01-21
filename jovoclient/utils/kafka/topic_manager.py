@@ -13,6 +13,82 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
+def format_topic_name(db_config, table_name: str, topic_prefix: str, schema: str = None) -> str:
+    """
+    Unified topic name formatter for all database types.
+
+    This is the single source of truth for Kafka topic naming across the codebase.
+    Used by: orchestrator, topic_manager, signal.py
+
+    Format by db_type:
+    - MySQL:      {topic_prefix}.{database_name}.{table}
+    - PostgreSQL: {topic_prefix}.{database_name}.{table}  (uses database_name via RegexRouter)
+    - MS SQL:     {topic_prefix}.{database_name}.{schema}.{table}  (schema default: 'dbo')
+    - Oracle:     {topic_prefix}.{schema}.{table}  (schema default: username.upper())
+
+    Args:
+        db_config: ClientDatabase instance
+        table_name: Source table name (without schema prefix)
+        topic_prefix: Kafka topic prefix (e.g., 'client_1_db_2')
+        schema: Optional schema override
+
+    Returns:
+        Fully qualified Kafka topic name
+    """
+    db_type = db_config.db_type.lower()
+
+    if db_type == 'mysql':
+        return f"{topic_prefix}.{db_config.database_name}.{table_name}"
+
+    elif db_type == 'postgresql':
+        # PostgreSQL uses RegexRouter to replace schema with database name
+        return f"{topic_prefix}.{db_config.database_name}.{table_name}"
+
+    elif db_type == 'mssql':
+        schema = schema or 'dbo'
+        return f"{topic_prefix}.{db_config.database_name}.{schema}.{table_name}"
+
+    elif db_type == 'oracle':
+        schema = schema or db_config.username.upper()
+        return f"{topic_prefix}.{schema}.{table_name}"
+
+    else:
+        logger.warning(f"Unsupported database type: {db_type}, using generic format")
+        return f"{topic_prefix}.{db_config.database_name}.{table_name}"
+
+
+def format_signal_topic_name(db_config, topic_prefix: str) -> str:
+    """
+    Get the debezium_signal table CDC topic name for a database.
+
+    Args:
+        db_config: ClientDatabase instance
+        topic_prefix: Kafka topic prefix
+
+    Returns:
+        Topic name for the debezium_signal table CDC events
+    """
+    db_type = db_config.db_type.lower()
+
+    if db_type == 'mysql':
+        return f"{topic_prefix}.{db_config.database_name}.debezium_signal"
+
+    elif db_type == 'postgresql':
+        return f"{topic_prefix}.{db_config.database_name}.debezium_signal"
+
+    elif db_type == 'mssql':
+        return f"{topic_prefix}.{db_config.database_name}.dbo.debezium_signal"
+
+    elif db_type == 'oracle':
+        schema = db_config.username.upper()
+        if schema.startswith('C##'):
+            schema = schema[3:]
+        return f"{topic_prefix}.{schema}.DEBEZIUM_SIGNAL"
+
+    else:
+        return f"{topic_prefix}.{db_config.database_name}.debezium_signal"
+
+
 class KafkaTopicManager:
     """Manage Kafka topics with configuration from Django settings"""
 
@@ -395,73 +471,33 @@ class KafkaTopicManager:
         """
         topics = []
 
-        # Get enabled table mappings
-        enabled_tables = replication_config.table_mappings.filter(is_enabled=True)
-
-        # Generate topic names based on source database type
         db_config = replication_config.client_database
         topic_prefix = replication_config.kafka_topic_prefix
 
+        # Generate data topic names using unified formatter
+        enabled_tables = replication_config.table_mappings.filter(is_enabled=True)
         for table_mapping in enabled_tables:
-            if db_config.db_type == 'mysql':
-                topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
-            elif db_config.db_type == 'postgresql':
-                # Use database name instead of schema for topic naming
-                # This matches the RegexRouter transform in the connector config
-                # Format: {topic_prefix}.{database_name}.{table}
-                topic = f"{topic_prefix}.{db_config.database_name}.{table_mapping.source_table}"
-            elif db_config.db_type == 'mssql':
-                schema = table_mapping.source_schema or 'dbo'
-                topic = f"{topic_prefix}.{db_config.database_name}.{schema}.{table_mapping.source_table}"
-            elif db_config.db_type == 'oracle':
-                schema = table_mapping.source_schema
-                topic = f"{topic_prefix}.{schema}.{table_mapping.source_table}"
-            else:
-                logger.warning(f"Unsupported database type: {db_config.db_type}")
-                continue
-
+            topic = format_topic_name(
+                db_config=db_config,
+                table_name=table_mapping.source_table,
+                topic_prefix=topic_prefix,
+                schema=table_mapping.source_schema
+            )
             topics.append(topic)
 
         # Add schema change topic (when include.schema.changes=true)
-        schema_change_topic = topic_prefix
-        topics.append(schema_change_topic)
+        topics.append(topic_prefix)
 
         # Add signal topic for incremental snapshots (Kafka-based signaling)
-        signal_topic = f"{topic_prefix}.signals"
-        topics.append(signal_topic)
+        topics.append(f"{topic_prefix}.signals")
 
         # Add debezium_signal table CDC topic (for source-based signaling)
-        # When using source-based signals, Debezium captures changes from the debezium_signal table
-        # and publishes them to a topic. For PostgreSQL with RegexRouter, this becomes:
-        # {topic_prefix}.{database_name}.debezium_signal
-        if db_config.db_type == 'postgresql':
-            # PostgreSQL uses RegexRouter to replace schema with database name
-            signal_data_topic = f"{topic_prefix}.{db_config.database_name}.debezium_signal"
-            topics.append(signal_data_topic)
-            logger.info(f"Added debezium_signal data topic for PostgreSQL: {signal_data_topic}")
-        elif db_config.db_type == 'mysql':
-            # MySQL: database.table format
-            signal_data_topic = f"{topic_prefix}.{db_config.database_name}.debezium_signal"
-            topics.append(signal_data_topic)
-            logger.info(f"Added debezium_signal data topic for MySQL: {signal_data_topic}")
-        elif db_config.db_type == 'mssql':
-            # SQL Server: database.schema.table format
-            signal_data_topic = f"{topic_prefix}.{db_config.database_name}.dbo.debezium_signal"
-            topics.append(signal_data_topic)
-            logger.info(f"Added debezium_signal data topic for SQL Server: {signal_data_topic}")
-        elif db_config.db_type == 'oracle':
-            # Oracle: pdb.schema.table format
-            schema = db_config.username.upper()
-            if schema.startswith('C##'):
-                schema = schema[3:]
-            signal_data_topic = f"{topic_prefix}.{schema}.DEBEZIUM_SIGNAL"
-            topics.append(signal_data_topic)
-            logger.info(f"Added debezium_signal data topic for Oracle: {signal_data_topic}")
+        signal_data_topic = format_signal_topic_name(db_config, topic_prefix)
+        topics.append(signal_data_topic)
+        logger.info(f"Added debezium_signal data topic: {signal_data_topic}")
 
         # Add heartbeat topic (for connector health monitoring)
-        # Debezium uses this topic to track connector progress and detect stalls
-        heartbeat_topic = f"__debezium-heartbeat.{topic_prefix}"
-        topics.append(heartbeat_topic)
+        topics.append(f"__debezium-heartbeat.{topic_prefix}")
 
         return topics
 

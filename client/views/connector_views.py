@@ -9,8 +9,6 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse
 from django.contrib import messages
 from django.db import transaction
-from django.views.decorators.http import require_http_methods
-
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping, ConnectorHistory
 from client.utils.database_utils import get_table_list, get_table_schema, get_unassigned_tables
@@ -21,7 +19,6 @@ from jovoclient.utils.debezium.connector_templates import (
 )
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
-from jovoclient.utils.kafka.signal import DebeziumSignalManager, KafkaSignalManager
 
 logger = logging.getLogger(__name__)
 
@@ -757,8 +754,8 @@ def connector_create_debezium(request, config_pk):
 def connector_edit_tables(request, config_pk):
     """
     Edit tables assigned to a source connector.
-    - Remove tables: Requires connector restart
-    - Add tables: Uses Debezium signals (no restart if supported)
+    - Remove tables: Uses orchestrator.remove_tables() for full cleanup
+    - Add tables: Uses orchestrator.add_tables() with incremental snapshot signals
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     database = replication_config.client_database
@@ -787,530 +784,39 @@ def connector_edit_tables(request, config_pk):
                 messages.warning(request, "No changes specified")
                 return redirect('connector_edit_tables', config_pk=config_pk)
 
-            with transaction.atomic():
-                # Handle removals - use orchestrator for full cleanup
-                if tables_to_remove:
-                    from client.replication.orchestrator import ReplicationOrchestrator
-
-                    # Check if removing all tables
-                    remaining_count = replication_config.table_mappings.filter(
-                        is_enabled=True
-                    ).exclude(source_table__in=tables_to_remove).count()
-
-                    if remaining_count == 0:
-                        messages.error(request, "Cannot remove all tables. Delete the connector instead.")
-                        return redirect('connector_edit_tables', config_pk=config_pk)
-
-                    # Use orchestrator to remove tables with full cleanup
-                    # (deletes topics, drops target tables, updates connectors)
-                    orchestrator = ReplicationOrchestrator(replication_config)
-                    success, message = orchestrator.remove_tables(tables_to_remove)
-
-                    if success:
-                        messages.success(request, message)
-                    else:
-                        messages.error(request, f"Error removing tables: {message}")
-                        return redirect('connector_edit_tables', config_pk=config_pk)
-
-                # Handle additions (try signals first)
-                if tables_to_add:
-                    # Validate tables are unassigned
-                    for table in tables_to_add:
-                        if table not in unassigned_tables:
-                            messages.error(request, f"Table {table} is already assigned")
-                            return redirect('connector_edit_tables', config_pk=config_pk)
-
-                    # Create table mappings
-                    if tables_to_add:
-                        # Validate tables are unassigned
-                        for table in tables_to_add:
-                            if table not in unassigned_tables:
-                                messages.error(request, f"Table {table} is already assigned")
-                                return redirect('connector_edit_tables', config_pk=config_pk)
-
-                        # Create or re-enable table mappings
-                        for table_name in tables_to_add:
-                            try:
-                                schema = get_table_schema(database, table_name)
-                                columns = schema.get('columns', [])
-                                primary_keys = schema.get('primary_keys', [])
-
-                                for col in columns:
-                                    col['primary_key'] = col['name'] in primary_keys
-
-                                logger.info(f"Table {table_name}: {len(columns)} columns, {len(primary_keys)} primary keys: {primary_keys}")
-
-                                if (database.db_type == 'mssql' or database.db_type == 'oracle') and '.' in table_name:
-                                    source_schema, actual_table_name = table_name.split('.', 1)
-                                else:
-                                    source_schema = schema.get('schema', '')
-                                    actual_table_name = table_name
-
-                                # Check if a disabled mapping already exists (from previous removal)
-                                existing_mapping = TableMapping.objects.filter(
-                                    replication_config=replication_config,
-                                    source_table=actual_table_name,
-                                    is_enabled=False
-                                ).first()
-
-                                if existing_mapping:
-                                    # Re-enable the existing mapping
-                                    existing_mapping.is_enabled = True
-                                    existing_mapping.source_schema = source_schema
-                                    existing_mapping.save()
-                                    table_mapping = existing_mapping
-
-                                    # Delete old column mappings and recreate fresh ones
-                                    table_mapping.column_mappings.all().delete()
-                                    logger.info(f"Re-enabled existing mapping for table {table_name}")
-                                else:
-                                    # Create new table mapping
-                                    table_mapping = TableMapping.objects.create(
-                                        replication_config=replication_config,
-                                        source_table=actual_table_name,
-                                        target_table=actual_table_name,
-                                        source_schema=source_schema,
-                                        is_enabled=True,
-                                    )
-                                    logger.info(f"Created new mapping for table {table_name}")
-
-                                # Create column mappings
-                                for col in columns:
-                                    ColumnMapping.objects.create(
-                                        table_mapping=table_mapping,
-                                        source_column=col['name'],
-                                        target_column=col['name'],
-                                        source_type=col.get('type', ''),
-                                        target_type=col.get('type', ''),
-                                        is_enabled=True,
-                                        is_primary_key=col.get('primary_key', False),
-                                        is_nullable=col.get('nullable', True),
-                                    )
-
-                                logger.info(f"Created {len(columns)} column mappings for table {table_name}")
-
-                            except Exception as e:
-                                logger.error(f"Error creating mappings for {table_name}: {e}")
-                                raise
-
-                        # Try to add tables using Kafka signals (MySQL, PostgreSQL, MS SQL supported)
-                        try:
-                            if database.db_type in ['mysql', 'postgresql', 'mssql']:
-                                # Create Kafka topics for new tables BEFORE sending signals
-                                logger.info("Creating Kafka topics for new tables...")
-                                topic_manager = KafkaTopicManager()
-                                topics_success, topics_message = topic_manager.create_topics_for_config(replication_config)
-
-                                if not topics_success:
-                                    logger.warning(f"Topic creation warning: {topics_message}")
-                                else:
-                                    logger.info(f"✅ Topics ready: {topics_message}")
-
-                                # Update source connector config with new tables
-                                logger.info("Updating source connector configuration...")
-                                connector_manager = DebeziumConnectorManager()
-
-                                all_tables = list(
-                                    replication_config.table_mappings.filter(is_enabled=True)
-                                    .values_list('source_table', flat=True)
-                                )
-
-                                source_config = get_connector_config_for_database(
-                                    db_config=database,
-                                    replication_config=replication_config,
-                                    tables_whitelist=all_tables
-                                )
-
-                                connector_manager.update_connector_config(replication_config.connector_name, source_config)
-                                logger.info(f"✅ Source connector config updated with {len(all_tables)} tables")
-
-                                # Wait for connector to reload and verify it's running before sending signal
-                                import time
-                                max_retries = 6
-                                for i in range(max_retries):
-                                    time.sleep(0.5)
-                                    exists, status_data = connector_manager.get_connector_status(replication_config.connector_name)
-                                    if exists and status_data:
-                                        state = status_data.get('connector', {}).get('state', '')
-                                        if state == 'RUNNING':
-                                            logger.info(f"✅ Connector is RUNNING, ready for signal")
-                                            break
-                                        logger.info(f"⏳ Connector state: {state}, waiting...")
-                                else:
-                                    logger.warning("⚠️ Connector not confirmed RUNNING, proceeding anyway")
-
-                                # ========================================
-                                # Signal Implementation - Database vs Kafka based on DB type
-                                # ========================================
-                                from django.conf import settings
-
-                                # Format tables for signal based on database type
-                                formatted_tables = []
-                                for table in tables_to_add:
-                                    if database.db_type == 'mssql':
-                                        # MS SQL: Always needs database.schema.table format (e.g., AppDB.dbo.Products)
-                                        # Tables may come as "Orders", "dbo.Orders", or "AppDB.dbo.Orders"
-                                        dot_count = table.count('.')
-                                        if dot_count == 0:
-                                            # Just table name: Orders -> AppDB.dbo.Orders
-                                            formatted_tables.append(f"{database.database_name}.dbo.{table}")
-                                        elif dot_count == 1:
-                                            # schema.table: dbo.Orders -> AppDB.dbo.Orders
-                                            formatted_tables.append(f"{database.database_name}.{table}")
-                                        else:
-                                            # Already fully qualified: AppDB.dbo.Orders
-                                            formatted_tables.append(table)
-                                    elif '.' in table:
-                                        formatted_tables.append(table)
-                                    elif database.db_type == 'mysql':
-                                        # MySQL: database.table format
-                                        formatted_tables.append(f"{database.database_name}.{table}")
-                                    elif database.db_type == 'postgresql':
-                                        # PostgreSQL: schema.table format (default schema is 'public')
-                                        formatted_tables.append(f"public.{table}")
-
-                                if database.db_type == 'postgresql':
-                                    # ✅ PostgreSQL: Use DATABASE signals (more reliable)
-                                    # Insert signal directly into debezium_signal table
-                                    logger.info(f"Using DATABASE-based signaling for PostgreSQL")
-
-                                    from jovoclient.utils.kafka.signal import DebeziumSignalManager
-                                    from client.utils.database_utils import get_database_engine
-
-                                    # Get SQLAlchemy engine for the source database
-                                    db_engine = get_database_engine(database)
-                                    signal_table = "public.debezium_signal"
-
-                                    signal_manager = DebeziumSignalManager(
-                                        db_engine=db_engine,
-                                        signal_table=signal_table
-                                    )
-
-                                    # Send incremental snapshot signal via database
-                                    signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
-
-                                    logger.info(f"✅ Database signal sent - ID: {signal_id}")
-                                    logger.debug(f"   Signal table: {signal_table}")
-                                    logger.debug(f"   Tables: {formatted_tables}")
-
-                                    # Wait for Debezium to process the signal and confirm source connector is producing
-                                    # Poll the source connector topics endpoint to verify new topics appear
-                                    logger.debug("Waiting for source connector to process signal and produce to new topics...")
-                                    max_wait_retries = 15  # 15 * 1 second = 15 seconds max
-                                    expected_topic_count = len(all_tables) + 1  # data tables + signal table
-                                    for retry in range(max_wait_retries):
-                                        time.sleep(1)
-                                        try:
-                                            topics_response = connector_manager.get_connector_topics(replication_config.connector_name)
-                                            if topics_response:
-                                                current_topics = topics_response.get(replication_config.connector_name, {}).get('topics', [])
-                                                logger.debug(f"Retry {retry + 1}: Source connector has {len(current_topics)} topics")
-                                                # Check if we have topics for the new tables
-                                                if len(current_topics) >= expected_topic_count:
-                                                    logger.debug(f"Source connector now producing to {len(current_topics)} topics")
-                                                    break
-                                        except Exception as poll_err:
-                                            logger.debug(f"Poll error: {poll_err}")
-                                    else:
-                                        logger.debug("Timeout waiting for new topics, proceeding anyway")
-
-                                    # Reconfigure and restart sink connector to pick up new topics
-                                    # Need to update config (not just restart) to force re-evaluation of topics.regex
-                                    if replication_config.sink_connector_name:
-                                        try:
-                                            logger.debug(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
-
-                                            # Get target database
-                                            target_db = ClientDatabase.objects.filter(
-                                                client=client,
-                                                is_target=True
-                                            ).first()
-
-                                            if target_db:
-                                                # Generate updated sink config with topics.regex
-                                                topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
-
-                                                sink_config = get_sink_connector_config_for_database(
-                                                    db_config=target_db,
-                                                    topics=None,
-                                                    delete_enabled=True,
-                                                    custom_config={
-                                                        'name': replication_config.sink_connector_name,
-                                                        'topics.regex': topic_regex,
-                                                    }
-                                                )
-
-                                                if sink_config:
-                                                    connector_manager.update_connector_config(
-                                                        replication_config.sink_connector_name,
-                                                        sink_config
-                                                    )
-                                                    # CRITICAL: Restart sink connector to re-evaluate topics.regex
-                                                    # Kafka Connect only discovers topics matching regex at startup
-                                                    connector_manager.restart_connector(replication_config.sink_connector_name)
-                                                    logger.info(f"✅ Sink connector reconfigured and restarted with topics.regex: {topic_regex}")
-                                        except Exception as sink_err:
-                                            logger.warning(f"Could not reconfigure sink connector: {sink_err}")
-
-                                    messages.success(
-                                        request,
-                                        f"Added {len(tables_to_add)} tables using database-based incremental snapshot (Signal ID: {signal_id})."
-                                    )
-
-                                elif database.db_type == 'mssql':
-                                    # ✅ MS SQL: Use DATABASE signals (requires signal table)
-                                    # Insert signal directly into debezium_signal table
-                                    logger.info(f"Using DATABASE-based signaling for MS SQL")
-
-                                    from jovoclient.utils.kafka.signal import DebeziumSignalManager
-                                    from client.utils.database_utils import get_database_engine
-
-                                    # Get SQLAlchemy engine for the source database
-                                    db_engine = get_database_engine(database)
-                                    # MS SQL signal table: dbo.debezium_signal
-                                    signal_table = "dbo.debezium_signal"
-
-                                    signal_manager = DebeziumSignalManager(
-                                        db_engine=db_engine,
-                                        signal_table=signal_table
-                                    )
-
-                                    # Send incremental snapshot signal via database
-                                    signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
-
-                                    logger.info(f"✅ Database signal sent - ID: {signal_id}")
-                                    logger.info(f"   Signal table: {signal_table}")
-                                    logger.info(f"   Tables: {formatted_tables}")
-
-                                    # Wait for Debezium to process the signal and confirm source connector is producing
-                                    # Poll the source connector topics endpoint to verify new topics appear
-                                    logger.debug("Waiting for source connector to process signal and produce to new topics...")
-                                    max_wait_retries = 15  # 15 * 1 second = 15 seconds max
-                                    expected_topic_count = len(all_tables) + 1  # data tables + signal table
-                                    for retry in range(max_wait_retries):
-                                        time.sleep(1)
-                                        try:
-                                            topics_response = connector_manager.get_connector_topics(replication_config.connector_name)
-                                            if topics_response:
-                                                current_topics = topics_response.get(replication_config.connector_name, {}).get('topics', [])
-                                                logger.debug(f"Retry {retry + 1}: Source connector has {len(current_topics)} topics")
-                                                # Check if we have topics for the new tables
-                                                if len(current_topics) >= expected_topic_count:
-                                                    logger.debug(f"Source connector now producing to {len(current_topics)} topics")
-                                                    break
-                                        except Exception as poll_err:
-                                            logger.debug(f"Poll error: {poll_err}")
-                                    else:
-                                        logger.debug("Timeout waiting for new topics, proceeding anyway")
-
-                                    # Reconfigure and restart sink connector to pick up new topics
-                                    if replication_config.sink_connector_name:
-                                        try:
-                                            logger.debug(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
-
-                                            # Get target database
-                                            target_db = ClientDatabase.objects.filter(
-                                                client=client,
-                                                is_target=True
-                                            ).first()
-
-                                            if target_db:
-                                                # Generate updated sink config with topics.regex
-                                                topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
-
-                                                sink_config = get_sink_connector_config_for_database(
-                                                    db_config=target_db,
-                                                    topics=None,
-                                                    delete_enabled=True,
-                                                    custom_config={
-                                                        'name': replication_config.sink_connector_name,
-                                                        'topics.regex': topic_regex,
-                                                    }
-                                                )
-
-                                                if sink_config:
-                                                    connector_manager.update_connector_config(
-                                                        replication_config.sink_connector_name,
-                                                        sink_config
-                                                    )
-                                                    # CRITICAL: Restart sink connector to re-evaluate topics.regex
-                                                    # Kafka Connect only discovers topics matching regex at startup
-                                                    connector_manager.restart_connector(replication_config.sink_connector_name)
-                                                    logger.info(f"✅ Sink connector reconfigured and restarted with topics.regex: {topic_regex}")
-                                        except Exception as sink_err:
-                                            logger.warning(f"Could not reconfigure sink connector: {sink_err}")
-
-                                    messages.success(
-                                        request,
-                                        f"Added {len(tables_to_add)} tables using database-based incremental snapshot (Signal ID: {signal_id})."
-                                    )
-
-                                else:
-                                    # MySQL: Use KAFKA signals (read-only database support)
-                                    logger.info(f"Using Kafka-based signaling for MySQL")
-
-                                    kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-                                        'KAFKA_INTERNAL_SERVERS',
-                                        settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
-                                    )
-
-                                    # Signal topic format: client_{client_id}_db_{db_id}.signals
-                                    signal_topic = f"client_{client.id}_db_{database.id}.signals"
-                                    topic_prefix = f"client_{client.id}_db_{database.id}"
-
-                                    signal_manager = KafkaSignalManager(
-                                        bootstrap_servers=kafka_bootstrap_servers,
-                                        signal_topic=signal_topic,
-                                        connector_name=topic_prefix
-                                    )
-
-                                    # Send incremental snapshot signal via Kafka
-                                    signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
-                                    signal_manager.close()
-
-                                    # Restart connector to ensure SignalProcessor polls and processes the signal
-                                    logger.debug("Restarting connector to ensure signal is processed...")
-                                    connector_manager.restart_connector(replication_config.connector_name)
-
-                                    # Wait for source connector to process signal and produce to new topics
-                                    # Poll the source connector topics endpoint to verify new topics appear
-                                    logger.debug("Waiting for source connector to process signal and produce to new topics...")
-                                    max_wait_retries = 15  # 15 * 1 second = 15 seconds max
-                                    expected_topic_count = len(all_tables) + 1  # data tables + signal table
-                                    for retry in range(max_wait_retries):
-                                        time.sleep(1)
-                                        try:
-                                            topics_response = connector_manager.get_connector_topics(replication_config.connector_name)
-                                            if topics_response:
-                                                current_topics = topics_response.get(replication_config.connector_name, {}).get('topics', [])
-                                                logger.debug(f"Retry {retry + 1}: Source connector has {len(current_topics)} topics")
-                                                # Check if we have topics for the new tables
-                                                if len(current_topics) >= expected_topic_count:
-                                                    logger.debug(f"Source connector now producing to {len(current_topics)} topics")
-                                                    break
-                                        except Exception as poll_err:
-                                            logger.debug(f"Poll error: {poll_err}")
-                                    else:
-                                        logger.debug("Timeout waiting for new topics, proceeding anyway")
-
-                                    # Reconfigure sink connector to pick up new topics
-                                    if replication_config.sink_connector_name:
-                                        try:
-                                            logger.debug(f"Reconfiguring sink connector to pick up new topics: {replication_config.sink_connector_name}")
-
-                                            # Get target database
-                                            target_db = ClientDatabase.objects.filter(
-                                                client=client,
-                                                is_target=True
-                                            ).first()
-
-                                            if target_db:
-                                                # Generate updated sink config with topics.regex
-                                                topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
-
-                                                sink_config = get_sink_connector_config_for_database(
-                                                    db_config=target_db,
-                                                    topics=None,
-                                                    delete_enabled=True,
-                                                    custom_config={
-                                                        'name': replication_config.sink_connector_name,
-                                                        'topics.regex': topic_regex,
-                                                    }
-                                                )
-
-                                                if sink_config:
-                                                    connector_manager.update_connector_config(
-                                                        replication_config.sink_connector_name,
-                                                        sink_config
-                                                    )
-                                                    # CRITICAL: Restart sink connector to re-evaluate topics.regex
-                                                    # Kafka Connect only discovers topics matching regex at startup
-                                                    connector_manager.restart_connector(replication_config.sink_connector_name)
-                                                    logger.info(f"✅ Sink connector reconfigured and restarted with topics.regex: {topic_regex}")
-                                        except Exception as sink_err:
-                                            logger.warning(f"Could not reconfigure sink connector: {sink_err}")
-
-                                    messages.success(
-                                        request,
-                                        f"Added {len(tables_to_add)} tables using Kafka-based incremental snapshot (Signal ID: {signal_id})."
-                                    )
-
-                            else:
-                                # Other DBs: Fall back to restart
-                                logger.info(f"Database type {database.db_type} - falling back to connector restart")
-                                raise Exception("Signals not fully supported for this database type")
-
-                        except Exception as e:
-                            logger.warning(f"Could not use signals, falling back to restart: {e}")
-
-                            # Fallback: Restart connector
-                            connector_manager = DebeziumConnectorManager()
-
-                            all_tables = list(
-                                replication_config.table_mappings.filter(is_enabled=True)
-                                .values_list('source_table', flat=True)
-                            )
-
-                            # ✅ FIX: Create Kafka topics for new tables (was missing for non-MySQL)
-                            logger.info("Creating Kafka topics for new tables...")
-                            topic_manager = KafkaTopicManager()
-                            topics_success, topics_message = topic_manager.create_topics_for_config(replication_config)
-
-                            if not topics_success:
-                                logger.warning(f"Topic creation warning: {topics_message}")
-                            else:
-                                logger.info(f"✅ Topics ready: {topics_message}")
-
-                            # Update source connector config
-                            source_config = get_connector_config_for_database(
-                                db_config=database,
-                                replication_config=replication_config,
-                                tables_whitelist=all_tables
-                            )
-
-                            connector_manager.update_connector_config(replication_config.connector_name, source_config)
-                            connector_manager.restart_connector(replication_config.connector_name)
-                            logger.info(f"✅ Source connector updated and restarted")
-
-                            # ✅ FIX: Update sink connector with new topics
-                            if replication_config.sink_connector_name:
-                                try:
-                                    from client.views.cdc_views import get_kafka_topics_for_tables
-                                    # Note: get_sink_connector_config_for_database is imported at top of file
-
-                                    # Get all enabled table mappings
-                                    table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-
-                                    # Generate topic names for sink
-                                    kafka_topics = get_kafka_topics_for_tables(database, replication_config, table_mappings)
-
-                                    # Get target database
-                                    target_db = replication_config.target_database
-                                    if target_db:
-                                        # Build topic regex for sink
-                                        topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
-
-                                        sink_config = get_sink_connector_config_for_database(
-                                            db_config=target_db,
-                                            topics=None,
-                                            custom_config={
-                                                'name': replication_config.sink_connector_name,
-                                                'topics.regex': topic_regex,
-                                            }
-                                        )
-
-                                        if sink_config:
-                                            connector_manager.update_connector_config(
-                                                replication_config.sink_connector_name,
-                                                sink_config
-                                            )
-                                            connector_manager.restart_connector(replication_config.sink_connector_name)
-                                            logger.info(f"✅ Sink connector updated and restarted")
-
-                                except Exception as sink_error:
-                                    logger.warning(f"Could not update sink connector: {sink_error}")
-
-                            messages.success(request, f"Added {len(tables_to_add)} tables (connector restarted)")
+            from client.replication.orchestrator import ReplicationOrchestrator
+            orchestrator = ReplicationOrchestrator(replication_config)
+
+            # Handle removals
+            if tables_to_remove:
+                remaining_count = replication_config.table_mappings.filter(
+                    is_enabled=True
+                ).exclude(source_table__in=tables_to_remove).count()
+
+                if remaining_count == 0:
+                    messages.error(request, "Cannot remove all tables. Delete the connector instead.")
+                    return redirect('connector_edit_tables', config_pk=config_pk)
+
+                success, message = orchestrator.remove_tables(tables_to_remove)
+                if success:
+                    messages.success(request, message)
+                else:
+                    messages.error(request, f"Error removing tables: {message}")
+                    return redirect('connector_edit_tables', config_pk=config_pk)
+
+            # Handle additions
+            if tables_to_add:
+                # Validate tables are unassigned
+                invalid_tables = [t for t in tables_to_add if t not in unassigned_tables]
+                if invalid_tables:
+                    messages.error(request, f"Tables already assigned: {', '.join(invalid_tables)}")
+                    return redirect('connector_edit_tables', config_pk=config_pk)
+
+                success, message = orchestrator.add_tables(tables_to_add)
+                if success:
+                    messages.success(request, message)
+                else:
+                    messages.error(request, f"Error adding tables: {message}")
 
             return redirect('connector_list', database_pk=database.id)
 

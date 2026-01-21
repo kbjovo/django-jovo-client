@@ -244,4 +244,99 @@ class KafkaSignalManager:
             logger.info("Kafka producer closed")
 
 
+def send_incremental_snapshot_signal(database, replication_config, tables: List[str]) -> tuple:
+    """
+    Send incremental snapshot signal via appropriate method based on db_type.
+
+    Abstracts the db-type-specific signaling logic:
+    - PostgreSQL/MS SQL/Oracle: Use DebeziumSignalManager (database-based)
+    - MySQL: Use KafkaSignalManager (Kafka-based)
+
+    Args:
+        database: ClientDatabase instance
+        replication_config: ReplicationConfig instance
+        tables: List of table names (will be formatted based on db_type)
+
+    Returns:
+        tuple: (signal_id, method_used)  # method_used: 'database' or 'kafka'
+
+    Raises:
+        Exception: If signal sending fails
+    """
+    from django.conf import settings
+    from client.utils.database_utils import get_database_engine
+    from client.views.cdc_views import format_table_for_connector
+
+    db_type = database.db_type.lower()
+    client = database.client
+
+    # Format tables for signal based on db_type
+    formatted_tables = []
+    for table_name in tables:
+        # Get schema from table mapping if available
+        table_mapping = replication_config.table_mappings.filter(
+            source_table=table_name.split('.')[-1]  # Handle pre-formatted names
+        ).first()
+        schema_name = table_mapping.source_schema if table_mapping else None
+
+        # MS SQL needs full database.schema.table format for signals
+        if db_type == 'mssql':
+            if '.' not in table_name:
+                schema = schema_name or 'dbo'
+                formatted_tables.append(f"{database.database_name}.{schema}.{table_name}")
+            elif table_name.count('.') == 1:
+                formatted_tables.append(f"{database.database_name}.{table_name}")
+            else:
+                formatted_tables.append(table_name)
+        else:
+            formatted_tables.append(format_table_for_connector(database, table_name, schema_name))
+
+    logger.info(f"Sending incremental snapshot signal for {len(formatted_tables)} tables")
+    logger.debug(f"Formatted tables: {formatted_tables}")
+
+    # Database-based signaling (PostgreSQL, MS SQL, Oracle)
+    if db_type in ['postgresql', 'mssql', 'oracle']:
+        db_engine = get_database_engine(database)
+
+        # Signal table names by db_type
+        signal_tables = {
+            'postgresql': 'public.debezium_signal',
+            'mssql': 'dbo.debezium_signal',
+            'oracle': f'{database.username.upper()}.DEBEZIUM_SIGNAL',
+        }
+        signal_table = signal_tables.get(db_type, 'debezium_signal')
+
+        signal_manager = DebeziumSignalManager(
+            db_engine=db_engine,
+            signal_table=signal_table
+        )
+
+        signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
+        logger.info(f"Database signal sent - ID: {signal_id}, table: {signal_table}")
+
+        return signal_id, 'database'
+
+    # Kafka-based signaling (MySQL)
+    else:
+        kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_INTERNAL_SERVERS',
+            settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
+        )
+
+        # Signal topic format: client_{client_id}_db_{db_id}.signals
+        signal_topic = f"client_{client.id}_db_{database.id}.signals"
+        topic_prefix = f"client_{client.id}_db_{database.id}"
+
+        signal_manager = KafkaSignalManager(
+            bootstrap_servers=kafka_bootstrap,
+            signal_topic=signal_topic,
+            connector_name=topic_prefix
+        )
+
+        signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
+        signal_manager.close()
+
+        logger.info(f"Kafka signal sent - ID: {signal_id}, topic: {signal_topic}")
+
+        return signal_id, 'kafka'
 

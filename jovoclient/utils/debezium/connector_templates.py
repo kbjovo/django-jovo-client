@@ -219,7 +219,7 @@ def get_mysql_connector_config(
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "signal.kafka.groupId": f"dbz-signal-{connector_name}",  # CRITICAL: Must be unique per connector (camelCase!)
         "signal.poll.interval.ms": "1000",  # Check for signals every 1 second
-        "signal.kafka.consumer.auto.offset.reset": "earliest",  # Don't miss signals during restarts
+        "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
 
         "signal.kafka.consumer.key.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
         "signal.kafka.consumer.value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
@@ -376,6 +376,7 @@ def get_postgresql_connector_config(
         "signal.enabled.channels": "source,kafka",  # ✅ Enable BOTH channels
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
 
         # ✅ THIS WAS MISSING - CRITICAL FOR INCREMENTAL SNAPSHOTS
         "signal.data.collection": signal_table,
@@ -530,7 +531,8 @@ def get_sqlserver_connector_config(
         "signal.enabled.channels": "source,kafka",  # ✅ CHANGED: Enable BOTH channels
         "signal.kafka.topic": f"{topic_prefix}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        
+        "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
+
         # ✅ CRITICAL: Signal table must include database name for watermarking queries
         # For SQL Server incremental snapshots, the signal table requires full three-part name
         # Format: database.schema.table (e.g., "AppDB.dbo.debezium_signal")
@@ -729,6 +731,7 @@ def get_oracle_connector_config(
         "signal.enabled.channels": "source,kafka",
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
+        "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
         "signal.data.collection": signal_table,  # ✅ ALWAYS set this
         "signal.poll.interval.ms": "5000",
         
