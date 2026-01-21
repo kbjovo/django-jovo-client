@@ -244,12 +244,17 @@ services:
   # ============================================
   # Kafka Connect (Confluent + Debezium plugins)
   # ============================================
+  # ============================================
+  # Kafka Connect (Debezium 3.3 + Confluent Avro Converter)
+  # WITH CONSOLE LOGGING ENABLED
+  # ============================================
   kafka-connect:
     build:
       context: .
       dockerfile: Dockerfile.kafka-connect
     image: kafka-connect-debezium:latest
     container_name: kafka-connect
+    hostname: kafka-connect
     depends_on:
       kafka-1:
         condition: service_healthy
@@ -264,20 +269,31 @@ services:
     ports:
       - "8083:8083"
     environment:
+      # Kafka Bootstrap Servers
       BOOTSTRAP_SERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
+      
+      # Connect Cluster Configuration
       GROUP_ID: connect-cluster
       CONFIG_STORAGE_TOPIC: connect-configs
       OFFSET_STORAGE_TOPIC: connect-offsets
       STATUS_STORAGE_TOPIC: connect-statuses
+      
+      # Replication Factors
       CONFIG_STORAGE_REPLICATION_FACTOR: 3
       OFFSET_STORAGE_REPLICATION_FACTOR: 3
       STATUS_STORAGE_REPLICATION_FACTOR: 3
+      
+      # Key/Value Converters
       KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      
+      # Internal Converters
       INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      
+      # Performance Tuning
       CONNECT_TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS: 30000
       CONNECT_PRODUCER_BATCH_SIZE: 32768
       CONNECT_PRODUCER_LINGER_MS: 10
@@ -286,15 +302,42 @@ services:
       CONNECT_PRODUCER_COMPRESSION_TYPE: lz4
       CONNECT_CONSUMER_MAX_POLL_RECORDS: 1000
       CONNECT_CONSUMER_FETCH_MIN_BYTES: 1048576
+      
+      # JVM Heap Settings
       KAFKA_HEAP_OPTS: "-Xms2G -Xmx2G"
+      
+      # ============================================
+      # CRITICAL LOGGING CONFIGURATION
+      # Force all logs to stdout/stderr for Docker
+      # ============================================
+      KAFKA_LOG4J_OPTS: "-Dlog4j.configuration=file:/opt/kafka/config/connect-log4j.properties"
+      LOG_DIR: /dev/null
+      CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
+      CONNECT_LOG4J_LOGGERS: "org.apache.kafka.connect.runtime.WorkerSourceTask=INFO,org.apache.kafka.connect.runtime.WorkerSinkTask=INFO,io.debezium=INFO,io.debezium.connector.mysql=INFO"
+      
+      # Additional Debezium settings
+      CONNECT_PLUGIN_PATH: /kafka/connect
+    
+    # ============================================
+    # DOCKER LOGGING DRIVER CONFIGURATION
+    # ============================================
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+        labels: "service=kafka-connect,component=debezium"
+    
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/"]
       interval: 10s
       timeout: 10s
       retries: 20
       start_period: 120s
+    
     networks:
       - replication-network
+    
     restart: unless-stopped
 
   # ============================================

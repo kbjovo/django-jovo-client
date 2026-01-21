@@ -3,6 +3,9 @@ auth_enabled: false
 server:
   http_listen_port: 3100
   grpc_listen_port: 9096
+  # Add server timeouts for better stability
+  http_server_read_timeout: 600s
+  http_server_write_timeout: 600s
 
 common:
   path_prefix: /loki
@@ -16,58 +19,114 @@ common:
     kvstore:
       store: inmemory
 
+# ============================================
+# QUERY OPTIMIZATION
+# ============================================
 query_range:
   results_cache:
     cache:
       embedded_cache:
         enabled: true
-        max_size_mb: 100
+        max_size_mb: 500  # Increased from 100MB
+  # Improve query parallelization
+  parallelise_shardable_queries: true
+  max_retries: 5
 
+querier:
+  # Increase concurrent queries for better performance
+  max_concurrent: 20
+  query_timeout: 5m
+
+# ============================================
+# SCHEMA CONFIGURATION
+# Use tsdb for better performance (Loki 2.8+)
+# ============================================
 schema_config:
   configs:
     - from: 2024-01-01
-      store: boltdb-shipper
+      store: tsdb
       object_store: filesystem
-      schema: v11
+      schema: v12  # Latest schema version
       index:
         prefix: index_
         period: 24h
 
+# ============================================
+# STORAGE CONFIGURATION
+# ============================================
 storage_config:
-  boltdb_shipper:
-    active_index_directory: /loki/boltdb-shipper-active
-    cache_location: /loki/boltdb-shipper-cache
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
     cache_ttl: 24h
     shared_store: filesystem
   filesystem:
     directory: /loki/chunks
 
 compactor:
-  working_directory: /loki/boltdb-shipper-compactor
+  working_directory: /loki/compactor
   shared_store: filesystem
+  # Enable compaction
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
 
+# ============================================
+# LIMITS CONFIGURATION - Optimized for CDC Logs
+# ============================================
 limits_config:
+  # Ingestion limits
   reject_old_samples: true
-  reject_old_samples_max_age: 168h  # 7 days
-  ingestion_rate_mb: 16
-  ingestion_burst_size_mb: 32
-  per_stream_rate_limit: 8MB
-  per_stream_rate_limit_burst: 16MB
-  max_query_length: 721h  # 30 days
-  max_query_lookback: 721h  # 30 days
-  max_streams_per_user: 10000
-  max_global_streams_per_user: 50000
-  max_entries_limit_per_query: 10000
+  reject_old_samples_max_age: 336h  # 14 days (2 weeks)
+  ingestion_rate_mb: 32  # Increased from 16MB
+  ingestion_burst_size_mb: 64  # Increased from 32MB
+  per_stream_rate_limit: 16MB  # Increased from 8MB
+  per_stream_rate_limit_burst: 32MB  # Increased from 16MB
+  
+  # Query limits
+  max_query_length: 720h  # 30 days
+  max_query_lookback: 720h  # 30 days
+  max_streams_per_user: 0  # Unlimited (set to 0)
+  max_global_streams_per_user: 0  # Unlimited (set to 0)
+  max_entries_limit_per_query: 50000  # Increased from 10000
   max_cache_freshness_per_query: 10m
-  split_queries_by_interval: 15m
+  split_queries_by_interval: 30m  # Increased from 15m for better performance
+  
+  # Cardinality limits (important for high-cardinality labels)
+  max_label_name_length: 1024
+  max_label_value_length: 2048
+  max_label_names_per_series: 30
+  
+  # Line size limits
+  max_line_size: 256KB  # Increased for large log lines
+  max_line_size_truncate: false  # Don't truncate, reject instead
+  
+  # Chunk limits
+  max_chunks_per_query: 2000000
+  max_query_series: 5000
 
+# ============================================
+# CHUNK STORE CONFIGURATION
+# ============================================
 chunk_store_config:
-  max_look_back_period: 168h  # 7 days
+  max_look_back_period: 336h  # 14 days (2 weeks)
+  # Improve chunk caching
+  chunk_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 1000  # 1GB cache for chunks
 
+# ============================================
+# TABLE MANAGER - Retention Settings
+# ============================================
 table_manager:
   retention_deletes_enabled: true
-  retention_period: 168h  # 7 days
+  retention_period: 336h  # 14 days (2 weeks)
 
+# ============================================
+# RULER CONFIGURATION (for alerts)
+# ============================================
 ruler:
   storage:
     type: local
@@ -79,3 +138,59 @@ ruler:
     kvstore:
       store: inmemory
   enable_api: true
+  enable_alertmanager_v2: true
+
+# ============================================
+# INGESTER CONFIGURATION
+# ============================================
+ingester:
+  # Chunk settings
+  chunk_idle_period: 30m
+  chunk_block_size: 262144  # 256KB
+  chunk_target_size: 1572864  # 1.5MB
+  chunk_retain_period: 30s
+  max_chunk_age: 2h
+  
+  # Lifecycle settings
+  lifecycler:
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+    # Flush settings
+    final_sleep: 0s
+  
+  # WAL (Write-Ahead Log) for data durability
+  wal:
+    enabled: true
+    dir: /loki/wal
+    checkpoint_duration: 5m
+    flush_on_shutdown: true
+    replay_memory_ceiling: 1GB
+
+# ============================================
+# DISTRIBUTOR CONFIGURATION
+# ============================================
+distributor:
+  ring:
+    kvstore:
+      store: inmemory
+
+# ============================================
+# FRONTEND CONFIGURATION
+# ============================================
+frontend:
+  # Better performance for heavy queries
+  max_outstanding_per_tenant: 2048
+  compress_responses: true
+
+frontend_worker:
+  # Number of parallel workers
+  parallelism: 10
+  match_max_concurrent: true
+
+# ============================================
+# ANALYTICS - Disable for better performance
+# ============================================
+analytics:
+  reporting_enabled: false
