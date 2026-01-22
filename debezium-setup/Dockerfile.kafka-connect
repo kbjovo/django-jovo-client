@@ -32,41 +32,32 @@ RUN cd /tmp && \
     chown -R kafka:kafka /kafka/connect/confluent-avro-converter
 
 # ============================================
-# CONFIGURE LOGGING TO STDOUT/STDERR
+# CONFIGURE LOGGING TO STDOUT/STDERR (Log4j2 format)
 # ============================================
 
-# Override Debezium's default log4j configuration to output to console
-RUN mkdir -p /opt/kafka/config && \
-    echo "# Root logger option" > /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.rootLogger=INFO, stdout" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "# Direct log messages to stdout" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.appender.stdout=org.apache.log4j.ConsoleAppender" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.appender.stdout.Target=System.out" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.appender.stdout.layout=org.apache.log4j.PatternLayout" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.appender.stdout.layout.ConversionPattern=%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "# Kafka Connect logging" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.apache.kafka.connect=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.apache.kafka.connect.runtime=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.apache.kafka.connect.runtime.WorkerSourceTask=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.apache.kafka.connect.runtime.WorkerSinkTask=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.apache.kafka.connect.storage=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "# Debezium logging" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.io.debezium=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.io.debezium.connector.mysql=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.io.debezium.relational=INFO" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "# Reduce verbosity of some loggers" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.apache.kafka.clients=WARN" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.apache.kafka.common=WARN" >> /opt/kafka/config/connect-log4j.properties && \
-    echo "log4j.logger.org.reflections=ERROR" >> /opt/kafka/config/connect-log4j.properties && \
-    chown -R kafka:kafka /opt/kafka/config
+# Create log4j2.properties file for Debezium 3.x (uses log4j2, not log4j1)
+RUN mkdir -p /kafka/config && \
+    echo "status = WARN" > /kafka/config/log4j2.properties && \
+    echo "name = DebeziumConnectLogging" >> /kafka/config/log4j2.properties && \
+    echo "appender.console.type = Console" >> /kafka/config/log4j2.properties && \
+    echo "appender.console.name = Console" >> /kafka/config/log4j2.properties && \
+    echo "appender.console.target = SYSTEM_OUT" >> /kafka/config/log4j2.properties && \
+    echo "appender.console.layout.type = PatternLayout" >> /kafka/config/log4j2.properties && \
+    echo "appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss.SSS} %-5p [%t] %c{1} - %m%n" >> /kafka/config/log4j2.properties && \
+    echo "rootLogger.level = INFO" >> /kafka/config/log4j2.properties && \
+    echo "rootLogger.appenderRef.console.ref = Console" >> /kafka/config/log4j2.properties && \
+    echo "logger.connect.name = org.apache.kafka.connect" >> /kafka/config/log4j2.properties && \
+    echo "logger.connect.level = INFO" >> /kafka/config/log4j2.properties && \
+    echo "logger.debezium.name = io.debezium" >> /kafka/config/log4j2.properties && \
+    echo "logger.debezium.level = INFO" >> /kafka/config/log4j2.properties && \
+    echo "logger.kafka.clients.name = org.apache.kafka.clients" >> /kafka/config/log4j2.properties && \
+    echo "logger.kafka.clients.level = WARN" >> /kafka/config/log4j2.properties && \
+    echo "logger.reflections.name = org.reflections" >> /kafka/config/log4j2.properties && \
+    echo "logger.reflections.level = ERROR" >> /kafka/config/log4j2.properties && \
+    chown -R kafka:kafka /kafka/config
 
-# Set environment variables to use console logging
-ENV KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:/opt/kafka/config/connect-log4j.properties"
-ENV LOG_DIR=/dev/null
+# Set environment variables for log4j2
+ENV KAFKA_LOG4J_OPTS="-Dlog4j2.configurationFile=file:/kafka/config/log4j2.properties"
 ENV CONNECT_LOG4J_ROOT_LOGLEVEL=INFO
 
 # Switch back to kafka user

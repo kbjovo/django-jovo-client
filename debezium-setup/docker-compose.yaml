@@ -308,12 +308,10 @@ services:
       
       # ============================================
       # CRITICAL LOGGING CONFIGURATION
-      # Force all logs to stdout/stderr for Docker
+      # Force all logs to stdout/stderr for Docker (Log4j2 format)
       # ============================================
-      KAFKA_LOG4J_OPTS: "-Dlog4j.configuration=file:/opt/kafka/config/connect-log4j.properties"
-      LOG_DIR: /dev/null
+      KAFKA_LOG4J_OPTS: "-Dlog4j2.configurationFile=file:/kafka/config/log4j2.properties"
       CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
-      CONNECT_LOG4J_LOGGERS: "org.apache.kafka.connect.runtime.WorkerSourceTask=INFO,org.apache.kafka.connect.runtime.WorkerSinkTask=INFO,io.debezium=INFO,io.debezium.connector.mysql=INFO"
       
       # Additional Debezium settings
       CONNECT_PLUGIN_PATH: /kafka/connect
