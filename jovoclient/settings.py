@@ -521,14 +521,38 @@ DEBEZIUM_CONFIG = {
 # ====================================
 KAFKA_TOPIC_CONFIG = {
     'PARTITIONS': int(os.getenv('KAFKA_TOPIC_PARTITIONS', '1')),
-    'REPLICATION_FACTOR': int(os.getenv('KAFKA_TOPIC_REPLICATION_FACTOR', '3')),  # Updated for 3 brokers
+    'REPLICATION_FACTOR': int(os.getenv('KAFKA_TOPIC_REPLICATION_FACTOR', '3')),
     'RETENTION_MS': int(os.getenv('KAFKA_TOPIC_RETENTION_MS', '604800000')),  # 7 days
     'RETENTION_BYTES': int(os.getenv('KAFKA_TOPIC_RETENTION_BYTES', '-1')),
     'CLEANUP_POLICY': os.getenv('KAFKA_TOPIC_CLEANUP_POLICY', 'delete'),
     'COMPRESSION_TYPE': os.getenv('KAFKA_TOPIC_COMPRESSION_TYPE', 'snappy'),
-    'MIN_INSYNC_REPLICAS': int(os.getenv('KAFKA_TOPIC_MIN_ISR', '2')),  # Updated for 3 brokers
+    'MIN_INSYNC_REPLICAS': int(os.getenv('KAFKA_TOPIC_MIN_ISR', '2')),
     'SEGMENT_BYTES': int(os.getenv('KAFKA_TOPIC_SEGMENT_BYTES', '1073741824')),
     'SEGMENT_MS': int(os.getenv('KAFKA_TOPIC_SEGMENT_MS', '604800000')),
+}
+
+# ====================================
+# KAFKA CONNECT CONFIGURATION
+# ====================================
+# Note: KAFKA_CONNECT_HEAP_OPTS is configured in .env.docker and docker-compose.yaml
+# Recommended heap sizes based on connector count:
+#   1-3 connectors:  -Xms2G -Xmx2G
+#   4-10 connectors: -Xms4G -Xmx4G (current default)
+#   10-20 connectors: -Xms6G -Xmx6G or -Xms8G -Xmx8G
+KAFKA_CONNECT_CONFIG = {
+    'HEAP_OPTS': os.getenv('KAFKA_CONNECT_HEAP_OPTS', '-Xms4G -Xmx4G'),
+}
+
+# ====================================
+# SINK CONNECTOR CONFIGURATION
+# ====================================
+# Dead Letter Queue (DLQ) settings for handling failed records
+# When enabled, failed records go to a .dlq topic instead of crashing the connector
+SINK_CONNECTOR_CONFIG = {
+    'ERRORS_TOLERANCE': os.getenv('SINK_ERRORS_TOLERANCE', 'all'),  # 'none' or 'all'
+    'DLQ_ENABLED': os.getenv('SINK_DLQ_ENABLED', 'true').lower() in ('true', '1', 'yes'),
+    'DLQ_REPLICATION_FACTOR': int(os.getenv('SINK_DLQ_REPLICATION_FACTOR', '3')),
+    'DLQ_CONTEXT_HEADERS': os.getenv('SINK_DLQ_CONTEXT_HEADERS', 'true').lower() in ('true', '1', 'yes'),
 }
 
 # ====================================

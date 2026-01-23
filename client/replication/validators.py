@@ -39,6 +39,7 @@ class ReplicationValidator:
         validations = [
             self._validate_database_config(),
             self._validate_table_mappings(),
+            self._validate_primary_keys(),  # Ensures all tables have PKs to avoid record-key errors
             self._validate_target_database(),
             self._validate_no_topic_conflicts(),
         ]
@@ -97,6 +98,56 @@ class ReplicationValidator:
 
         except Exception as e:
             return False, f"Table mapping validation error: {str(e)}"
+
+    def _validate_primary_keys(self) -> Tuple[bool, str]:
+        """
+        Validate all enabled tables have primary keys defined.
+
+        Tables without primary keys cause 'record-key' errors because:
+        - Debezium cannot generate proper message keys
+        - JDBC sink connector cannot perform upserts
+        - Schema registry may have conflicts
+
+        Returns:
+            (is_valid, error_message)
+        """
+        try:
+            enabled_tables = self.config.table_mappings.filter(is_enabled=True)
+            tables_without_pk = []
+
+            for table_mapping in enabled_tables:
+                # Check if any column is marked as primary key
+                pk_columns = table_mapping.column_mappings.filter(
+                    is_primary_key=True,
+                    is_enabled=True
+                )
+
+                if not pk_columns.exists():
+                    tables_without_pk.append(table_mapping.source_table)
+
+            if tables_without_pk:
+                error_msg = (
+                    f"The following {len(tables_without_pk)} table(s) have no primary key defined:\n"
+                    + "\n".join([f"  • {t}" for t in tables_without_pk[:10]])  # Limit to first 10
+                )
+                if len(tables_without_pk) > 10:
+                    error_msg += f"\n  ... and {len(tables_without_pk) - 10} more"
+
+                error_msg += (
+                    "\n\nTables without primary keys can cause 'record-key' errors. "
+                    "Please ensure all tables have at least one primary key column marked."
+                )
+
+                logger.warning(f"[{self.config.connector_name}] Tables without PKs: {tables_without_pk}")
+                return False, error_msg
+
+            logger.debug(f"[{self.config.connector_name}] ✓ All {enabled_tables.count()} tables have primary keys")
+            return True, ""
+
+        except Exception as e:
+            logger.warning(f"[{self.config.connector_name}] Could not validate PKs: {e}")
+            # Don't fail validation if check fails
+            return True, ""
 
 
     def _validate_no_topic_conflicts(self) -> Tuple[bool, str]:

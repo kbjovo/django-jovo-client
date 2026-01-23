@@ -3,11 +3,11 @@ Health monitoring for replication system.
 
 Periodic task that checks health of all active replications and
 automatically fixes issues when possible.
+
+Uses JDBC Sink Connectors for data replication (no Celery-based consumers).
 """
 
 import logging
-from datetime import timedelta
-from django.utils import timezone
 from celery import shared_task
 
 logger = logging.getLogger(__name__)
@@ -19,11 +19,11 @@ def monitor_replication_health():
     Monitor health of all active replications.
 
     Runs every 1 minute to check:
-    1. Connector state (RUNNING/FAILED/PAUSED)
-    2. Consumer heartbeat (is consumer alive?)
+    1. Source connector state (RUNNING/FAILED/PAUSED)
+    2. Sink connector state (RUNNING/FAILED/PAUSED)
     3. Auto-fix issues when possible
 
-    This is a Celery periodic task configured in settings.py
+    This is a Celery periodic task configured in celery.py
     """
     from client.models import ReplicationConfig
     from .orchestrator import ReplicationOrchestrator
@@ -210,44 +210,3 @@ def _fix_source_connector(config, connector_status):
             return False
 
     return False
-
-
-@shared_task(name='client.replication.check_consumer_heartbeat')
-def check_consumer_heartbeat():
-    """
-    Check for stale consumer heartbeats and restart if needed.
-
-    Runs every 2 minutes to check if consumers are alive.
-    If heartbeat is older than 2 minutes, restarts the consumer.
-    """
-    from client.models import ReplicationConfig
-    from client.tasks import start_kafka_consumer
-
-    logger.debug("Checking consumer heartbeats...")
-
-    # Get all active configs with consumer running
-    active_configs = ReplicationConfig.objects.filter(
-        is_active=True,
-        status='active'
-    )
-
-    for config in active_configs:
-        try:
-            last_heartbeat = getattr(config, 'consumer_last_heartbeat', None)
-
-            if not last_heartbeat:
-                logger.warning(f"[{config.connector_name}] No heartbeat recorded, restarting consumer...")
-                start_kafka_consumer.apply_async(args=[config.id])
-                continue
-
-            # Check if heartbeat is stale (> 2 minutes)
-            time_since_heartbeat = timezone.now() - last_heartbeat
-            if time_since_heartbeat > timedelta(minutes=2):
-                logger.warning(
-                    f"[{config.connector_name}] Heartbeat stale "
-                    f"({time_since_heartbeat.total_seconds():.0f}s ago), restarting consumer..."
-                )
-                start_kafka_consumer.apply_async(args=[config.id])
-
-        except Exception as e:
-            logger.error(f"[{config.connector_name}] Error checking heartbeat: {e}")

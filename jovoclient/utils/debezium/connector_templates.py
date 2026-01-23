@@ -7,10 +7,24 @@ from typing import Dict, List, Optional, Any, Tuple
 from client.models.client import Client
 from client.models.database import ClientDatabase
 from client.models.job import ReplicationConfig
-import random
 from sqlalchemy.sql import text
 
 logger = logging.getLogger(__name__)
+
+
+def generate_server_id(client_id: int, db_id: int, version: int = 0) -> int:
+    """
+    Generate a deterministic MySQL server ID based on client, database IDs, and connector version.
+
+    This ensures:
+    - Unique ID per connector version (no collisions when running multiple versions)
+    - Same ID on restart (no binlog confusion)
+    - Valid range for MySQL (1 to 2^32-1)
+
+    Formula: 100000 + (client_id * 10000) + (db_id * 100) + (version % 100)
+    Supports up to 999 clients with 99 databases each and 99 connector versions.
+    """
+    return 100000 + (client_id * 10000) + (db_id * 100) + (version % 100)
 
 
 def build_column_include_list(replication_config: 'ReplicationConfig', db_config: ClientDatabase) -> Optional[str]:
@@ -181,8 +195,9 @@ def get_mysql_connector_config(
         "database.password": db_config.get_decrypted_password(),
         "database.include.list": db_config.database_name,
         
-        # Server identification
-        "database.server.id": str(random.randint(10000, 999999)), 
+        # Server identification (deterministic ID for consistency across restarts)
+        # Include version to prevent conflicts when multiple connector versions run simultaneously
+        "database.server.id": str(generate_server_id(client.id, db_config.id, version or 0)),
         "database.server.name": f"client_{client.id}_db_{db_config.id}",
         
         # Topic prefix (this will be used in Kafka topic names)

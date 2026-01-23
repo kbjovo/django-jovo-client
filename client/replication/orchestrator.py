@@ -628,24 +628,17 @@ class ReplicationOrchestrator:
 
     def _get_primary_key_fields(self) -> Optional[str]:
         """
-        Extract primary key fields from first enabled table.
+        Extract primary key fields from enabled tables.
+
+        Note: With primary.key.mode=record_key (default), JDBC sink connector
+        auto-extracts PKs from Kafka message keys. This returns None to let
+        the sink connector handle PKs automatically per table.
 
         Returns:
-            Comma-separated list of primary key column names, or None
+            None - let sink connector auto-detect PKs from record keys
         """
-        enabled_tables = list(self.config.table_mappings.filter(is_enabled=True))
-        
-        if enabled_tables:
-            first_table = enabled_tables[0]
-            pk_columns = first_table.column_mappings.filter(
-                is_primary_key=True,
-                is_enabled=True
-            )
-            
-            if pk_columns.exists():
-                pk_fields = ",".join([col.target_column for col in pk_columns])
-                return pk_fields
-        
+        # With record_key mode, PKs are extracted from Kafka message keys
+        # which Debezium sets correctly per table. No need to specify here.
         return None
 
     # ==========================================

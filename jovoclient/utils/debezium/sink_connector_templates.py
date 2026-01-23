@@ -91,14 +91,34 @@ def get_mysql_sink_connector_config(
         "batch.size": "3000",
         "max.retries": "10",
         "retry.backoff.ms": "3000",
-        "errors.tolerance": "none",
-        "errors.log.enable": "true",
-        "errors.log.include.messages": "true",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
         "topic.tracking.refresh.interval.ms": "5000",
         "consumer.override.metadata.max.age.ms": "10000",
+
+        # Error handling (configurable via settings)
+        "errors.log.enable": "true",
+        "errors.log.include.messages": "true",
     }
+
+    # Apply DLQ settings from Django settings
+    from django.conf import settings
+    sink_config = getattr(settings, 'SINK_CONNECTOR_CONFIG', {})
+
+    errors_tolerance = sink_config.get('ERRORS_TOLERANCE', 'all')
+    dlq_enabled = sink_config.get('DLQ_ENABLED', True)
+    dlq_replication_factor = sink_config.get('DLQ_REPLICATION_FACTOR', 3)
+    dlq_context_headers = sink_config.get('DLQ_CONTEXT_HEADERS', True)
+
+    config["errors.tolerance"] = errors_tolerance
+
+    # Add Dead Letter Queue configuration if enabled
+    if dlq_enabled and errors_tolerance == 'all':
+        dlq_topic = f"client_{client.id}.dlq"
+        config["errors.deadletterqueue.topic.name"] = dlq_topic
+        config["errors.deadletterqueue.topic.replication.factor"] = str(dlq_replication_factor)
+        config["errors.deadletterqueue.context.headers.enable"] = str(dlq_context_headers).lower()
+        logger.info(f"DLQ enabled for sink connector: {dlq_topic}")
 
     if primary_key_fields:
         config["primary.key.fields"] = primary_key_fields
@@ -179,14 +199,34 @@ def get_postgresql_sink_connector_config(
         "batch.size": "3000",
         "max.retries": "10",
         "retry.backoff.ms": "3000",
-        "errors.tolerance": "none",
-        "errors.log.enable": "true",
-        "errors.log.include.messages": "true",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
         "topic.tracking.refresh.interval.ms": "5000",
         "consumer.override.metadata.max.age.ms": "10000",
+
+        # Error handling (configurable via settings)
+        "errors.log.enable": "true",
+        "errors.log.include.messages": "true",
     }
+
+    # Apply DLQ settings from Django settings
+    from django.conf import settings
+    sink_config = getattr(settings, 'SINK_CONNECTOR_CONFIG', {})
+
+    errors_tolerance = sink_config.get('ERRORS_TOLERANCE', 'all')
+    dlq_enabled = sink_config.get('DLQ_ENABLED', True)
+    dlq_replication_factor = sink_config.get('DLQ_REPLICATION_FACTOR', 3)
+    dlq_context_headers = sink_config.get('DLQ_CONTEXT_HEADERS', True)
+
+    config["errors.tolerance"] = errors_tolerance
+
+    # Add Dead Letter Queue configuration if enabled
+    if dlq_enabled and errors_tolerance == 'all':
+        dlq_topic = f"client_{client.id}.dlq"
+        config["errors.deadletterqueue.topic.name"] = dlq_topic
+        config["errors.deadletterqueue.topic.replication.factor"] = str(dlq_replication_factor)
+        config["errors.deadletterqueue.context.headers.enable"] = str(dlq_context_headers).lower()
+        logger.info(f"DLQ enabled for sink connector: {dlq_topic}")
 
     if primary_key_fields:
         config["primary.key.fields"] = primary_key_fields

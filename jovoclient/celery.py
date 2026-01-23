@@ -18,7 +18,6 @@ app.autodiscover_tasks()
 
 # Configure Celery Beat schedule
 app.conf.beat_schedule = {
-    # Legacy connector monitoring (keep for now)
     'monitor-debezium-connectors': {
         'task': 'client.tasks.monitor_connectors',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
@@ -27,20 +26,14 @@ app.conf.beat_schedule = {
         'task': 'client.tasks.check_replication_health',
         'schedule': crontab(minute='*/10'),  # Every 10 minutes
     },
-    # NEW: Comprehensive health monitoring with auto-fix
+    # Comprehensive health monitoring with auto-fix (connector status only)
     'monitor-replication-health': {
         'task': 'client.replication.monitor_replication_health',
-        'schedule': crontab(minute='*/1'),  # Every 1 minute (checks connector + consumer)
-    },
-    # NEW: Consumer heartbeat check (more frequent)
-    'check-consumer-heartbeat': {
-        'task': 'client.replication.check_consumer_heartbeat',
-        'schedule': crontab(minute='*/2'),  # Every 2 minutes
+        'schedule': crontab(minute='*/1'),  # Every 1 minute
     },
 }
 
 app.conf.task_routes = {
-    'client.tasks.start_kafka_consumer': {'queue': 'consumers'},
     'client.tasks.*': {'queue': 'celery'},
 }
 

@@ -50,8 +50,6 @@ from client.utils.database_utils import (
 )
 from client.tasks import (
     create_debezium_connector,
-    start_kafka_consumer,
-    stop_kafka_consumer,
     delete_debezium_connector,
     restart_replication
 )
