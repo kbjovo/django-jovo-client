@@ -90,7 +90,7 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 1: Validate Prerequisites
             # ========================================
-            self._log_info("STEP 1/4: Validating prerequisites...")
+            self._log_info("STEP 1/5: Validating prerequisites...")
             self._log_info("  → Checking database connectivity")
             self._log_info("  → Verifying binlog configuration")
             self._log_info("  → Validating user permissions")
@@ -108,8 +108,8 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 2: Create Kafka Topics Explicitly
             # ========================================
-            self._log_info("STEP 2/4: Creating Kafka topics explicitly...")
-            
+            self._log_info("STEP 2/5: Creating Kafka topics explicitly...")
+
             success, message = self.create_topics()
             if not success:
                 self._update_status('error', message)
@@ -117,6 +117,9 @@ class ReplicationOrchestrator:
 
             self._log_info(f"✓ {message}")
             self._log_info("")
+
+            # Note: Target tables are auto-created by sink connector (schema.evolution=basic)
+            # No manual table creation needed
 
             # ========================================
             # STEP 3: Ensure Sink Connector Ready (Efficient)
@@ -189,7 +192,11 @@ class ReplicationOrchestrator:
 
     def stop_replication(self) -> Tuple[bool, str]:
         """
-        Stop replication (pause both connectors).
+        Stop replication (pause source connector only).
+
+        NOTE: Sink connector is NOT paused because it may be shared by
+        multiple source connectors. Other active sources should continue
+        feeding into the sink.
 
         Returns:
             (success, message)
@@ -202,12 +209,12 @@ class ReplicationOrchestrator:
             # Update status
             self._update_status('paused', 'Stopping replication...')
             self.config.is_active = False
+            self.config.connector_state = 'PAUSED'
             self.config.save()
 
-            # Pause both connectors
             errors = []
-            
-            # Pause source connector
+
+            # Pause source connector only
             if self.config.connector_name:
                 try:
                     success, error = self.connector_manager.pause_connector(self.config.connector_name)
@@ -218,20 +225,14 @@ class ReplicationOrchestrator:
                 except Exception as e:
                     errors.append(f"Source connector: {str(e)}")
 
-            # Pause sink connector
-            if self.config.sink_connector_name:
-                try:
-                    success, error = self.connector_manager.pause_connector(self.config.sink_connector_name)
-                    if success:
-                        self._log_info(f"✓ Paused sink: {self.config.sink_connector_name}")
-                    else:
-                        errors.append(f"Sink connector: {error}")
-                except Exception as e:
-                    errors.append(f"Sink connector: {str(e)}")
+            # NOTE: Sink connector is intentionally NOT paused
+            # It's shared by all source connectors for this client
+            # Other active sources should continue feeding into the sink
+            self._log_info("ℹ️ Sink connector not paused (shared by multiple sources)")
 
             if errors:
                 error_msg = "; ".join(errors)
-                self._log_warning(f"⚠️ Some connectors could not be paused: {error_msg}")
+                self._log_warning(f"⚠️ Could not pause source connector: {error_msg}")
                 return False, error_msg
 
             self._log_info("=" * 60)
@@ -314,25 +315,60 @@ class ReplicationOrchestrator:
                 except Exception as e:
                     self._log_warning(f"⚠️ Source deletion error: {e}")
 
-            # Delete sink connector
+            # Handle sink connector (shared by multiple source connectors)
+            # Check if there are other active source connectors for this client
             if sink_connector_name:
-                try:
-                    success, error = self.connector_manager.delete_connector(
-                        sink_connector_name,
-                        delete_topics=False
-                    )
-                    if success:
-                        # Mark as deleted in history
-                        from client.models import ConnectorHistory
-                        ConnectorHistory.mark_connector_deleted(
-                            connector_name=sink_connector_name,
-                            notes="Deleted via orchestrator"
-                        )
-                        self._log_info(f"✓ Deleted sink: {sink_connector_name}")
+                from client.models import ReplicationConfig
+                from client.models.database import ClientDatabase
+
+                client = self.config.client_database.client
+                target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+
+                # Get remaining active configs (excluding the one being deleted)
+                remaining_configs = ReplicationConfig.objects.filter(
+                    client_database__client=client,
+                    status__in=['configured', 'active'],
+                ).exclude(pk=config_id)
+
+                if remaining_configs.exists() and target_db:
+                    # Other source connectors exist - update sink with remaining topics
+                    self._log_info("ℹ️ Other source connectors exist - updating sink connector")
+
+                    remaining_topics = set()
+                    for config in remaining_configs:
+                        db_config = config.client_database
+                        topic_prefix = config.kafka_topic_prefix
+
+                        for tm in config.table_mappings.filter(is_enabled=True):
+                            topic = format_topic_name(
+                                db_config=db_config,
+                                table_name=tm.source_table,
+                                topic_prefix=topic_prefix,
+                                schema=tm.source_schema
+                            )
+                            remaining_topics.add(topic)
+
+                    if remaining_topics:
+                        try:
+                            success, message = self._update_sink_connector(
+                                sink_connector_name,
+                                remaining_topics,
+                                target_db
+                            )
+                            if success:
+                                self._log_info(f"✓ Updated sink with {len(remaining_topics)} remaining topics")
+                            else:
+                                self._log_warning(f"⚠️ Failed to update sink: {message}")
+                        except Exception as e:
+                            self._log_warning(f"⚠️ Sink update error: {e}")
                     else:
-                        self._log_warning(f"⚠️ Sink deletion failed: {error}")
-                except Exception as e:
-                    self._log_warning(f"⚠️ Sink deletion error: {e}")
+                        # No remaining topics - delete sink
+                        self._log_info("ℹ️ No remaining topics - deleting sink connector")
+                        self._delete_sink_connector(sink_connector_name)
+                else:
+                    # No other active source connectors - delete sink
+                    self._log_info("ℹ️ No other source connectors - deleting sink connector")
+                    self._delete_sink_connector(sink_connector_name)
 
             # Optionally delete topics and target tables
             if delete_topics:
@@ -404,11 +440,13 @@ class ReplicationOrchestrator:
                 return False, "No target database configured"
 
             # Generate sink connector name (NOT versioned - same across source connector versions)
+            # Shared by ALL source connectors for this client
             sink_connector_name = f"client_{client.id}_db_{target_db.id}_sink_connector"
 
-            # Get current enabled tables
-            current_topics = self._get_kafka_topics_for_config()
-            
+            # Get topics from ALL active source connectors for this client
+            # This enables multiple source connectors to feed into one shared sink
+            current_topics = self._get_all_kafka_topics_for_client()
+
             if not current_topics:
                 return False, "No tables enabled for replication"
 
@@ -474,6 +512,50 @@ class ReplicationOrchestrator:
 
         return topics
 
+    def _get_all_kafka_topics_for_client(self) -> Set[str]:
+        """
+        Get topics from ALL active ReplicationConfigs for this client.
+
+        Used for sink connector to subscribe to all source connectors,
+        enabling multiple source connectors to feed into a shared sink.
+
+        Returns:
+            Set of topic names from all active configs
+        """
+        from client.models import ReplicationConfig
+
+        client = self.config.client_database.client
+        topics = set()
+
+        # Get all active/configured configs for this client (any source DB)
+        active_configs = ReplicationConfig.objects.filter(
+            client_database__client=client,
+            status__in=['configured', 'active'],
+        ).exclude(
+            pk=self.config.pk  # Exclude current config, we'll add it separately
+        )
+
+        # Add topics from other active configs
+        for config in active_configs:
+            db_config = config.client_database
+            topic_prefix = config.kafka_topic_prefix
+
+            for tm in config.table_mappings.filter(is_enabled=True):
+                topic = format_topic_name(
+                    db_config=db_config,
+                    table_name=tm.source_table,
+                    topic_prefix=topic_prefix,
+                    schema=tm.source_schema
+                )
+                topics.add(topic)
+
+        # Add topics from current config
+        topics.update(self._get_kafka_topics_for_config())
+
+        self._log_info(f"Aggregated {len(topics)} topics from {active_configs.count() + 1} source connector(s)")
+
+        return topics
+
     def _parse_topics_from_config(self, config: Dict[str, Any]) -> Set[str]:
         """
         Parse topics from existing sink connector config.
@@ -496,11 +578,11 @@ class ReplicationOrchestrator:
         target_db
     ) -> Tuple[bool, str]:
         """
-        Update existing sink connector with new topic list.
+        Update existing sink connector to use topics.regex for auto-subscription.
 
         Args:
             sink_connector_name: Name of sink connector
-            topics: Set of Kafka topics to subscribe to
+            topics: Set of Kafka topics (used for logging only)
             target_db: Target database instance
 
         Returns:
@@ -510,17 +592,24 @@ class ReplicationOrchestrator:
             # Get primary key fields
             primary_key_fields = self._get_primary_key_fields()
 
-            # Generate new config
+            # Generate new config with topics.regex
             kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
                 'KAFKA_INTERNAL_SERVERS',
                 'kafka-1:29092,kafka-2:29092,kafka-3:29092'
             )
 
-            custom_config = {'name': sink_connector_name}
+            # Use topics.regex for auto-subscription
+            client = self.config.client_database.client
+            topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
+
+            custom_config = {
+                'name': sink_connector_name,
+                'topics.regex': topic_regex,
+            }
 
             new_config = get_sink_connector_config_for_database(
                 db_config=target_db,
-                topics=list(topics),
+                topics=None,  # Use regex instead of explicit topics
                 kafka_bootstrap_servers=kafka_bootstrap,
                 primary_key_fields=primary_key_fields,
                 custom_config=custom_config,
@@ -533,11 +622,11 @@ class ReplicationOrchestrator:
             )
 
             if success:
-                self._log_info(f"✓ Updated sink connector with {len(topics)} topics")
+                self._log_info(f"✓ Updated sink connector with topics.regex: {topic_regex}")
                 self.config.sink_connector_name = sink_connector_name
                 self.config.sink_connector_state = 'RUNNING'
                 self.config.save()
-                return True, f"Sink connector updated ({len(topics)} topics)"
+                return True, f"Sink connector updated (topics.regex)"
             else:
                 return False, f"Failed to update sink connector: {error}"
 
@@ -553,11 +642,11 @@ class ReplicationOrchestrator:
         target_db
     ) -> Tuple[bool, str]:
         """
-        Create new sink connector.
+        Create new sink connector using topics.regex for auto-subscription.
 
         Args:
             sink_connector_name: Name for sink connector
-            topics: Set of Kafka topics to subscribe to
+            topics: Set of Kafka topics (used for logging only)
             target_db: Target database instance
 
         Returns:
@@ -573,12 +662,18 @@ class ReplicationOrchestrator:
                 'kafka-1:29092,kafka-2:29092,kafka-3:29092'
             )
 
-            # Generate config
-            custom_config = {'name': sink_connector_name}
+            # Use topics.regex for auto-subscription to all source connector topics
+            client = self.config.client_database.client
+            topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
+
+            custom_config = {
+                'name': sink_connector_name,
+                'topics.regex': topic_regex,
+            }
 
             sink_config = get_sink_connector_config_for_database(
                 db_config=target_db,
-                topics=list(topics),
+                topics=None,  # Use regex instead of explicit topics
                 kafka_bootstrap_servers=kafka_bootstrap,
                 primary_key_fields=primary_key_fields,
                 custom_config=custom_config,
@@ -605,11 +700,7 @@ class ReplicationOrchestrator:
                 self._log_info(f"  Connector: {sink_connector_name}")
                 self._log_info(f"  Target: {target_db.db_type} ({target_db.host}:{target_db.port})")
                 self._log_info(f"  Database: {target_db.database_name}")
-                self._log_info(f"  Topics subscribed: {len(topics)}")
-                # Log topic list (excluding internal topics)
-                user_topics = [t for t in sorted(topics) if not t.startswith('_') and not t.startswith('connect-') and not t.startswith('schema-')]
-                for topic in user_topics:
-                    self._log_info(f"    - {topic}")
+                self._log_info(f"  Topics regex: {topic_regex}")
                 self._log_info(f"  Primary key fields: {primary_key_fields or 'auto-detected'}")
                 self._log_info(f"  Kafka bootstrap: {kafka_bootstrap}")
 
@@ -617,7 +708,7 @@ class ReplicationOrchestrator:
                 self.config.sink_connector_state = 'RUNNING'
                 self.config.save()
 
-                return True, f"Sink connector created ({len(topics)} topics)"
+                return True, f"Sink connector created (topics.regex: {topic_regex})"
             else:
                 return False, f"Failed to create sink connector: {error}"
 
@@ -640,6 +731,36 @@ class ReplicationOrchestrator:
         # With record_key mode, PKs are extracted from Kafka message keys
         # which Debezium sets correctly per table. No need to specify here.
         return None
+
+    def _delete_sink_connector(self, sink_connector_name: str) -> bool:
+        """
+        Delete sink connector and mark in history.
+
+        Args:
+            sink_connector_name: Name of the sink connector to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            success, error = self.connector_manager.delete_connector(
+                sink_connector_name,
+                delete_topics=False
+            )
+            if success:
+                from client.models import ConnectorHistory
+                ConnectorHistory.mark_connector_deleted(
+                    connector_name=sink_connector_name,
+                    notes="Deleted via orchestrator (no remaining sources)"
+                )
+                self._log_info(f"✓ Deleted sink: {sink_connector_name}")
+                return True
+            else:
+                self._log_warning(f"⚠️ Sink deletion failed: {error}")
+                return False
+        except Exception as e:
+            self._log_warning(f"⚠️ Sink deletion error: {e}")
+            return False
 
     # ==========================================
     # Source Connector Management (Existing)
@@ -668,13 +789,9 @@ class ReplicationOrchestrator:
             version=self.config.connector_version
         )
 
-        # Delete old connector if exists
-        try:
-            self.connector_manager.delete_connector(versioned_connector_name, delete_topics=False)
-        except Exception:
-            pass  # Connector didn't exist
-
-        # Create fresh connector
+        # Create connector (version will be incremented in _create_connector)
+        # Note: Old connectors are NOT deleted - each version runs independently
+        # The database.server.name includes version to prevent JMX MBean conflicts
         return self._create_connector(snapshot_mode=snapshot_mode)
 
     def _create_connector(self, snapshot_mode: str = 'when_needed') -> Tuple[bool, str]:
@@ -991,7 +1108,7 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 1: Create/re-enable table mappings
             # ========================================
-            self._log_info("STEP 1/5: Creating table mappings...")
+            self._log_info("STEP 1/6: Creating table mappings...")
 
             from client.models.replication import TableMapping, ColumnMapping
             from client.utils.database_utils import get_table_schema
@@ -1012,6 +1129,30 @@ class ReplicationOrchestrator:
                         source_schema = schema.get('schema', '')
                         actual_table_name = table_name
 
+                    # Build target table name to match sink connector transform
+                    # Sink connector uses: transforms.extractTableName.replacement = "$1_$2"
+                    # Where $1 is schema/database and $2 is table name
+                    # Result format: {schema}_{table} (e.g., kbe_tally_item_mapping)
+                    if db_config.db_type == 'mysql':
+                        # MySQL: database name is used as schema in topic
+                        target_table_name = f"{db_config.database_name}_{actual_table_name}"
+                    elif db_config.db_type == 'postgresql':
+                        # PostgreSQL: schema defaults to 'public'
+                        pg_schema = source_schema or 'public'
+                        target_table_name = f"{pg_schema}_{actual_table_name}"
+                    elif db_config.db_type == 'mssql':
+                        # MSSQL: schema defaults to 'dbo'
+                        mssql_schema = source_schema or 'dbo'
+                        target_table_name = f"{mssql_schema}_{actual_table_name}"
+                    elif db_config.db_type == 'oracle':
+                        # Oracle: schema is typically the user
+                        oracle_schema = source_schema or db_config.username.upper()
+                        target_table_name = f"{oracle_schema}_{actual_table_name}"
+                    else:
+                        target_table_name = actual_table_name
+
+                    self._log_info(f"  → Target table name: {target_table_name}")
+
                     # Check for existing disabled mapping
                     existing_mapping = TableMapping.objects.filter(
                         replication_config=self.config,
@@ -1022,19 +1163,20 @@ class ReplicationOrchestrator:
                     if existing_mapping:
                         existing_mapping.is_enabled = True
                         existing_mapping.source_schema = source_schema
+                        existing_mapping.target_table = target_table_name
                         existing_mapping.save()
                         table_mapping = existing_mapping
                         table_mapping.column_mappings.all().delete()
-                        self._log_info(f"  ✓ Re-enabled mapping: {table_name}")
+                        self._log_info(f"  ✓ Re-enabled mapping: {table_name} → {target_table_name}")
                     else:
                         table_mapping = TableMapping.objects.create(
                             replication_config=self.config,
                             source_table=actual_table_name,
-                            target_table=actual_table_name,
+                            target_table=target_table_name,
                             source_schema=source_schema,
                             is_enabled=True,
                         )
-                        self._log_info(f"  ✓ Created mapping: {table_name}")
+                        self._log_info(f"  ✓ Created mapping: {table_name} → {target_table_name}")
 
                     # Create column mappings (all enabled)
                     for col in columns:
@@ -1063,13 +1205,15 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 2: Create Kafka topics
             # ========================================
-            self._log_info("STEP 2/5: Creating Kafka topics...")
+            self._log_info("STEP 2/6: Creating Kafka topics...")
 
             success, message = self.create_topics()
             if success:
                 self._log_info(f"✓ {message}")
             else:
                 self._log_warning(f"⚠️ Topic creation warning: {message}")
+
+            # Note: Target tables are auto-created by sink connector (schema.evolution=basic)
 
             # ========================================
             # STEP 3: Update source connector config
@@ -1133,34 +1277,10 @@ class ReplicationOrchestrator:
             self._log_info("STEP 5/5: Restarting sink connector...")
 
             if self.config.sink_connector_name:
-                # Update sink config with topics.regex and restart
-                from client.models.database import ClientDatabase
-
-                target_db = ClientDatabase.objects.filter(
-                    client=client,
-                    is_target=True
-                ).first()
-
-                if target_db:
-                    topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
-
-                    sink_config = get_sink_connector_config_for_database(
-                        db_config=target_db,
-                        topics=None,
-                        delete_enabled=True,
-                        custom_config={
-                            'name': self.config.sink_connector_name,
-                            'topics.regex': topic_regex,
-                        }
-                    )
-
-                    if sink_config:
-                        self.connector_manager.update_connector_config(
-                            self.config.sink_connector_name,
-                            sink_config
-                        )
-                        self.connector_manager.restart_connector(self.config.sink_connector_name)
-                        self._log_info("✓ Sink connector reconfigured and restarted")
+                # Sink uses topics.regex so it auto-subscribes to new topics
+                # Just restart to ensure it picks up the new topics
+                self.connector_manager.restart_connector(self.config.sink_connector_name)
+                self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
 
             self._log_info("=" * 60)
             self._log_info("✓ TABLES ADDED SUCCESSFULLY")

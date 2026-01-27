@@ -131,10 +131,14 @@ def create_target_tables(replication_config, specific_tables=None):
             try:
                 # Get source schema
                 source_schema = get_table_schema(source_db, source_table)
-                
-                # Get column mappings
-                column_mappings = list(table_mapping.column_mappings.filter(is_enabled=True))
-                logger.info(f"   ✓ Found {len(column_mappings)} column mappings")
+
+                # Get ALL column mappings (not just enabled ones)
+                # The target table needs ALL columns because Debezium sends all columns
+                # unless column.include.list is explicitly set in the source connector.
+                # The is_enabled flag controls what's in column.include.list, not the target schema.
+                column_mappings = list(table_mapping.column_mappings.all())
+                enabled_count = sum(1 for cm in column_mappings if cm.is_enabled)
+                logger.info(f"   ✓ Found {len(column_mappings)} column mappings ({enabled_count} enabled)")
                 
                 if not column_mappings:
                     logger.warning(f"   ⚠️ No column mappings, skipping")
@@ -442,6 +446,68 @@ def map_type_to_sqlalchemy(type_str: str):
         return String(255)
 
 
+def manual_create_target_tables(replication_config_id: int, table_names: list = None) -> tuple:
+    """
+    Manually create target tables for a replication config.
+
+    Use this function to pre-create tables BEFORE starting the connector,
+    allowing you to set schema.evolution=none in the sink connector config.
+
+    Args:
+        replication_config_id: ID of the ReplicationConfig
+        table_names: Optional list of source table names to create.
+                    If None, creates all enabled tables.
+
+    Returns:
+        Tuple[bool, str, dict]: (success, message, details)
+
+    Example usage:
+        # From a view or management command:
+        success, message, details = manual_create_target_tables(config_id)
+
+        # Create specific tables only:
+        success, message, details = manual_create_target_tables(config_id, ['users', 'orders'])
+    """
+    from client.models.replication import ReplicationConfig
+
+    try:
+        replication_config = ReplicationConfig.objects.get(pk=replication_config_id)
+    except ReplicationConfig.DoesNotExist:
+        return False, f"ReplicationConfig with ID {replication_config_id} not found", {}
+
+    try:
+        logger.info(f"Manual table creation requested for config ID: {replication_config_id}")
+        logger.info(f"Connector: {replication_config.connector_name}")
+
+        # Get table count before creation
+        if table_names:
+            table_count = len(table_names)
+        else:
+            table_count = replication_config.table_mappings.filter(is_enabled=True).count()
+
+        # Call the existing create_target_tables function
+        create_target_tables(replication_config, specific_tables=table_names)
+
+        # Get target database info for response
+        client = replication_config.client_database.client
+        target_db = client.get_target_database()
+
+        details = {
+            'config_id': replication_config_id,
+            'connector_name': replication_config.connector_name,
+            'tables_processed': table_count,
+            'target_database': target_db.database_name if target_db else None,
+            'target_host': f"{target_db.host}:{target_db.port}" if target_db else None,
+        }
+
+        return True, f"Successfully processed {table_count} table(s) in target database", details
+
+    except Exception as e:
+        error_msg = f"Failed to create target tables: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return False, error_msg, {}
+
+
 def drop_tables_for_mappings(target_db, table_mappings):
     """
     Drop specific target tables given table mappings.
@@ -535,3 +601,4 @@ def drop_tables_for_mappings(target_db, table_mappings):
         return False, message
 
     return True, message
+

@@ -323,9 +323,11 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
             settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
         )
 
-        # Signal topic format: client_{client_id}_db_{db_id}.signals
-        signal_topic = f"client_{client.id}_db_{database.id}.signals"
-        topic_prefix = f"client_{client.id}_db_{database.id}"
+        # Signal topic format: {kafka_topic_prefix}.signals
+        # kafka_topic_prefix includes version: client_{client_id}_db_{db_id}_v_{version}
+        # This must match the connector's signal.kafka.topic configuration
+        topic_prefix = replication_config.kafka_topic_prefix
+        signal_topic = f"{topic_prefix}.signals"
 
         signal_manager = KafkaSignalManager(
             bootstrap_servers=kafka_bootstrap,

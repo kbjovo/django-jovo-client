@@ -450,8 +450,8 @@ def connector_add(request, database_pk):
                 # Generate and save connector name
                 connector_name = generate_connector_name(client, database, version=next_version)
                 replication_config.connector_name = connector_name
-                # Topic prefix must match connector template (without _connector_v_X suffix)
-                replication_config.kafka_topic_prefix = f"client_{client.id}_db_{database.id}"
+                # Topic prefix must match connector template (includes version for JMX uniqueness)
+                replication_config.kafka_topic_prefix = f"client_{client.id}_db_{database.id}_v_{next_version}"
                 replication_config.save()
 
                 logger.info(f"Created ReplicationConfig v{next_version}: {replication_config.id}")
@@ -470,9 +470,6 @@ def connector_add(request, database_pk):
 
                         logger.info(f"Table {table_name}: {len(columns)} columns, {len(primary_keys)} primary keys: {primary_keys}")
 
-                        # Get target table name from form (editable field)
-                        target_table_name = request.POST.get(f'target_table_{table_name}', table_name)
-
                         # Parse schema and table name for MS SQL and Oracle
                         # MS SQL tables come as "schema.table" (e.g., "dbo.Customers")
                         # Oracle tables come as "SCHEMA.TABLE" (e.g., "CDC_USER.CUSTOMERS")
@@ -482,6 +479,27 @@ def connector_add(request, database_pk):
                         else:
                             source_schema = schema.get('schema', '')
                             actual_table_name = table_name
+
+                        # Build default target table name to match sink connector transform
+                        # Sink connector uses: transforms.extractTableName.replacement = "$1_$2"
+                        # Where $1 is schema/database and $2 is table name
+                        # Result format: {schema}_{table} (e.g., kbe_tally_item_mapping)
+                        if database.db_type == 'mysql':
+                            default_target_table = f"{database.database_name}_{actual_table_name}"
+                        elif database.db_type == 'postgresql':
+                            pg_schema = source_schema or 'public'
+                            default_target_table = f"{pg_schema}_{actual_table_name}"
+                        elif database.db_type == 'mssql':
+                            mssql_schema = source_schema or 'dbo'
+                            default_target_table = f"{mssql_schema}_{actual_table_name}"
+                        elif database.db_type == 'oracle':
+                            oracle_schema = source_schema or database.username.upper()
+                            default_target_table = f"{oracle_schema}_{actual_table_name}"
+                        else:
+                            default_target_table = actual_table_name
+
+                        # Get target table name from form (editable field) with proper default
+                        target_table_name = request.POST.get(f'target_table_{table_name}', default_target_table)
 
                         # Create TableMapping
                         table_mapping = TableMapping.objects.create(
@@ -494,42 +512,21 @@ def connector_add(request, database_pk):
 
                         logger.info(f"Created TableMapping for {table_name} -> {target_table_name}")
 
-                        # Create ColumnMappings with is_enabled based on user selection
-                        enabled_columns_count = 0
-                        disabled_columns = []
+                        # Create ColumnMappings - all columns are always enabled
+                        # Column selection feature removed for simplicity
                         for col in columns:
-                            # Check if column checkbox was checked
-                            # Checkbox name format: column_{table_name}_{column_name}
-                            checkbox_name = f"column_{table_name}_{col['name']}"
-                            checkbox_value = request.POST.get(checkbox_name)
-                            is_column_enabled = checkbox_value == '1'
-
-                            # Debug logging
-                            if not is_column_enabled:
-                                disabled_columns.append(col['name'])
-                                logger.debug(f"Column {col['name']}: checkbox_name={checkbox_name}, value={checkbox_value}, enabled={is_column_enabled}")
-
                             ColumnMapping.objects.create(
                                 table_mapping=table_mapping,
                                 source_column=col['name'],
-                                target_column=col['name'],  # Same as source for now
+                                target_column=col['name'],
                                 source_type=col.get('type', ''),
                                 target_type=col.get('type', ''),
-                                is_enabled=is_column_enabled,
+                                is_enabled=True,  # Always enabled
                                 is_primary_key=col.get('primary_key', False),
                                 is_nullable=col.get('nullable', True),
                             )
 
-                            if is_column_enabled:
-                                enabled_columns_count += 1
-
-                        logger.info(f"Created {enabled_columns_count}/{len(columns)} enabled ColumnMappings for {table_name}")
-                        if disabled_columns:
-                            logger.info(f"Disabled columns for {table_name}: {disabled_columns}")
-
-                        # Validate at least one column is enabled
-                        if enabled_columns_count == 0:
-                            raise ValueError(f"Table '{table_name}' must have at least one column enabled")
+                        logger.info(f"Created {len(columns)} ColumnMappings for {table_name} (all enabled)")
 
                     except Exception as e:
                         logger.error(f"Error creating mappings for table {table_name}: {e}")
@@ -592,6 +589,9 @@ def connector_create_debezium(request, config_pk):
 
         logger.info(f"Topics created: {topics_message}")
 
+        # Note: Target tables are auto-created by sink connector (schema.evolution=basic)
+        # No manual table creation needed
+
         # Step 2: Create source connector
         logger.info(f"Creating source connector: {replication_config.connector_name}")
 
@@ -606,59 +606,7 @@ def connector_create_debezium(request, config_pk):
             tables_whitelist=tables_list
         )
 
-        # Debug: Check if column.include.list was generated
-        has_column_filtering = "column.include.list" in source_config
-        if has_column_filtering:
-            logger.info(f"✅ column.include.list was generated with value: {source_config['column.include.list']}")
-
-            # Delete old schemas to prevent compatibility issues
-            # When column filtering is used, the new schema may have fewer fields than the old schema
-            # which causes BACKWARD compatibility errors in Schema Registry
-            from jovoclient.utils.debezium.schema_registry_utils import delete_schemas_for_tables
-
-            logger.info(f"🗑️  Deleting old schemas for tables with column filtering to prevent compatibility issues")
-
-            # Build topic names for schema deletion
-            # For MySQL: database.table (e.g., kbe.busyuk_items)
-            # For PostgreSQL: schema.table (e.g., public.users)
-            # For MS SQL: database.schema.table (e.g., AppDB.dbo.Customers)
-            # For Oracle: pdb.schema.table (e.g., XEPDB1.CDC_USER.CUSTOMERS)
-            topic_prefix = replication_config.kafka_topic_prefix
-            schema_table_names = []
-
-            for tm in table_mappings:
-                if database.db_type == 'mysql':
-                    # MySQL: database.table
-                    table_name_for_schema = f"{database.database_name}.{tm.source_table}"
-                elif database.db_type == 'postgresql':
-                    # PostgreSQL: schema.table
-                    schema = tm.source_schema or 'public'
-                    table_name_for_schema = f"{schema}.{tm.source_table}"
-                elif database.db_type == 'mssql':
-                    # MS SQL: database.schema.table
-                    schema = tm.source_schema or 'dbo'
-                    table_name_for_schema = f"{database.database_name}.{schema}.{tm.source_table}"
-                elif database.db_type == 'oracle':
-                    # Oracle: pdb.schema.table
-                    schema = database.username.upper()
-                    if schema.startswith('C##'):
-                        schema = schema[3:]
-                    pdb = database.database_name.upper()
-                    table_name_for_schema = f"{pdb}.{schema}.{tm.source_table}"
-                else:
-                    table_name_for_schema = tm.source_table
-
-                schema_table_names.append(table_name_for_schema)
-
-            # Delete schemas for all tables
-            try:
-                delete_results = delete_schemas_for_tables(topic_prefix, schema_table_names, permanent=True)
-                deleted_count = sum(1 for r in delete_results.values() if r.get('key') and r.get('value'))
-                logger.info(f"✅ Deleted schemas for {deleted_count}/{len(schema_table_names)} tables")
-            except Exception as e:
-                logger.warning(f"⚠️  Failed to delete some schemas (will try to create connector anyway): {e}")
-        else:
-            logger.warning(f"⚠️ column.include.list was NOT generated - all columns will be replicated")
+        logger.info(f"All columns will be replicated (column selection feature removed)")
 
         # Create source connector
         connector_manager.create_connector(replication_config.connector_name, source_config)
@@ -671,7 +619,7 @@ def connector_create_debezium(request, config_pk):
 
         messages.success(request, f"Source connector {replication_config.connector_name} created successfully")
 
-        # Step 2: Check if sink connector exists, if not create it
+        # Step 3: Check if sink connector exists, if not create it
         sink_connector_name = database.get_sink_connector_name()
 
         exists, _ = connector_manager.get_connector_status(sink_connector_name)
@@ -688,10 +636,11 @@ def connector_create_debezium(request, config_pk):
                 messages.warning(request, "No target database configured. Sink connector not created.")
             else:
                 # Generate sink connector config with regex to match all DATA topics from this database
-                # Topic format: client_{client_id}_db_{db_id}.{database}.{table}
-                # or: client_{client_id}_db_{db_id}.{schema}.{table} (for PostgreSQL/Oracle)
+                # Topic format: client_{client_id}_db_{db_id}_v_{version}.{database}.{table}
+                # or: client_{client_id}_db_{db_id}_v_{version}.{schema}.{table} (for PostgreSQL/Oracle)
                 # IMPORTANT: Exclude .signals topic (used for Debezium signaling)
-                topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
+                # NOTE: Topic prefix includes version (_v_\d+) for JMX uniqueness
+                topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
 
                 # Configure sink connector to handle tables with and without PKs
                 # - primary.key.mode=record_key: Extract PK from message key (Debezium extracts automatically)
@@ -729,7 +678,30 @@ def connector_create_debezium(request, config_pk):
 
                 messages.success(request, f"Sink connector {sink_connector_name} created successfully")
         else:
-            logger.info(f"Sink connector {sink_connector_name} already exists")
+            # Sink connector exists - ensure it uses topics.regex for auto-subscription
+            logger.info(f"Sink connector {sink_connector_name} already exists - ensuring topics.regex is set")
+
+            target_database = ClientDatabase.objects.filter(
+                client=client,
+                is_target=True
+            ).first()
+
+            if target_database:
+                topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
+
+                sink_config = get_sink_connector_config_for_database(
+                    db_config=target_database,
+                    topics=None,
+                    delete_enabled=True,
+                    custom_config={
+                        'name': sink_connector_name,
+                        'topics.regex': topic_regex,
+                    }
+                )
+
+                connector_manager.update_connector_config(sink_connector_name, sink_config)
+                logger.info(f"✓ Updated sink connector to use topics.regex: {topic_regex}")
+
             replication_config.sink_connector_name = sink_connector_name
             replication_config.save()
 

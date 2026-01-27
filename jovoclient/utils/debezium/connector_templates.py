@@ -29,73 +29,20 @@ def generate_server_id(client_id: int, db_id: int, version: int = 0) -> int:
 
 def build_column_include_list(replication_config: 'ReplicationConfig', db_config: ClientDatabase) -> Optional[str]:
     """
-    Build column.include.list for Debezium based on enabled ColumnMappings.
-    Only includes columns where is_enabled=True.
+    Build column.include.list for Debezium.
 
-    Format: schema.table.column1,schema.table.column2,schema.table.column3
+    NOTE: Column selection feature has been removed. All columns are now always replicated.
+    This function always returns None, letting Debezium include all columns by default.
 
     Args:
-        replication_config: ReplicationConfig instance with table and column mappings
-        db_config: ClientDatabase instance for determining schema
+        replication_config: ReplicationConfig instance (unused)
+        db_config: ClientDatabase instance (unused)
 
     Returns:
-        Optional[str]: Comma-separated list of columns to include, or None if all columns enabled
+        None - all columns are always replicated
     """
-    if not replication_config:
-        return None
-
-    column_list = []
-    has_disabled_columns = False
-
-    # Get all enabled table mappings
-    table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-
-    for table_mapping in table_mappings:
-        # Determine schema name based on database type
-        if db_config.db_type == 'postgresql':
-            schema = table_mapping.source_schema or 'public'
-        elif db_config.db_type == 'oracle':
-            # For Oracle, use username as schema
-            schema = db_config.username.upper()
-            if schema.startswith('C##'):
-                schema = schema[3:]  # Remove C## prefix
-        elif db_config.db_type == 'mysql':
-            schema = db_config.database_name
-        elif db_config.db_type == 'mssql':
-            schema = table_mapping.source_schema or 'dbo'
-        else:
-            schema = table_mapping.source_schema or 'public'
-
-        table_name = table_mapping.source_table
-
-        # Get all columns for this table
-        all_columns = table_mapping.column_mappings.all()
-        enabled_columns = table_mapping.column_mappings.filter(is_enabled=True)
-
-        # Debug logging
-        all_count = all_columns.count()
-        enabled_count = enabled_columns.count()
-        logger.debug(f"Table {table_name}: {enabled_count}/{all_count} columns enabled")
-
-        # Check if any columns are disabled
-        if enabled_count < all_count:
-            has_disabled_columns = True
-            disabled_cols = [c.source_column for c in all_columns if not c.is_enabled]
-            logger.info(f"Table {table_name} has disabled columns: {disabled_cols}")
-
-        # Add enabled columns to the list
-        for col_mapping in enabled_columns:
-            column_spec = f"{schema}.{table_name}.{col_mapping.source_column}"
-            column_list.append(column_spec)
-
-    # Only return column.include.list if there are actually disabled columns
-    # Otherwise, let Debezium include all columns by default (more efficient)
-    if has_disabled_columns and column_list:
-        result = ",".join(column_list)
-        logger.info(f"Generated column.include.list with {len(column_list)} columns (some columns excluded for security)")
-        return result
-
-    logger.info("All columns enabled, skipping column.include.list (Debezium will include all)")
+    # Column selection feature removed - all columns are always replicated
+    logger.info("All columns will be replicated (column selection feature removed)")
     return None
 
 
@@ -198,16 +145,21 @@ def get_mysql_connector_config(
         # Server identification (deterministic ID for consistency across restarts)
         # Include version to prevent conflicts when multiple connector versions run simultaneously
         "database.server.id": str(generate_server_id(client.id, db_config.id, version or 0)),
-        "database.server.name": f"client_{client.id}_db_{db_config.id}",
+        # CRITICAL: Include version in server.name to prevent JMX MBean conflicts
+        # Each connector version gets unique MBeans: debezium.mysql:...,server=client_1_db_2_v_1
+        "database.server.name": f"client_{client.id}_db_{db_config.id}_v_{version or 0}",
         
         # Topic prefix (this will be used in Kafka topic names)
-        # Format: client_{client_id}_db_{db_id}.{source_db}.{table}
-        # Using both client ID and database ID ensures uniqueness when same client has multiple databases
-        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
+        # Format: client_{client_id}_db_{db_id}_v_{version}.{source_db}.{table}
+        # CRITICAL: Include version to prevent JMX MBean conflicts between multiple connectors
+        # Each connector version gets unique internal ID derived from topic.prefix
+        "topic.prefix": f"client_{client.id}_db_{db_config.id}_v_{version or 0}",
         
         # Use Kafka-based schema history (more reliable in containerized environments)
+        # NOTE: Each connector version needs its own schema history topic to avoid JMX MBean conflicts
+        # when running multiple source connectors for the same database with different table sets
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
+        "schema.history.internal.kafka.topic": f"schema-history.client_{client.id}_db_{db_config.id}_v_{version or 0}",
 
         # Snapshot mode - use from replication_config if provided, otherwise use parameter
         "snapshot.mode": replication_config.snapshot_mode if replication_config and hasattr(replication_config, 'snapshot_mode') else snapshot_mode,
@@ -229,7 +181,8 @@ def get_mysql_connector_config(
         "incremental.snapshot.chunk.size": str(replication_config.incremental_snapshot_chunk_size) if replication_config and hasattr(replication_config, 'incremental_snapshot_chunk_size') else "1024",
 
         # Kafka-based signals (for connector control and incremental snapshots on read-only databases)
-        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        # CRITICAL: Include version to match topic.prefix and prevent conflicts between connector versions
+        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}_v_{version or 0}.signals",
         "signal.enabled.channels": "kafka",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "signal.kafka.groupId": f"dbz-signal-{connector_name}",  # CRITICAL: Must be unique per connector (camelCase!)
@@ -281,13 +234,6 @@ def get_mysql_connector_config(
 
         config["table.include.list"] = ",".join(tables_full)
         logger.debug(f"Adding table whitelist: {len(tables_whitelist)} tables")
-
-    # Add column.include.list if there are disabled columns
-    if replication_config:
-        column_include_list = build_column_include_list(replication_config, db_config)
-        if column_include_list:
-            config["column.include.list"] = column_include_list
-            logger.debug(f"Added column.include.list (some columns excluded)")
 
     # Add configuration from ReplicationConfig if provided
     if replication_config:
@@ -356,15 +302,16 @@ def get_postgresql_connector_config(
         "database.dbname": db_config.database_name,
 
         "database.server.name": connector_name.replace('_connector', ''),
-        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
+        # CRITICAL: Include version to prevent JMX MBean conflicts between multiple connectors
+        "topic.prefix": f"client_{client.id}_db_{db_config.id}_v_{version or 0}",
 
         # ✅ CRITICAL FIX: Replace schema with database name in topic
-        # Default format: {topic.prefix}.{schema}.{table} → client_1_db_3.public.my_table
-        # Fixed format:  {topic.prefix}.{database}.{table} → client_1_db_3.mydb.my_table
+        # Default format: {topic.prefix}.{schema}.{table} → client_1_db_3_v_1.public.my_table
+        # Fixed format:  {topic.prefix}.{database}.{table} → client_1_db_3_v_1.mydb.my_table
         # This ensures sink connectors can properly subscribe to topics
         "transforms": "routeTopic",
         "transforms.routeTopic.type": "org.apache.kafka.connect.transforms.RegexRouter",
-        "transforms.routeTopic.regex": f"(client_{client.id}_db_{db_config.id})\\.[^.]+\\.(.+)",
+        "transforms.routeTopic.regex": f"(client_{client.id}_db_{db_config.id}_v_{version or 0})\\.[^.]+\\.(.+)",
         "transforms.routeTopic.replacement": f"$1.{db_config.database_name}.$2",
 
         "plugin.name": "pgoutput",
@@ -377,7 +324,7 @@ def get_postgresql_connector_config(
         "publication.autocreate.mode": "filtered",
         
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
+        "schema.history.internal.kafka.topic": f"schema-history.client_{client.id}_db_{db_config.id}_v_{version or 0}",
 
         # Snapshot mode - use from replication_config if provided, otherwise use parameter
         "snapshot.mode": replication_config.snapshot_mode if replication_config and hasattr(replication_config, 'snapshot_mode') else snapshot_mode,
@@ -389,7 +336,8 @@ def get_postgresql_connector_config(
 
         # ✅ CRITICAL FIX: Add BOTH signal channels and signal data collection
         "signal.enabled.channels": "source,kafka",  # ✅ Enable BOTH channels
-        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        # CRITICAL: Include version to match topic.prefix and prevent conflicts between connector versions
+        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}_v_{version or 0}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
 
@@ -436,13 +384,6 @@ def get_postgresql_connector_config(
 
         config["table.include.list"] = ",".join(tables_full)
         logger.debug(f"Adding table whitelist: {len(tables_whitelist)} tables")
-
-    # Add column.include.list if there are disabled columns
-    if replication_config:
-        column_include_list = build_column_include_list(replication_config, db_config)
-        if column_include_list:
-            config["column.include.list"] = column_include_list
-            logger.debug(f"Added column.include.list (some columns excluded)")
 
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:
@@ -503,8 +444,9 @@ def get_sqlserver_connector_config(
             db_host = 'mssql2019'
 
     # ✅ CRITICAL FIX: Use different values for server name and topic prefix
-    server_name = f"sqlserver_{client.id}_{db_config.id}"
-    topic_prefix = f"client_{client.id}_db_{db_config.id}"
+    # Include version to prevent JMX MBean conflicts between multiple connectors
+    server_name = f"sqlserver_{client.id}_{db_config.id}_v_{version or 0}"
+    topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{version or 0}"
     signal_table_full = f"{db_config.database_name}.dbo.debezium_signal"
 
     config = {
@@ -523,7 +465,7 @@ def get_sqlserver_connector_config(
         "topic.prefix": topic_prefix,              # Kafka topic prefix
 
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
+        "schema.history.internal.kafka.topic": f"schema-history.client_{client.id}_db_{db_config.id}_v_{version or 0}",
 
         # ✅ Snapshot mode - use 'initial' for first run, 'when_needed' after
         "snapshot.mode": snapshot_mode,
@@ -600,13 +542,6 @@ def get_sqlserver_connector_config(
         logger.info(f"✅ Table filter configured:")
         for table in tables_full:
             logger.info(f"   - {table}")
-
-    # Add column.include.list if there are disabled columns
-    if replication_config:
-        column_include_list = build_column_include_list(replication_config, db_config)
-        if column_include_list:
-            config["column.include.list"] = column_include_list
-            logger.info(f"Added column.include.list (some columns excluded)")
 
     # Apply custom config from ReplicationConfig
     if replication_config:
@@ -721,8 +656,9 @@ def get_oracle_connector_config(
         "database.pdb.name": pdb_name,
         
         "database.server.name": connector_name.replace('_connector', ''),
-        "topic.prefix": f"client_{client.id}_db_{db_config.id}",
-        
+        # CRITICAL: Include version to prevent JMX MBean conflicts between multiple connectors
+        "topic.prefix": f"client_{client.id}_db_{db_config.id}_v_{version or 0}",
+
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.{connector_name}",
         
@@ -744,7 +680,8 @@ def get_oracle_connector_config(
         
         # ✅ CRITICAL: Signal configuration (ALWAYS enabled)
         "signal.enabled.channels": "source,kafka",
-        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}.signals",
+        # CRITICAL: Include version to match topic.prefix and prevent conflicts between connector versions
+        "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}_v_{version or 0}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
         "signal.data.collection": signal_table,  # ✅ ALWAYS set this
@@ -816,13 +753,6 @@ def get_oracle_connector_config(
 
         config["table.include.list"] = ",".join(formatted_tables)
         logger.info(f"📋 Tables: {len(formatted_tables)}")
-
-    # Add column.include.list if there are disabled columns
-    if replication_config:
-        column_include_list = build_column_include_list(replication_config, db_config)
-        if column_include_list:
-            config["column.include.list"] = column_include_list
-            logger.info(f"Added column.include.list (some columns excluded)")
 
     # Apply custom config
     if replication_config:

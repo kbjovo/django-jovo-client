@@ -358,7 +358,7 @@ def generate_target_table_name(source_db_name: str, source_table_name: str, db_t
 
 def get_kafka_topics_for_tables(db_config, replication_config, table_mappings):
     client = db_config.client
-    topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+    topic_prefix = replication_config.kafka_topic_prefix
     db_type = db_config.db_type.lower()
     
     topics = []
@@ -482,9 +482,8 @@ def get_signal_topic_name(db_config: ClientDatabase, replication_config: Replica
     Returns:
         str: Signal topic name
     """
-    client = db_config.client
-    topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
-    
+    topic_prefix = replication_config.kafka_topic_prefix
+
     signal_topic = f"{topic_prefix}.signals"
     
     logger.info(f"✅ Signal topic: {signal_topic}")
@@ -609,8 +608,8 @@ def validate_topic_subscription(db_config: ClientDatabase, replication_config: R
         return False
     
     # Check topic naming pattern
-    topic_prefix = replication_config.kafka_topic_prefix or f"client_{db_config.client.id}_db_{db_config.id}"
-    
+    topic_prefix = replication_config.kafka_topic_prefix
+
     for topic in kafka_topics:
         if not topic.startswith(topic_prefix):
             logger.error(f"❌ Topic doesn't match prefix: {topic} (expected prefix: {topic_prefix})")
@@ -1612,7 +1611,8 @@ def cdc_create_connector(request, config_pk):
 
             # Update replication config - DO NOT set connector_name here
             # The orchestrator will generate and set the versioned connector name
-            replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
+            # Topic prefix includes version for JMX uniqueness
+            replication_config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{replication_config.connector_version}"
             replication_config.status = 'configured'
             replication_config.is_active = False
             replication_config.save()
@@ -2805,7 +2805,7 @@ def trigger_incremental_snapshot_for_mssql(replication_config, db_config, table_
         from client.utils.kafka_signal_sender import KafkaSignalSender
 
         client = db_config.client
-        topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+        topic_prefix = replication_config.kafka_topic_prefix
 
         logger.info(f"Topic prefix: {topic_prefix}")
         logger.info(f"Database: {db_config.database_name}")
@@ -3222,7 +3222,7 @@ def _create_kafka_topics(request, replication_config, db_config, client, newly_a
 
         from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
         topic_manager = KafkaTopicManager()
-        topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+        topic_prefix = replication_config.kafka_topic_prefix
 
         # Database-specific topic creation
         if db_type == 'mssql':
@@ -3575,7 +3575,8 @@ def _handle_kafka_signal_snapshots(request, replication_config, db_config, clien
         from client.utils.kafka_signal_sender import KafkaSignalSender
         from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
-        topic_prefix = replication_config.kafka_topic_prefix or f"client_{client.id}_db_{db_config.id}"
+        # Topic prefix includes version to match connector's signal.kafka.topic
+        topic_prefix = replication_config.kafka_topic_prefix
         signal_sender = KafkaSignalSender()
 
         # Database-specific handling

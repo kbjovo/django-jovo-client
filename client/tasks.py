@@ -78,7 +78,8 @@ def create_debezium_connector(self, replication_config_id):
         if success:
             # Update replication config
             config.connector_name = connector_name
-            config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}"
+            # Topic prefix includes version for JMX uniqueness
+            config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{config.connector_version}"
             config.status = 'configured'
             config.is_active = False
             config.save()

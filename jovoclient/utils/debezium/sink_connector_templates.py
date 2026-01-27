@@ -54,7 +54,6 @@ def get_mysql_sink_connector_config(
     connector_name = ''.join(c for c in connector_name if c.isalnum() or c == '_')
 
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
-    topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
     jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}"
 
     # Default configuration
@@ -64,7 +63,6 @@ def get_mysql_sink_connector_config(
         "connection.url": jdbc_url,
         "connection.username": db_config.username,
         "connection.password": db_config.get_decrypted_password(),
-        "topics.regex": topic_regex,
 
         # Transforms
         "transforms": "extractTableName",
@@ -122,6 +120,13 @@ def get_mysql_sink_connector_config(
 
     if primary_key_fields:
         config["primary.key.fields"] = primary_key_fields
+
+    # Use topics.regex for auto-subscription to all source connector topics
+    # This allows sink to automatically subscribe when new source connectors are added
+    # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
+    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
+    config["topics.regex"] = topic_regex
+    logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
     if custom_config:
         config.update(custom_config)
@@ -164,7 +169,6 @@ def get_postgresql_sink_connector_config(
 
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
     jdbc_url = f"jdbc:postgresql://{db_config.host}:{db_config.port}/{db_config.database_name}"
-    topic_regex = f"client_{client.id}_db_\\d+\\.(?!signals$).*"
 
     # Default configuration
     config = {
@@ -172,7 +176,6 @@ def get_postgresql_sink_connector_config(
         "connection.url": jdbc_url,
         "connection.username": db_config.username,
         "connection.password": db_config.get_decrypted_password(),
-        "topics.regex": topic_regex,
 
         # Transforms
         "transforms": "extractTableName",
@@ -180,6 +183,8 @@ def get_postgresql_sink_connector_config(
         "transforms.extractTableName.regex": ".*\\.([^.]+)\\.([^.]+)",
         "transforms.extractTableName.replacement": "$1_$2",
 
+        # Let sink connector auto-create tables and add columns
+        # 'basic' mode: creates tables if missing, adds new columns as NULLABLE
         "schema.evolution": "basic",
         "collection.name.format": "${topic}",
 
@@ -230,6 +235,13 @@ def get_postgresql_sink_connector_config(
 
     if primary_key_fields:
         config["primary.key.fields"] = primary_key_fields
+
+    # Use topics.regex for auto-subscription to all source connector topics
+    # This allows sink to automatically subscribe when new source connectors are added
+    # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
+    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
+    config["topics.regex"] = topic_regex
+    logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
     if custom_config:
         config.update(custom_config)
@@ -303,9 +315,9 @@ def get_default_sink_config_options() -> Dict[str, Dict[str, Any]]:
     """
     return {
         "schema.evolution": {
-            "default": "basic",
+            "default": "none",
             "type": "select",
-            "description": "How the connector evolves the destination table schema",
+            "description": "How the connector evolves the destination table schema. Use 'none' for manual table creation via manual_create_target_tables()",
             "options": ["none", "basic"],
             "ui_label": "Schema Evolution"
         },

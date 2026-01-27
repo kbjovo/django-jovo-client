@@ -168,22 +168,11 @@
                             <span class="ml-2 text-gray-600 dark:text-gray-400">Loading columns...</span>
                         </div>
 
-                        <!-- Columns List (loaded via AJAX) -->
+                        <!-- Columns List (loaded via AJAX) - Read-only display -->
                         <div id="columns-{{ escaped_name }}" class="hidden">
                             <div class="flex justify-between items-center mb-3">
-                                <h4 class="text-sm font-semibold text-gray-900 dark:text-white">Select Columns to Replicate</h4>
-                                <div class="flex gap-2">
-                                    <button type="button"
-                                            class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded transition"
-                                            onclick="selectAllColumns('{{ table.name }}')">
-                                        Select All
-                                    </button>
-                                    <button type="button"
-                                            class="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded transition"
-                                            onclick="deselectAllColumns('{{ table.name }}')">
-                                        Deselect All
-                                    </button>
-                                </div>
+                                <h4 class="text-sm font-semibold text-gray-900 dark:text-white">Columns to Replicate</h4>
+                                <span class="text-xs text-green-600 dark:text-green-400 font-medium">✓ All columns will be replicated</span>
                             </div>
 
                             <div id="column-list-{{ escaped_name }}" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-900 rounded-lg">
@@ -191,7 +180,7 @@
                             </div>
 
                             <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                                <span id="selected-count-{{ escaped_name }}"></span> columns selected
+                                <span id="column-count-display-{{ escaped_name }}"></span>
                             </p>
                         </div>
                         {% endwith %}
@@ -202,7 +191,7 @@
 
             <div class="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
                 <p class="text-sm text-blue-900 dark:text-blue-100">
-                    <strong>ℹ️ Tip:</strong> Unchecked columns will be excluded from replication at the source (more secure - data never leaves source database).
+                    <strong>ℹ️ Note:</strong> All columns from selected tables will be replicated to the target database.
                 </p>
             </div>
             {% else %}
@@ -442,7 +431,7 @@ async function loadTableSchema(tableName) {
     }
 }
 
-// Render column checkboxes
+// Render columns as read-only info (no checkboxes - all columns are always replicated)
 function renderColumns(tableName, columns) {
     const escapedName = escapeTableName(tableName);
     const columnListEl = document.getElementById(`column-list-${escapedName}`);
@@ -457,56 +446,21 @@ function renderColumns(tableName, columns) {
             '<span class="ml-1 px-1 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs rounded">NOT NULL</span>';
 
         return `
-            <div class="flex items-center p-2 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700">
-                <input type="checkbox"
-                       name="column_${tableName}_${col.name}"
-                       value="1"
-                       checked
-                       class="column-checkbox column-checkbox-${escapedName} w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500"
-                       onchange="updateColumnCount('${tableName}')">
-                <label class="ml-2 text-sm text-gray-900 dark:text-white flex-1 cursor-pointer">
+            <div class="flex items-center p-2 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">
+                <span class="text-green-500 mr-2">✓</span>
+                <span class="text-sm text-gray-900 dark:text-white flex-1">
                     <span class="font-medium">${col.name}</span>
                     <span class="text-xs text-gray-500 dark:text-gray-400 ml-1">(${col.type})</span>
                     ${isPK}${isNullable}
-                </label>
+                </span>
             </div>
         `;
     }).join('');
 
-    // Update initial count
-    updateColumnCount(tableName);
-}
-
-// Select all columns for a table
-function selectAllColumns(tableName) {
-    const escapedName = escapeTableName(tableName);
-    const checkboxes = document.querySelectorAll(`.column-checkbox-${escapedName}`);
-    checkboxes.forEach(cb => cb.checked = true);
-    updateColumnCount(tableName);
-}
-
-// Deselect all columns for a table
-function deselectAllColumns(tableName) {
-    const escapedName = escapeTableName(tableName);
-    const checkboxes = document.querySelectorAll(`.column-checkbox-${escapedName}`);
-    checkboxes.forEach(cb => cb.checked = false);
-    updateColumnCount(tableName);
-}
-
-// Update selected column count
-function updateColumnCount(tableName) {
-    const escapedName = escapeTableName(tableName);
-    const checkboxes = document.querySelectorAll(`.column-checkbox-${escapedName}`);
-    const selected = Array.from(checkboxes).filter(cb => cb.checked).length;
-    const total = checkboxes.length;
-
-    document.getElementById(`selected-count-${escapedName}`).textContent =
-        `${selected}/${total}`;
-
-    // Show warning if no columns selected but table is checked
-    const tableCheckbox = document.querySelector(`.table-checkbox[data-table-name="${tableName}"]`);
-    if (tableCheckbox && tableCheckbox.checked && selected === 0) {
-        alert(`⚠️ Warning: Table "${tableName}" is selected but has no columns selected. Please select at least one column or uncheck the table.`);
+    // Update column count display
+    const countDisplay = document.getElementById(`column-count-display-${escapedName}`);
+    if (countDisplay) {
+        countDisplay.textContent = `${columns.length} columns will be replicated`;
     }
 }
 
@@ -517,25 +471,6 @@ document.querySelector('form').addEventListener('submit', function(e) {
     if (checkedTables.length === 0) {
         e.preventDefault();
         alert('⚠️ Please select at least one table');
-        return false;
-    }
-
-    // Validate that each selected table has at least one column selected
-    let hasError = false;
-    checkedTables.forEach(tableCheckbox => {
-        const tableName = tableCheckbox.value;
-        const escapedName = escapeTableName(tableName);
-        const columnCheckboxes = document.querySelectorAll(`.column-checkbox-${escapedName}:checked`);
-
-        if (columnCheckboxes.length === 0) {
-            e.preventDefault();
-            alert(`⚠️ Table "${tableName}" is selected but has no columns selected. Please select at least one column or uncheck the table.`);
-            hasError = true;
-            return false;
-        }
-    });
-
-    if (hasError) {
         return false;
     }
 
