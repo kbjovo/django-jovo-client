@@ -23,13 +23,16 @@ class ReplicationValidator:
         self.config = replication_config
         self.errors = []
 
-    def validate_all(self, skip_topic_check: bool = True) -> Tuple[bool, List[str]]:
+    def validate_all(self, skip_topic_check: bool = True, skip_topic_conflict_check: bool = False) -> Tuple[bool, List[str]]:
         """
         Run all validations and return consolidated result.
 
         Args:
             skip_topic_check: If True, skip Kafka topic validation (default: True for Option A)
                              Topics will be created automatically by Debezium connector
+            skip_topic_conflict_check: If True, skip topic conflict validation (used for batch mode)
+                                      Batch mode doesn't have topic conflicts since multiple 
+                                      batch replications can use same source database
 
         Returns:
             (is_valid, [error_messages])
@@ -41,8 +44,13 @@ class ReplicationValidator:
             self._validate_table_mappings(),
             self._validate_primary_keys(),  # Ensures all tables have PKs to avoid record-key errors
             self._validate_target_database(),
-            self._validate_no_topic_conflicts(),
         ]
+
+        # Skip topic conflict check for batch mode (batch doesn't stream to same topics)
+        if not skip_topic_conflict_check:
+            validations.append(self._validate_no_topic_conflicts())
+        else:
+            logger.debug(f"[{self.config.connector_name}] Skipping topic conflict check (batch mode)")
 
         # Skip topic validation for Option A (Debezium creates topics automatically)
         if not skip_topic_check:
@@ -331,5 +339,3 @@ class ReplicationValidator:
 
         except Exception as e:
             return False, f"Connector status check failed: {str(e)}"
-        
-        

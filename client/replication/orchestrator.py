@@ -68,16 +68,20 @@ class ReplicationOrchestrator:
         logger.error(f"[{self.config.connector_name}] {message}") 
     # ==========================================
 
-    def start_replication(self) -> Tuple[bool, str]:
+    def start_replication(self, skip_topic_conflict_check: bool = False) -> Tuple[bool, str]:
         """
         Start complete replication (connector + consumer).
 
-        EFFICIENT FLOW:
-        1. Validate prerequisites
-        2. Create Kafka topics
-        3. Ensure sink connector is ready (create/update/reuse)
-        4. Create fresh source connector with incremented version
-        5. Mark as active
+        FLOW:
+        1. Validate prerequisites (database connectivity, binlog config, permissions)
+        2. Determine connector version and update kafka_topic_prefix
+           (CRITICAL: must happen BEFORE creating topics)
+        3. Create Kafka topics (using correct topic prefix with version)
+        4. Ensure sink connector is ready (create/update/reuse with topics.regex)
+        5. Create fresh source connector (uses pre-set version)
+
+        Args:
+            skip_topic_conflict_check: If True, skip topic conflict validation (used for batch mode)
 
         Returns:
             (success, message)
@@ -95,7 +99,7 @@ class ReplicationOrchestrator:
             self._log_info("  → Verifying binlog configuration")
             self._log_info("  → Validating user permissions")
 
-            is_valid, errors = self.validator.validate_all()
+            is_valid, errors = self.validator.validate_all(skip_topic_conflict_check=skip_topic_conflict_check)
             if not is_valid:
                 error_msg = f"Validation failed: {'; '.join(errors)}"
                 self._log_error(error_msg)
@@ -106,9 +110,34 @@ class ReplicationOrchestrator:
             self._log_info("")
 
             # ========================================
-            # STEP 2: Create Kafka Topics Explicitly
+            # STEP 2: Determine Connector Version and Update Topic Prefix
             # ========================================
-            self._log_info("STEP 2/5: Creating Kafka topics explicitly...")
+            # CRITICAL: Must happen BEFORE creating topics so all components use the same version
+            self._log_info("STEP 2/5: Determining connector version...")
+
+            from client.models import ConnectorHistory
+            db_config = self.config.client_database
+            client = db_config.client
+
+            next_version = ConnectorHistory.get_next_version(
+                client_id=client.id,
+                database_id=db_config.id,
+                connector_type='source'
+            )
+
+            # Update version and topic prefix BEFORE creating topics
+            self.config.connector_version = next_version
+            self.config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{next_version}"
+            self.config.save()
+
+            self._log_info(f"✓ Connector version: {next_version}")
+            self._log_info(f"✓ Topic prefix: {self.config.kafka_topic_prefix}")
+            self._log_info("")
+
+            # ========================================
+            # STEP 3: Create Kafka Topics Explicitly
+            # ========================================
+            self._log_info("STEP 3/5: Creating Kafka topics explicitly...")
 
             success, message = self.create_topics()
             if not success:
@@ -122,9 +151,9 @@ class ReplicationOrchestrator:
             # No manual table creation needed
 
             # ========================================
-            # STEP 3: Ensure Sink Connector Ready (Efficient)
+            # STEP 4: Ensure Sink Connector Ready (Efficient)
             # ========================================
-            self._log_info("STEP 3/4: Ensuring sink connector is ready...")
+            self._log_info("STEP 4/5: Ensuring sink connector is ready...")
             self._log_info("  → Checking if sink connector exists")
             self._log_info("  → Will reuse if compatible, update if needed, or create if missing")
 
@@ -137,9 +166,9 @@ class ReplicationOrchestrator:
             self._log_info("")
 
             # ========================================
-            # STEP 4: Create Fresh Source Connector
+            # STEP 5: Create Fresh Source Connector
             # ========================================
-            self._log_info("STEP 4/4: Creating fresh source connector...")
+            self._log_info("STEP 5/5: Creating fresh source connector...")
             self._log_info("  → Snapshot mode: 'initial' (full snapshot + CDC streaming)")
             self._log_info("  → Source: {}.{}".format(
                 self.config.client_database.host,
@@ -151,7 +180,7 @@ class ReplicationOrchestrator:
             )
             self._log_info(f"  → Tables: {', '.join(enabled_tables)}")
 
-            # Increment version and create connector
+            # Create connector (version already set in Step 2)
             success, message = self._ensure_connector_running(snapshot_mode='initial')
             if not success:
                 self._update_status('error', message)
@@ -439,9 +468,10 @@ class ReplicationOrchestrator:
             if not target_db:
                 return False, "No target database configured"
 
-            # Generate sink connector name (NOT versioned - same across source connector versions)
-            # Shared by ALL source connectors for this client
-            sink_connector_name = f"client_{client.id}_db_{target_db.id}_sink_connector"
+            # Generate sink connector name using consistent naming convention
+            # IMPORTANT: Must match ClientDatabase.get_sink_connector_name() for consistency
+            # Format: client_{client_id}_sink (shared by ALL source connectors for this client)
+            sink_connector_name = f"client_{client.id}_sink"
 
             # Get topics from ALL active source connectors for this client
             # This enables multiple source connectors to feed into one shared sink
@@ -796,26 +826,34 @@ class ReplicationOrchestrator:
 
     def _create_connector(self, snapshot_mode: str = 'when_needed') -> Tuple[bool, str]:
         """
-        Create new Debezium source connector with incremented version.
-        Uses ConnectorHistory to track version numbers across deletions.
+        Create new Debezium source connector.
+
+        NOTE: connector_version and kafka_topic_prefix should be set BEFORE calling this method
+        (typically in start_replication). This method uses the existing version to ensure
+        consistency between topics, sink connector, and source connector.
 
         Returns:
             (success, message)
         """
         try:
-            # Get next version from history (handles deleted connectors)
             from client.models import ConnectorHistory
             db_config = self.config.client_database
             client = db_config.client
 
-            next_version = ConnectorHistory.get_next_version(
-                client_id=client.id,
-                database_id=db_config.id,
-                connector_type='source'
-            )
-
-            self.config.connector_version = next_version
-            self.config.save()
+            # Use existing version (should be set by caller, e.g., start_replication)
+            # Only get next version if not already set
+            if not self.config.connector_version or self.config.connector_version == 0:
+                next_version = ConnectorHistory.get_next_version(
+                    client_id=client.id,
+                    database_id=db_config.id,
+                    connector_type='source'
+                )
+                self.config.connector_version = next_version
+                self.config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{next_version}"
+                self.config.save()
+            else:
+                # Version already set by caller - use it
+                next_version = self.config.connector_version
 
             # Generate configuration
             enabled_tables = list(
@@ -1238,18 +1276,35 @@ class ReplicationOrchestrator:
             if not success:
                 return False, f"Failed to update source connector: {error}"
 
-            self._log_info(f"✓ Source connector updated with {len(all_tables)} tables")
+            self._log_info(f"✓ Source connector config updated with {len(all_tables)} tables")
 
-            # Wait for connector to reload
+            # CRITICAL: Restart connector BEFORE sending signal
+            # The connector needs to restart and refresh schema from database
+            # before it can process incremental snapshot signals for new tables
             import time
-            for i in range(6):
+
+            self._log_info("  → Restarting connector to apply new config...")
+            self.connector_manager.restart_connector(self.config.connector_name)
+
+            # Wait for connector to restart and refresh schema
+            # Schema refresh can take several seconds depending on database size
+            self._log_info("  → Waiting for connector to restart and refresh schema...")
+            time.sleep(3)  # Initial wait for restart
+
+            # Poll for RUNNING state with longer timeout
+            for i in range(20):  # Up to 10 seconds
                 time.sleep(0.5)
                 exists, status_data = self.connector_manager.get_connector_status(self.config.connector_name)
                 if exists and status_data:
                     state = status_data.get('connector', {}).get('state', '')
                     if state == 'RUNNING':
-                        self._log_info("✓ Connector is RUNNING")
+                        # Additional wait for schema refresh after RUNNING
+                        self._log_info("  → Connector RUNNING, waiting for schema refresh...")
+                        time.sleep(3)  # Extra time for schema history to be read
+                        self._log_info("✓ Connector ready with updated schema")
                         break
+                    elif state == 'FAILED':
+                        return False, f"Connector failed after config update"
 
             # ========================================
             # STEP 4: Send incremental snapshot signal
@@ -1265,11 +1320,6 @@ class ReplicationOrchestrator:
             )
 
             self._log_info(f"✓ Signal sent via {method} - ID: {signal_id}")
-
-            # For Kafka signals, restart connector to process
-            if method == 'kafka':
-                self.connector_manager.restart_connector(self.config.connector_name)
-                self._log_info("✓ Connector restarted to process Kafka signal")
 
             # ========================================
             # STEP 5: Restart sink connector
@@ -1391,6 +1441,344 @@ class ReplicationOrchestrator:
             return 'failed'
 
     # ==========================================
-    #
+    # Batch Processing Methods
+    # ==========================================
 
+    def resume_connector(self) -> Tuple[bool, str]:
+        """
+        Resume a paused source connector.
+        Used by batch processing to start a sync window.
 
+        Returns:
+            (success, message)
+        """
+        self._log_info("Resuming source connector...")
+
+        if not self.config.connector_name:
+            return False, "No connector configured"
+
+        try:
+            success, error = self.connector_manager.resume_connector(self.config.connector_name)
+
+            if success:
+                self.config.connector_state = 'RUNNING'
+                self.config.save()
+                self._log_info(f"✓ Connector resumed: {self.config.connector_name}")
+                return True, "Connector resumed successfully"
+            else:
+                return False, f"Failed to resume connector: {error}"
+
+        except Exception as e:
+            error_msg = f"Error resuming connector: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def pause_connector(self) -> Tuple[bool, str]:
+        """
+        Pause a running source connector.
+        Used by batch processing to end a sync window.
+
+        Returns:
+            (success, message)
+        """
+        self._log_info("Pausing source connector...")
+
+        if not self.config.connector_name:
+            return False, "No connector configured"
+
+        try:
+            success, error = self.connector_manager.pause_connector(self.config.connector_name)
+
+            if success:
+                self.config.connector_state = 'PAUSED'
+                self.config.save()
+                self._log_info(f"✓ Connector paused: {self.config.connector_name}")
+                return True, "Connector paused successfully"
+            else:
+                return False, f"Failed to pause connector: {error}"
+
+        except Exception as e:
+            error_msg = f"Error pausing connector: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def _get_batch_interval_seconds(self) -> int:
+        """
+        Convert batch interval choice to seconds.
+
+        Returns:
+            Interval in seconds
+        """
+        interval_map = {
+            '5m': 5 * 60,         # 5 minutes
+            '30m': 30 * 60,       # 30 minutes
+            '2h': 2 * 60 * 60,    # 2 hours
+            '6h': 6 * 60 * 60,    # 6 hours
+            '12h': 12 * 60 * 60,  # 12 hours
+            '24h': 24 * 60 * 60,  # 24 hours
+        }
+        return interval_map.get(self.config.batch_interval, 2 * 60 * 60)
+
+    def setup_batch_schedule(self) -> Tuple[bool, str]:
+        """
+        Create or update Celery Beat periodic task for batch processing.
+
+        Uses django-celery-beat's IntervalSchedule and PeriodicTask models.
+
+        Returns:
+            (success, message)
+        """
+        if self.config.processing_mode != 'batch':
+            return False, "Connector is not in batch processing mode"
+
+        if not self.config.batch_interval:
+            return False, "No batch interval configured"
+
+        try:
+            from django_celery_beat.models import PeriodicTask, IntervalSchedule
+            import json
+
+            # Get interval in seconds
+            interval_seconds = self._get_batch_interval_seconds()
+
+            # Create or get interval schedule
+            schedule, _ = IntervalSchedule.objects.get_or_create(
+                every=interval_seconds,
+                period=IntervalSchedule.SECONDS,
+            )
+
+            # Generate unique task name
+            task_name = f"batch_sync_config_{self.config.id}"
+
+            # Create or update periodic task
+            periodic_task, created = PeriodicTask.objects.update_or_create(
+                name=task_name,
+                defaults={
+                    'interval': schedule,
+                    'task': 'client.tasks.run_batch_sync',
+                    'args': json.dumps([self.config.id]),
+                    'enabled': True,
+                }
+            )
+
+            # Calculate next run time
+            self.config.batch_celery_task_name = task_name
+            self.config.next_batch_run = timezone.now() + timezone.timedelta(seconds=interval_seconds)
+            self.config.save()
+
+            action = "created" if created else "updated"
+            self._log_info(f"✓ Batch schedule {action}: {task_name} (every {self.config.batch_interval})")
+
+            return True, f"Batch schedule {action} successfully"
+
+        except ImportError:
+            error_msg = "django-celery-beat is not installed. Run: pip install django-celery-beat"
+            self._log_error(error_msg)
+            return False, error_msg
+
+        except Exception as e:
+            error_msg = f"Failed to setup batch schedule: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def remove_batch_schedule(self) -> Tuple[bool, str]:
+        """
+        Remove Celery Beat periodic task for batch processing.
+
+        Returns:
+            (success, message)
+        """
+        if not self.config.batch_celery_task_name:
+            return True, "No batch schedule to remove"
+
+        try:
+            from django_celery_beat.models import PeriodicTask
+
+            # Delete periodic task
+            deleted_count, _ = PeriodicTask.objects.filter(
+                name=self.config.batch_celery_task_name
+            ).delete()
+
+            # Clear task name from config
+            self.config.batch_celery_task_name = None
+            self.config.next_batch_run = None
+            self.config.save()
+
+            if deleted_count > 0:
+                self._log_info(f"✓ Batch schedule removed")
+                return True, "Batch schedule removed successfully"
+            else:
+                return True, "No batch schedule found (already removed)"
+
+        except ImportError:
+            return True, "django-celery-beat not installed, no schedule to remove"
+
+        except Exception as e:
+            error_msg = f"Failed to remove batch schedule: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def update_batch_interval(self, new_interval: str) -> Tuple[bool, str]:
+        """
+        Update the batch interval and reschedule.
+
+        Args:
+            new_interval: New interval choice ('30m', '2h', '6h', '12h', '24h')
+
+        Returns:
+            (success, message)
+        """
+        valid_intervals = ['30m', '2h', '6h', '12h', '24h']
+        if new_interval not in valid_intervals:
+            return False, f"Invalid interval. Must be one of: {', '.join(valid_intervals)}"
+
+        self.config.batch_interval = new_interval
+        self.config.save()
+
+        # Reschedule with new interval
+        return self.setup_batch_schedule()
+
+    def _wait_for_snapshot_completion(self, max_wait_minutes: int = 60) -> Tuple[bool, str]:
+        """
+        Wait for initial snapshot to complete before transitioning to streaming.
+
+        Monitors connector status until snapshot is complete or timeout.
+
+        Args:
+            max_wait_minutes: Maximum time to wait for snapshot (default 60 min)
+
+        Returns:
+            (success, message)
+        """
+        import time
+
+        self._log_info(f"Waiting for initial snapshot to complete (max {max_wait_minutes} min)...")
+
+        max_wait_seconds = max_wait_minutes * 60
+        poll_interval = 10  # Check every 10 seconds
+        elapsed = 0
+
+        while elapsed < max_wait_seconds:
+            try:
+                exists, status_data = self.connector_manager.get_connector_status(
+                    self.config.connector_name
+                )
+
+                if not exists:
+                    return False, "Connector not found"
+
+                if status_data:
+                    connector_state = status_data.get('connector', {}).get('state', '')
+
+                    # Check if connector failed
+                    if connector_state == 'FAILED':
+                        return False, "Connector failed during snapshot"
+
+                    # Check task states for snapshot status
+                    tasks = status_data.get('tasks', [])
+                    if tasks:
+                        task_state = tasks[0].get('state', '')
+                        if task_state == 'FAILED':
+                            trace = tasks[0].get('trace', 'Unknown error')
+                            return False, f"Connector task failed: {trace[:200]}"
+
+                        # Connector is running - check if in streaming mode
+                        # Debezium moves to streaming after snapshot completes
+                        if connector_state == 'RUNNING' and task_state == 'RUNNING':
+                            # Log progress
+                            self._log_info(f"  Snapshot in progress... ({int(elapsed)}s elapsed)")
+
+                            # After initial delay, assume streaming if still running
+                            # Debezium doesn't expose explicit "snapshot complete" status via REST API
+                            # We wait a minimum time then check if connector is stable
+                            if elapsed >= 30:  # Minimum 30 seconds
+                                self._log_info("  Connector is running and stable, assuming snapshot complete")
+                                return True, "Snapshot complete (connector streaming)"
+
+            except Exception as e:
+                self._log_warning(f"  Error checking status: {e}")
+
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        return False, f"Timeout waiting for snapshot after {max_wait_minutes} minutes"
+
+    def start_batch_replication(self) -> Tuple[bool, str]:
+        """
+        Start replication in batch mode.
+
+        Flow:
+        1. Create connector (starts with initial snapshot per config)
+        2. Wait for initial snapshot to complete
+        3. Pause connector for scheduled batch syncs
+        4. Setup batch schedule via Celery Beat
+
+        Returns:
+            (success, message)
+        """
+        self._log_info("=" * 60)
+        self._log_info("STARTING BATCH REPLICATION")
+        self._log_info(f"Interval: {self.config.batch_interval}")
+        self._log_info("=" * 60)
+
+        try:
+            # Step 1: Create connectors (source + sink)
+            # Skip topic conflict check for batch mode - multiple batch replications 
+            # can use same source database without conflicts
+            self._log_info("Step 1/4: Creating connectors...")
+            success, message = self.start_replication(skip_topic_conflict_check=True)
+
+            if not success:
+                return False, message
+
+            # Step 2: Wait for initial snapshot to complete
+            self._log_info("Step 2/4: Waiting for initial snapshot...")
+
+            # Determine wait time based on snapshot mode
+            if self.config.snapshot_mode == 'never':
+                self._log_info("  Snapshot mode is 'never', skipping wait")
+            else:
+                success, message = self._wait_for_snapshot_completion(max_wait_minutes=60)
+                if not success:
+                    self._log_warning(f"Snapshot wait issue: {message}")
+                    # Continue anyway - connector might still be usable
+
+            # Step 3: Pause source connector (batch mode waits between syncs)
+            self._log_info("Step 3/4: Pausing connector for batch scheduling...")
+            success, message = self.pause_connector()
+            if not success:
+                self._log_warning(f"Could not pause connector: {message}")
+                # Retry once after a short delay
+                import time
+                time.sleep(3)
+                success, message = self.pause_connector()
+                if not success:
+                    self._log_warning(f"Retry pause failed: {message}")
+
+            # Update status for batch mode
+            self.config.status = 'active'
+            self.config.is_active = True
+            self.config.connector_state = 'PAUSED'
+            self.config.save()
+
+            # Step 4: Setup batch schedule via Celery Beat
+            self._log_info("Step 4/4: Setting up batch schedule...")
+            success, message = self.setup_batch_schedule()
+            if not success:
+                self._log_warning(f"Could not setup batch schedule: {message}")
+                return False, message
+
+            self._log_info("=" * 60)
+            self._log_info("✓ BATCH REPLICATION STARTED")
+            self._log_info(f"Connector: {self.config.connector_name} (PAUSED)")
+            self._log_info(f"Initial snapshot: Complete")
+            self._log_info(f"Next sync: {self.config.next_batch_run}")
+            self._log_info("=" * 60)
+
+            return True, "Batch replication started successfully"
+
+        except Exception as e:
+            error_msg = f"Failed to start batch replication: {str(e)}"
+            self._log_error(error_msg)
+            self._update_status('error', error_msg)
+            return False, error_msg

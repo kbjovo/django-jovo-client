@@ -69,6 +69,94 @@
         </div>
     </div>
 
+    <!-- Processing Mode Configuration (CDC vs Batch) -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
+        <div class="bg-purple-600 text-white px-4 py-2">
+            <h5 class="text-base font-semibold">🔄 Processing Mode</h5>
+        </div>
+        <div class="p-4">
+            <p class="text-gray-600 dark:text-gray-400 mb-4 text-sm">
+                Choose how data changes should be captured and replicated.
+            </p>
+
+            <!-- CDC vs Batch Mode Selection -->
+            <div class="space-y-3 mb-4">
+                <label class="flex items-start p-3 border-2 border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+                    <input type="radio"
+                           name="processing_mode"
+                           value="cdc"
+                           class="mt-1 w-4 h-4 text-blue-600 focus:ring-blue-500"
+                           checked
+                           onchange="toggleBatchOptions()">
+                    <div class="ml-3">
+                        <span class="block font-semibold text-gray-900 dark:text-white">CDC (Change Data Capture)</span>
+                        <span class="block text-sm text-gray-600 dark:text-gray-400 mt-1">
+                            Continuous streaming of changes. Best for real-time requirements.
+                        </span>
+                    </div>
+                </label>
+
+                <label class="flex items-start p-3 border-2 border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+                    <input type="radio"
+                           name="processing_mode"
+                           value="batch"
+                           class="mt-1 w-4 h-4 text-blue-600 focus:ring-blue-500"
+                           onchange="toggleBatchOptions()">
+                    <div class="ml-3">
+                        <span class="block font-semibold text-gray-900 dark:text-white">Batch Processing</span>
+                        <span class="block text-sm text-gray-600 dark:text-gray-400 mt-1">
+                            Periodic sync with pauses. Good for reducing load on source database.
+                        </span>
+                    </div>
+                </label>
+            </div>
+
+            <!-- Info Text -->
+            <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 text-sm text-blue-900 dark:text-blue-100" id="processing-mode-info">
+                <strong>CDC Mode:</strong> Changes are streamed continuously. Best for real-time requirements.
+            </div>
+
+            <!-- Batch Options (shown only when batch mode is selected) -->
+            <div id="batch-options" class="hidden mt-4">
+                <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-2">
+                    Sync Interval
+                </label>
+                <select name="batch_interval"
+                        id="batch_interval"
+                        class="w-full md:w-1/2 px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <option value="">Select interval...</option>
+                    <option value="5m">Every 5 minutes</option>
+                    <option value="15m">Every 15 minutes</option>
+                    <option value="30m">Every 30 minutes</option>
+                    <option value="1h">Every 1 hour</option>
+                    <option value="2h">Every 2 hours</option>
+                    <option value="4h">Every 4 hours</option>
+                    <option value="6h">Every 6 hours</option>
+                    <option value="12h">Every 12 hours</option>
+                    <option value="24h">Every 24 hours</option>
+                </select>
+                <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                    How frequently should the connector sync data in batch mode?
+                </p>
+
+                <!-- Max Catchup Duration -->
+                <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-2 mt-4">
+                    Max Sync Duration
+                </label>
+                <select name="batch_max_catchup_minutes"
+                        id="batch_max_catchup_minutes"
+                        class="w-full md:w-1/2 px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <option value="5" selected>5 minutes</option>
+                    <option value="10">10 minutes</option>
+                    <option value="20">20 minutes</option>
+                </select>
+                <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                    Maximum time the connector runs before pausing. Should be less than sync interval.
+                </p>
+            </div>
+        </div>
+    </div>
+
     <!-- Table & Column Configuration with Accordion -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
         <div class="bg-green-600 text-white px-4 py-2">
@@ -168,180 +256,64 @@
                             <span class="ml-2 text-gray-600 dark:text-gray-400">Loading columns...</span>
                         </div>
 
-                        <!-- Columns List (loaded via AJAX) - Read-only display -->
+                        <!-- Columns Display (populated via AJAX) -->
                         <div id="columns-{{ escaped_name }}" class="hidden">
-                            <div class="flex justify-between items-center mb-3">
-                                <h4 class="text-sm font-semibold text-gray-900 dark:text-white">Columns to Replicate</h4>
-                                <span class="text-xs text-green-600 dark:text-green-400 font-medium">✓ All columns will be replicated</span>
+                            <div class="mb-3">
+                                <p class="text-sm font-medium text-gray-700 dark:text-gray-300" id="column-count-display-{{ escaped_name }}">
+                                    All columns will be replicated
+                                </p>
+                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                    All columns are automatically included in replication
+                                </p>
                             </div>
 
-                            <div id="column-list-{{ escaped_name }}" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto p-2 bg-gray-50 dark:bg-gray-900 rounded-lg">
-                                <!-- Columns will be loaded here via AJAX -->
+                            <!-- Column List -->
+                            <div id="column-list-{{ escaped_name }}" class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                <!-- Columns populated via JavaScript -->
                             </div>
-
-                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                                <span id="column-count-display-{{ escaped_name }}"></span>
-                            </p>
                         </div>
                         {% endwith %}
                     </div>
                 </div>
                 {% endfor %}
             </div>
-
-            <div class="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
-                <p class="text-sm text-blue-900 dark:text-blue-100">
-                    <strong>ℹ️ Note:</strong> All columns from selected tables will be replicated to the target database.
+            {% else %}
+            <div class="text-center py-8">
+                <p class="text-gray-500 dark:text-gray-400">
+                    ℹ️ No available tables. All tables are already assigned to other connectors.
                 </p>
             </div>
-            {% else %}
-            <p class="text-red-600 dark:text-red-400">No unassigned tables available. All tables are already assigned to existing connectors.</p>
             {% endif %}
         </div>
     </div>
 
-    <!-- Performance Tuning -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
-        <div class="bg-yellow-500 text-gray-900 px-4 py-2">
-            <h5 class="text-base font-semibold">⚡ Performance Tuning</h5>
-        </div>
-        <div class="p-4">
-            <p class="text-gray-600 dark:text-gray-400 mb-3 text-sm">Configure performance settings for this connector.</p>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                <!-- Snapshot Mode -->
-                <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-2">Snapshot Mode</label>
-                    <select name="snapshot_mode"
-                            class="w-full px-4 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                        {% for value, label in snapshot_mode_choices %}
-                        <option value="{{ value }}" {% if value == 'initial' %}selected{% endif %}>
-                            {{ label }}
-                        </option>
-                        {% endfor %}
-                    </select>
-                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
-                        <span class="font-semibold">initial</span> (recommended) - Snapshot on first run only<br>
-                        <span class="font-semibold">never</span> - CDC only, no snapshot<br>
-                        <span class="font-semibold">when_needed</span> - Snapshot if no offset exists
-                    </p>
-                </div>
-
-                <!-- Max Queue Size -->
-                <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-2">Max Queue Size</label>
-                    <input type="number"
-                           name="max_queue_size"
-                           class="w-full px-4 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
-                           value="8192"
-                           min="1024"
-                           max="32768">
-                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
-                        Range: 1024-32768. Higher = better throughput but more memory
-                    </p>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                <!-- Max Batch Size -->
-                <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">Max Batch Size</label>
-                    <input type="number"
-                           name="max_batch_size"
-                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
-                           value="2048"
-                           min="512"
-                           max="8192">
-                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                        512-8192. Larger = faster but more latency
-                    </p>
-                </div>
-
-                <!-- Poll Interval -->
-                <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">Poll Interval (ms)</label>
-                    <input type="number"
-                           name="poll_interval_ms"
-                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
-                           value="500"
-                           min="100"
-                           max="5000"
-                           step="100">
-                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                        100-5000ms. Lower = real-time but more CPU
-                    </p>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <!-- Incremental Snapshot Chunk Size -->
-                <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">Incremental Snapshot Chunk Size</label>
-                    <input type="number"
-                           name="incremental_snapshot_chunk_size"
-                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
-                           value="1024"
-                           min="256"
-                           max="10240">
-                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                        256-10240. For adding tables via signals
-                    </p>
-                </div>
-
-                <!-- Auto Create Tables -->
-                <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">Target Database Options</label>
-                    <div class="flex items-center mt-2">
-                        <input type="checkbox"
-                               name="auto_create_tables"
-                               id="auto_create_tables"
-                               class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500"
-                               checked>
-                        <label for="auto_create_tables" class="ml-2 text-sm text-gray-900 dark:text-white">
-                            Auto-create tables in target database
-                        </label>
-                    </div>
-                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                        Tables created automatically if missing
-                    </p>
-                </div>
-            </div>
-        </div>
-    </div>
 </form>
 
 <script>
 const DATABASE_ID = {{ database.pk }};
-const loadedTables = new Set(); // Track which tables have loaded their columns
-let allTablesSelected = false; // Track toggle state
+let loadedTables = new Set();
+let allTablesSelected = false;
 
-// Helper function to escape table names for use in CSS selectors
-// MS SQL table names contain dots (e.g., "dbo.Products") which break CSS selectors
-// Must match Django's cut:'.' filter which removes dots entirely
-function escapeTableName(tableName) {
-    return tableName.replace(/\./g, '');
+// Escape table names for use in IDs
+function escapeTableName(name) {
+    return name.replace(/[.]/g, '');
 }
 
-// Handle table checkbox change - auto-expand accordion and load columns
+// Handle table checkbox change
 function handleTableCheckboxChange(tableName) {
+    const escapedName = escapeTableName(tableName);
     const checkbox = document.querySelector(`.table-checkbox[data-table-name="${tableName}"]`);
-    const escapedTableName = escapeTableName(tableName);
-    const accordion = document.getElementById(`accordion-${escapedTableName}`);
-    const icon = document.getElementById(`icon-${escapedTableName}`);
+    const accordion = document.getElementById(`accordion-${escapedName}`);
 
-    // If checkbox is checked and accordion is hidden, expand it
-    if (checkbox.checked && accordion.classList.contains('hidden')) {
-        accordion.classList.remove('hidden');
-        icon.style.transform = 'rotate(90deg)';
-
-        // Load columns if not already loaded
-        if (!loadedTables.has(tableName)) {
-            loadTableSchema(tableName);
+    if (checkbox.checked) {
+        // Expand accordion when checked
+        if (accordion.classList.contains('hidden')) {
+            toggleAccordion(tableName);
         }
     }
 }
 
-// Toggle all tables selection
+// Toggle all tables
 function toggleAllTables() {
     const checkboxes = document.querySelectorAll('.table-checkbox');
     const btn = document.getElementById('toggleTablesBtn');
@@ -474,9 +446,40 @@ document.querySelector('form').addEventListener('submit', function(e) {
         return false;
     }
 
+    // Validate batch mode has interval selected
+    const processingMode = document.querySelector('input[name="processing_mode"]:checked').value;
+    if (processingMode === 'batch') {
+        const batchInterval = document.getElementById('batch_interval').value;
+        if (!batchInterval) {
+            e.preventDefault();
+            alert('⚠️ Please select a sync interval for batch processing');
+            return false;
+        }
+    }
+
     // Disable submit button to prevent double submission
     document.getElementById('submit-btn-top').disabled = true;
     document.getElementById('submit-btn-top').innerHTML = '⏳ Creating...';
+});
+
+// Toggle batch options visibility based on processing mode
+function toggleBatchOptions() {
+    const processingMode = document.querySelector('input[name="processing_mode"]:checked').value;
+    const batchOptions = document.getElementById('batch-options');
+    const infoText = document.getElementById('processing-mode-info');
+
+    if (processingMode === 'batch') {
+        batchOptions.classList.remove('hidden');
+        infoText.innerHTML = '<strong>Batch Mode:</strong> Connector pauses between sync windows. Good for reducing load on source database.';
+    } else {
+        batchOptions.classList.add('hidden');
+        infoText.innerHTML = '<strong>CDC Mode:</strong> Changes are streamed continuously. Best for real-time requirements.';
+    }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    toggleBatchOptions();
 });
 </script>
 

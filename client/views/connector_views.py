@@ -427,6 +427,14 @@ def connector_add(request, database_pk):
                     messages.error(request, f"Tables already assigned: {', '.join(invalid_tables)}")
                     return redirect('connector_add', database_pk=database_pk)
 
+                # Get processing mode settings
+                processing_mode = request.POST.get('processing_mode', 'cdc')
+                batch_interval = request.POST.get('batch_interval') if processing_mode == 'batch' else None
+                batch_max_catchup = int(request.POST.get('batch_max_catchup_minutes', 5))
+                # Validate batch_max_catchup is one of the allowed values
+                if batch_max_catchup not in [5, 10, 20]:
+                    batch_max_catchup = 5
+
                 # Create ReplicationConfig with performance settings
                 replication_config = ReplicationConfig.objects.create(
                     client_database=database,
@@ -436,6 +444,11 @@ def connector_add(request, database_pk):
                     status='configured',
                     is_active=False,
                     auto_create_tables=request.POST.get('auto_create_tables') == 'on',
+
+                    # Processing mode settings
+                    processing_mode=processing_mode,
+                    batch_interval=batch_interval,
+                    batch_max_catchup_minutes=batch_max_catchup,
 
                     # Performance tuning settings
                     snapshot_mode=request.POST.get('snapshot_mode', 'initial'),
@@ -558,6 +571,8 @@ def connector_add(request, database_pk):
         'connector_name_preview': connector_name_preview,
         'unassigned_tables': tables_with_info,
         'snapshot_mode_choices': ReplicationConfig.SNAPSHOT_MODE_CHOICES,
+        'processing_mode_choices': ReplicationConfig.PROCESSING_MODE_CHOICES,
+        'batch_interval_choices': ReplicationConfig.BATCH_INTERVAL_CHOICES,
     }
 
     return render(request, 'client/connectors/connector_add.html', context)
@@ -571,11 +586,45 @@ def connector_create_debezium(request, config_pk):
     """
     Create Debezium source connector and sink connector (if first).
     This is called after connector configuration is saved.
+
+    For batch processing mode, the connector is created in PAUSED state
+    and a Celery Beat schedule is set up.
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     database = replication_config.client_database
     client = database.client
 
+    # Check if batch mode - use orchestrator for proper setup
+    if replication_config.processing_mode == 'batch':
+        try:
+            from client.replication.orchestrator import ReplicationOrchestrator
+            orchestrator = ReplicationOrchestrator(replication_config)
+
+            success, message = orchestrator.start_batch_replication()
+
+            if success:
+                messages.success(
+                    request,
+                    f"Batch connector {replication_config.connector_name} created successfully. "
+                    f"Next sync: {replication_config.next_batch_run}"
+                )
+            else:
+                messages.error(request, f"Error creating batch connector: {message}")
+                replication_config.status = 'error'
+                replication_config.last_error_message = message
+                replication_config.save()
+
+            return redirect('connector_list', database_pk=database.id)
+
+        except Exception as e:
+            logger.error(f"Error creating batch connector: {e}", exc_info=True)
+            messages.error(request, f"Error creating batch connector: {str(e)}")
+            replication_config.status = 'error'
+            replication_config.last_error_message = str(e)
+            replication_config.save()
+            return redirect('connector_list', database_pk=database.id)
+
+    # CDC mode - continue with existing logic
     try:
         connector_manager = DebeziumConnectorManager()
 

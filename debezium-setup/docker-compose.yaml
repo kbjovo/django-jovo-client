@@ -432,7 +432,35 @@ services:
     restart: unless-stopped
 
   # ============================================
-  # Celery Beat - Periodic Tasks
+  # Celery Worker - Task Executor
+  # ============================================
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: celery-worker
+    hostname: celery-worker
+    depends_on:
+      - django
+      - redis
+    environment:
+      - DJANGO_SETTINGS_MODULE=jovoclient.settings
+    env_file:
+      - ../.env.docker
+    volumes:
+      - ..:/app
+      - ../logs:/app/logs
+    networks:
+      - replication-network
+    command: celery -A jovoclient worker -l info -c 4 --max-tasks-per-child=100
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Beat - Periodic Tasks Scheduler
   # ============================================
   celery-beat:
     build:
@@ -443,13 +471,14 @@ services:
     depends_on:
       - django
       - redis
+      - celery-worker
     environment:
       - DJANGO_SETTINGS_MODULE=jovoclient.settings
     env_file:
       - ../.env.docker
     volumes:
       - ..:/app
-      - ../logs:/app/logs 
+      - ../logs:/app/logs
     networks:
       - replication-network
     command: celery -A jovoclient beat -l info

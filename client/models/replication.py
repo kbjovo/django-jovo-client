@@ -201,13 +201,13 @@ class ConnectorHistory(models.Model):
 
 class ReplicationConfig(models.Model):
     """Configuration for replication from source DB to client's database"""
-    
+
     SYNC_TYPE_CHOICES = [
         ('full', 'Full Refresh'),
         ('incremental', 'Incremental Sync'),
         ('realtime', 'Real-time CDC'),
     ]
-    
+
     SYNC_FREQUENCY_CHOICES = [
         ('realtime', 'Real-time (CDC)'),
         ('every_1min', 'Every 1 minute'),
@@ -218,13 +218,34 @@ class ReplicationConfig(models.Model):
         ('daily', 'Daily'),
         ('manual', 'Manual Only'),
     ]
-    
+
     STATUS_CHOICES = [
         ('configured', 'Configured'),  # Added this status
         ('active', 'Active'),
         ('paused', 'Paused'),
         ('error', 'Error'),
         ('disabled', 'Disabled'),
+    ]
+
+    # ====== PROCESSING MODE ======
+    PROCESSING_MODE_CHOICES = [
+        ('cdc', 'CDC (Real-time)'),
+        ('batch', 'Batch Processing'),
+    ]
+
+    BATCH_INTERVAL_CHOICES = [
+        ('5m', 'Every 5 minutes'),
+        ('30m', 'Every 30 minutes'),
+        ('2h', 'Every 2 hours'),
+        ('6h', 'Every 6 hours'),
+        ('12h', 'Every 12 hours'),
+        ('24h', 'Every 24 hours (Daily)'),
+    ]
+
+    BATCH_MAX_CATCHUP_CHOICES = [
+        (5, '5 minutes'),
+        (10, '10 minutes'),
+        (20, '20 minutes'),
     ]
     
     client_database = models.ForeignKey(
@@ -241,12 +262,53 @@ class ReplicationConfig(models.Model):
         help_text="Type of synchronization"
     )
     sync_frequency = models.CharField(
-        max_length=20, 
-        choices=SYNC_FREQUENCY_CHOICES, 
+        max_length=20,
+        choices=SYNC_FREQUENCY_CHOICES,
         default='realtime',
         help_text="How often to sync (ignored for real-time CDC)"
     )
-    
+
+    # ====== PROCESSING MODE SETTINGS ======
+    processing_mode = models.CharField(
+        max_length=20,
+        choices=PROCESSING_MODE_CHOICES,
+        default='cdc',
+        help_text="CDC for real-time streaming, Batch for scheduled sync windows"
+    )
+
+    batch_interval = models.CharField(
+        max_length=10,
+        choices=BATCH_INTERVAL_CHOICES,
+        null=True,
+        blank=True,
+        help_text="Sync interval for batch processing mode"
+    )
+
+    batch_max_catchup_minutes = models.IntegerField(
+        choices=BATCH_MAX_CATCHUP_CHOICES,
+        default=5,
+        help_text="Maximum minutes to run during batch sync before pausing (throttle)"
+    )
+
+    last_batch_run = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of last batch sync execution"
+    )
+
+    next_batch_run = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Scheduled timestamp for next batch sync"
+    )
+
+    batch_celery_task_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Celery Beat periodic task name for batch scheduling"
+    )
+
     # Status
     status = models.CharField(
         max_length=20, 

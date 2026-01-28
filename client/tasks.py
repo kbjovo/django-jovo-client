@@ -347,3 +347,189 @@ def check_replication_health():
 
 # Import health monitor task (connector monitoring only)
 from client.replication.health_monitor import monitor_replication_health
+
+
+# ============================================================================
+# BATCH PROCESSING TASKS
+# ============================================================================
+
+@shared_task(bind=True, max_retries=2)
+def run_batch_sync(self, replication_config_id: int):
+    """
+    Execute a batch sync cycle for a connector in batch processing mode.
+
+    This task is scheduled by Celery Beat based on the batch_interval setting.
+
+    Cycle:
+    1. Resume connector (starts catching up with accumulated changes)
+    2. Wait until lag is cleared OR max duration reached (throttle)
+    3. Pause connector
+    4. Record completion time and schedule next run
+
+    Args:
+        replication_config_id: ID of the ReplicationConfig to sync
+
+    Returns:
+        Dict with success status and details
+    """
+    import time
+
+    try:
+        logger.info(f"=" * 60)
+        logger.info(f"BATCH SYNC STARTING - Config ID: {replication_config_id}")
+        logger.info(f"=" * 60)
+
+        config = ReplicationConfig.objects.get(id=replication_config_id)
+
+        # Validate batch mode
+        if config.processing_mode != 'batch':
+            logger.warning(f"Config {replication_config_id} is not in batch mode, skipping")
+            return {'success': False, 'error': 'Not in batch mode'}
+
+        # Validate connector exists
+        if not config.connector_name:
+            logger.error(f"No connector configured for config {replication_config_id}")
+            return {'success': False, 'error': 'No connector configured'}
+
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+
+        # ========================================
+        # STEP 1: Resume Connector
+        # ========================================
+        logger.info("Step 1/3: Resuming connector...")
+
+        success, message = orchestrator.resume_connector()
+        if not success:
+            logger.error(f"Failed to resume connector: {message}")
+            return {'success': False, 'error': message}
+
+        logger.info(f"✓ Connector resumed: {config.connector_name}")
+
+        # ========================================
+        # STEP 2: Wait for Catch-up (with throttle)
+        # ========================================
+        logger.info("Step 2/3: Waiting for catch-up (throttled)...")
+
+        max_duration_minutes = config.batch_max_catchup_minutes or 30
+        max_duration_seconds = max_duration_minutes * 60
+        poll_interval_seconds = 30  # Check every 30 seconds
+
+        start_time = time.time()
+        elapsed = 0
+
+        manager = DebeziumConnectorManager()
+
+        while elapsed < max_duration_seconds:
+            # Check connector status
+            exists, status_data = manager.get_connector_status(config.connector_name)
+
+            if not exists:
+                logger.error("Connector disappeared during batch sync")
+                break
+
+            if status_data:
+                state = status_data.get('connector', {}).get('state', '')
+                if state == 'FAILED':
+                    logger.error("Connector failed during batch sync")
+                    config.status = 'error'
+                    config.last_error_message = "Connector failed during batch sync"
+                    config.save()
+                    return {'success': False, 'error': 'Connector failed'}
+
+            # Log progress
+            elapsed = time.time() - start_time
+            remaining = max_duration_seconds - elapsed
+            logger.info(f"  Batch sync running... {int(elapsed)}s elapsed, {int(remaining)}s remaining")
+
+            if remaining <= 0:
+                logger.info("  Max duration reached (throttle limit)")
+                break
+
+            # Wait before next check
+            time.sleep(min(poll_interval_seconds, remaining))
+            elapsed = time.time() - start_time
+
+        total_elapsed = time.time() - start_time
+        logger.info(f"✓ Batch window completed after {int(total_elapsed)} seconds")
+
+        # ========================================
+        # STEP 3: Pause Connector
+        # ========================================
+        logger.info("Step 3/3: Pausing connector...")
+
+        success, message = orchestrator.pause_connector()
+        if not success:
+            logger.warning(f"Failed to pause connector: {message}")
+            # Continue anyway - we'll try to pause next time
+
+        logger.info(f"✓ Connector paused: {config.connector_name}")
+
+        # ========================================
+        # Update timestamps
+        # ========================================
+        config.last_batch_run = timezone.now()
+
+        # Calculate next run based on interval
+        interval_seconds = orchestrator._get_batch_interval_seconds()
+        config.next_batch_run = timezone.now() + timedelta(seconds=interval_seconds)
+        config.save()
+
+        logger.info(f"=" * 60)
+        logger.info(f"✓ BATCH SYNC COMPLETED")
+        logger.info(f"  Duration: {int(total_elapsed)} seconds")
+        logger.info(f"  Next run: {config.next_batch_run}")
+        logger.info(f"=" * 60)
+
+        return {
+            'success': True,
+            'config_id': replication_config_id,
+            'duration_seconds': int(total_elapsed),
+            'next_run': config.next_batch_run.isoformat() if config.next_batch_run else None,
+        }
+
+    except ReplicationConfig.DoesNotExist:
+        logger.error(f"ReplicationConfig {replication_config_id} not found")
+        return {'success': False, 'error': 'Config not found'}
+
+    except Exception as e:
+        logger.error(f"Error during batch sync: {e}", exc_info=True)
+
+        # Update config status
+        try:
+            config = ReplicationConfig.objects.get(id=replication_config_id)
+            config.last_error_message = str(e)
+            config.save()
+        except Exception:
+            pass
+
+        # Retry with backoff
+        try:
+            raise self.retry(countdown=60 * (2 ** self.request.retries))
+        except self.MaxRetriesExceededError:
+            logger.error(f"Max retries exceeded for batch sync")
+
+        return {'success': False, 'error': str(e)}
+
+
+@shared_task
+def trigger_batch_sync_now(replication_config_id: int):
+    """
+    Manually trigger a batch sync immediately (Sync Now button).
+
+    Args:
+        replication_config_id: ID of the ReplicationConfig to sync
+
+    Returns:
+        Dict with task ID for tracking
+    """
+    logger.info(f"Manual batch sync triggered for config {replication_config_id}")
+
+    # Run the batch sync task
+    result = run_batch_sync.delay(replication_config_id)
+
+    return {
+        'success': True,
+        'task_id': result.id,
+        'message': 'Batch sync started'
+    }
