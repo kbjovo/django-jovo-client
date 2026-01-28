@@ -1066,7 +1066,10 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 4: Update and restart source connector
             # ========================================
-            self._log_info("STEP 4/5: Updating source connector configuration...")
+            self._log_info("STEP 4/6: Updating source connector configuration...")
+
+            # For batch mode: check if connector is paused and resume it first
+            was_paused = self._resume_if_paused()
 
             source_config = get_connector_config_for_database(
                 db_config=db_config,
@@ -1079,6 +1082,8 @@ class ReplicationOrchestrator:
                 source_config
             )
             if not success:
+                # Re-pause if we resumed it
+                self._re_pause_if_batch_mode(was_paused)
                 return False, f"Failed to update source connector: {error}"
 
             self._log_info(f"✓ Source connector updated with {len(remaining_tables)} tables")
@@ -1093,7 +1098,7 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 5: Restart sink connector
             # ========================================
-            self._log_info("STEP 5/5: Restarting sink connector...")
+            self._log_info("STEP 5/6: Restarting sink connector...")
 
             if self.config.sink_connector_name:
                 success, error = self.connector_manager.restart_connector(
@@ -1104,6 +1109,15 @@ class ReplicationOrchestrator:
                 else:
                     self._log_warning(f"⚠️ Sink connector restart failed: {error}")
 
+            # ========================================
+            # STEP 6: Re-pause for batch mode (if applicable)
+            # ========================================
+            if was_paused:
+                self._log_info("STEP 6/6: Re-pausing connector for batch mode...")
+                self._re_pause_if_batch_mode(was_paused)
+            else:
+                self._log_info("STEP 6/6: Skipped (connector was not paused)")
+
             self._log_info("=" * 60)
             self._log_info("✓ TABLES REMOVED SUCCESSFULLY")
             self._log_info("=" * 60)
@@ -1113,6 +1127,9 @@ class ReplicationOrchestrator:
         except Exception as e:
             error_msg = f"Failed to remove tables: {str(e)}"
             self._log_error(error_msg)
+            # Ensure we re-pause on error if we resumed
+            if 'was_paused' in locals() and was_paused:
+                self._re_pause_if_batch_mode(was_paused)
             return False, error_msg
 
     def add_tables(self, table_names: list) -> Tuple[bool, str]:
@@ -1256,7 +1273,10 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 3: Update source connector config
             # ========================================
-            self._log_info("STEP 3/5: Updating source connector...")
+            self._log_info("STEP 3/6: Updating source connector...")
+
+            # For batch mode: check if connector is paused and resume it first
+            was_paused = self._resume_if_paused()
 
             all_tables = list(
                 self.config.table_mappings.filter(is_enabled=True)
@@ -1274,6 +1294,8 @@ class ReplicationOrchestrator:
                 source_config
             )
             if not success:
+                # Re-pause if we resumed it
+                self._re_pause_if_batch_mode(was_paused)
                 return False, f"Failed to update source connector: {error}"
 
             self._log_info(f"✓ Source connector config updated with {len(all_tables)} tables")
@@ -1309,7 +1331,7 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 4: Send incremental snapshot signal
             # ========================================
-            self._log_info("STEP 4/5: Sending incremental snapshot signal...")
+            self._log_info("STEP 4/6: Sending incremental snapshot signal...")
 
             from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
 
@@ -1324,7 +1346,7 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 5: Restart sink connector
             # ========================================
-            self._log_info("STEP 5/5: Restarting sink connector...")
+            self._log_info("STEP 5/6: Restarting sink connector...")
 
             if self.config.sink_connector_name:
                 # Sink uses topics.regex so it auto-subscribes to new topics
@@ -1332,11 +1354,30 @@ class ReplicationOrchestrator:
                 self.connector_manager.restart_connector(self.config.sink_connector_name)
                 self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
 
+            # ========================================
+            # STEP 6: Handle batch mode state
+            # ========================================
+            # NOTE: For add_tables, we do NOT re-pause immediately because the
+            # incremental snapshot needs to run. The connector must stay RUNNING
+            # until the snapshot completes. The batch scheduler will pause it
+            # on the next scheduled cycle.
+            if was_paused:
+                self._log_info("STEP 6/6: Batch mode - connector will stay RUNNING for snapshot")
+                self._log_info("  → Incremental snapshot is in progress")
+                self._log_info("  → Connector will be paused on next batch schedule")
+                # Update state to reflect it's now running
+                self.config.connector_state = 'RUNNING'
+                self.config.save()
+            else:
+                self._log_info("STEP 6/6: Skipped (connector was not paused)")
+
             self._log_info("=" * 60)
             self._log_info("✓ TABLES ADDED SUCCESSFULLY")
             self._log_info("=" * 60)
 
             result_msg = f"Added {len(added_tables)} tables via {method} signal (ID: {signal_id})"
+            if was_paused:
+                result_msg += " | Connector running for snapshot (will pause on next schedule)"
             if failed_tables:
                 result_msg += f" | {len(failed_tables)} failed: {', '.join(failed_tables)}"
 
@@ -1345,6 +1386,9 @@ class ReplicationOrchestrator:
         except Exception as e:
             error_msg = f"Failed to add tables: {str(e)}"
             self._log_error(error_msg)
+            # On error, re-pause if we resumed (snapshot didn't start)
+            if 'was_paused' in locals() and was_paused:
+                self._re_pause_if_batch_mode(was_paused)
             return False, error_msg
 
     # ==========================================
@@ -1439,6 +1483,65 @@ class ReplicationOrchestrator:
             return 'degraded'
         else:
             return 'failed'
+
+    # ==========================================
+    # Batch Connector State Helpers
+    # ==========================================
+
+    def _is_connector_paused(self) -> bool:
+        """
+        Check if the source connector is currently paused.
+
+        Returns:
+            True if connector is paused, False otherwise
+        """
+        if not self.config.connector_name:
+            return False
+
+        exists, status_data = self.connector_manager.get_connector_status(
+            self.config.connector_name
+        )
+        if exists and status_data:
+            state = status_data.get('connector', {}).get('state', '')
+            return state == 'PAUSED'
+        return False
+
+    def _resume_if_paused(self) -> bool:
+        """
+        Resume connector if it's paused (for batch mode operations).
+
+        Returns:
+            True if connector was paused and resumed, False if it was already running
+        """
+        if self._is_connector_paused():
+            self._log_info("  → Connector is PAUSED, resuming for config update...")
+            success, _ = self.connector_manager.resume_connector(self.config.connector_name)
+            if success:
+                # Wait for connector to resume
+                import time
+                time.sleep(2)
+                self._log_info("  ✓ Connector resumed")
+                return True
+            else:
+                self._log_warning("  ⚠️ Failed to resume paused connector")
+        return False
+
+    def _re_pause_if_batch_mode(self, was_paused: bool) -> None:
+        """
+        Re-pause connector if it's in batch mode and was previously paused.
+
+        Args:
+            was_paused: Whether the connector was paused before the operation
+        """
+        if was_paused and self.config.processing_mode == 'batch':
+            self._log_info("  → Re-pausing connector for batch mode...")
+            success, _ = self.connector_manager.pause_connector(self.config.connector_name)
+            if success:
+                self.config.connector_state = 'PAUSED'
+                self.config.save()
+                self._log_info("  ✓ Connector re-paused for batch mode")
+            else:
+                self._log_warning("  ⚠️ Failed to re-pause connector")
 
     # ==========================================
     # Batch Processing Methods
