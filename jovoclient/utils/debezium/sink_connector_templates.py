@@ -153,7 +153,7 @@ def get_postgresql_sink_connector_config(
             'KAFKA_INTERNAL_SERVERS',
             'kafka-1:29092,kafka-2:29092,kafka-3:29092'
         )
-        
+
     if schema_registry_url is None:
         from django.conf import settings
         schema_registry_url = settings.DEBEZIUM_CONFIG.get(

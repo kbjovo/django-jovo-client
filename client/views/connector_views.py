@@ -754,6 +754,19 @@ def connector_create_debezium(request, config_pk):
             replication_config.sink_connector_name = sink_connector_name
             replication_config.save()
 
+        # Step 4: Schedule foreign key creation as background task
+        # Foreign keys are added after sink connector creates tables
+        try:
+            from client.tasks import add_foreign_keys_task
+            # Delay 30 seconds to allow sink connector to create tables from initial snapshot
+            add_foreign_keys_task.apply_async(
+                args=[replication_config.id],
+                countdown=30
+            )
+            logger.info(f"Scheduled foreign key creation for config {replication_config.id}")
+        except Exception as e:
+            logger.warning(f"Could not schedule FK task: {e}")
+
         return redirect('connector_list', database_pk=database.id)
 
     except Exception as e:

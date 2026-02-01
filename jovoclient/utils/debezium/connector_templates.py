@@ -278,18 +278,21 @@ def get_postgresql_connector_config(
 
     version = replication_config.connector_version if replication_config else None
     connector_name = generate_connector_name(client, db_config, version=version)
-    
-    safe_slot_name = f"debezium_{client.id}_{db_config.id}".lower()
+
+    # Include version in slot name to prevent conflicts between connector versions
+    # Each connector version needs its own replication slot
+    safe_slot_name = f"debezium_{client.id}_{db_config.id}_v_{version or 0}".lower()
     safe_slot_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in safe_slot_name)
     safe_slot_name = safe_slot_name[:63]
-    
-    publication_name = f"debezium_pub_{client.id}_{db_config.id}".lower()
+
+    # Include version in publication name for same reason
+    publication_name = f"debezium_pub_{client.id}_{db_config.id}_v_{version or 0}".lower()
     publication_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in publication_name)
     publication_name = publication_name[:63]
-    
+
     # ✅ CRITICAL FIX: Create signal table name
     signal_table = f"{schema_name}.debezium_signal"
-    
+
     logger.debug(f"PostgreSQL connector: {connector_name}, slot: {safe_slot_name}, publication: {publication_name}")
     
     config = {
@@ -654,7 +657,7 @@ def get_oracle_connector_config(
         "database.dbname": cdb_service,
         "database.url": jdbc_url,
         "database.pdb.name": pdb_name,
-        
+
         "database.server.name": connector_name.replace('_connector', ''),
         # CRITICAL: Include version to prevent JMX MBean conflicts between multiple connectors
         "topic.prefix": f"client_{client.id}_db_{db_config.id}_v_{version or 0}",

@@ -508,6 +508,253 @@ def manual_create_target_tables(replication_config_id: int, table_names: list = 
         return False, error_msg, {}
 
 
+def add_foreign_keys_to_target(replication_config, specific_tables=None):
+    """
+    Add foreign key constraints to target tables after sink connector creates them.
+
+    This should be called AFTER the sink connector has created the tables.
+    Foreign keys are retrieved from the source database and applied to the target.
+
+    Args:
+        replication_config: ReplicationConfig instance
+        specific_tables: List of source table names to process (if None, processes all enabled tables)
+
+    Returns:
+        Tuple[int, int, List[str]]: (created_count, skipped_count, errors)
+    """
+    logger.info(f"🔗 Adding foreign keys for ReplicationConfig ID: {replication_config.id}")
+
+    source_db = replication_config.client_database
+    client = source_db.client
+    target_db = client.get_target_database()
+
+    if not target_db:
+        error_msg = f"❌ No target database found for client '{client.name}'"
+        logger.error(error_msg)
+        raise Exception(error_msg)
+
+    logger.info(f"Source: {source_db.connection_name} ({source_db.database_name})")
+    logger.info(f"Target: {target_db.connection_name} ({target_db.database_name})")
+
+    source_engine = get_database_engine(source_db)
+    target_engine = get_database_engine(target_db)
+
+    created_count = 0
+    skipped_count = 0
+    errors = []
+
+    try:
+        table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+        if specific_tables:
+            table_mappings = table_mappings.filter(source_table__in=specific_tables)
+
+        logger.info(f"📋 Processing {table_mappings.count()} tables for foreign keys...")
+
+        # Collect all foreign keys first
+        all_foreign_keys = []
+        table_name_map = {}  # source_table -> target_table mapping
+
+        for table_mapping in table_mappings:
+            source_table = table_mapping.source_table
+            target_table = table_mapping.target_table
+            table_name_map[source_table] = target_table
+
+            try:
+                source_schema = get_table_schema(source_db, source_table)
+                foreign_keys = source_schema.get('foreign_keys', [])
+
+                if foreign_keys:
+                    logger.info(f"   Found {len(foreign_keys)} foreign keys in {source_table}")
+                    for fk in foreign_keys:
+                        all_foreign_keys.append({
+                            'source_table': source_table,
+                            'target_table': target_table,
+                            'fk_info': fk
+                        })
+            except Exception as e:
+                logger.warning(f"   ⚠️ Could not get schema for {source_table}: {e}")
+
+        if not all_foreign_keys:
+            logger.info("ℹ️ No foreign keys found in source tables")
+            return 0, 0, []
+
+        logger.info(f"🔗 Found {len(all_foreign_keys)} total foreign keys to create")
+
+        # Create foreign keys on target
+        target_db_type = target_db.db_type.lower()
+
+        with target_engine.begin() as conn:
+            for fk_data in all_foreign_keys:
+                target_table = fk_data['target_table']
+                fk_info = fk_data['fk_info']
+
+                try:
+                    # Get FK details
+                    fk_name = fk_info.get('name', '')
+                    constrained_columns = fk_info.get('constrained_columns', [])
+                    referred_table = fk_info.get('referred_table', '')
+                    referred_columns = fk_info.get('referred_columns', [])
+                    referred_schema = fk_info.get('referred_schema', '')
+
+                    if not constrained_columns or not referred_table or not referred_columns:
+                        logger.warning(f"   ⚠️ Incomplete FK info for {target_table}, skipping")
+                        skipped_count += 1
+                        continue
+
+                    # Map referred table to target table name
+                    # The sink connector names tables as: {source_db}_{table_name}
+                    # Check if referred table is in our mapping
+                    if referred_table in table_name_map:
+                        target_referred_table = table_name_map[referred_table]
+                    else:
+                        # Try to find it with the same naming pattern
+                        target_referred_table = f"{source_db.database_name}_{referred_table}"
+
+                    # Generate unique FK name
+                    new_fk_name = f"fk_{target_table}_{constrained_columns[0]}"[:64]
+
+                    # Build ALTER TABLE statement based on database type
+                    if target_db_type == 'mysql':
+                        cols = ', '.join(f"`{c}`" for c in constrained_columns)
+                        ref_cols = ', '.join(f"`{c}`" for c in referred_columns)
+                        alter_sql = f"""
+                            ALTER TABLE `{target_table}`
+                            ADD CONSTRAINT `{new_fk_name}`
+                            FOREIGN KEY ({cols})
+                            REFERENCES `{target_referred_table}` ({ref_cols})
+                        """
+                    elif target_db_type == 'postgresql':
+                        cols = ', '.join(f'"{c}"' for c in constrained_columns)
+                        ref_cols = ', '.join(f'"{c}"' for c in referred_columns)
+                        alter_sql = f"""
+                            ALTER TABLE "{target_table}"
+                            ADD CONSTRAINT "{new_fk_name}"
+                            FOREIGN KEY ({cols})
+                            REFERENCES "{target_referred_table}" ({ref_cols})
+                        """
+                    else:
+                        logger.warning(f"   ⚠️ Unsupported target DB type for FK: {target_db_type}")
+                        skipped_count += 1
+                        continue
+
+                    # Check if FK already exists
+                    if target_db_type == 'mysql':
+                        check_sql = text(f"""
+                            SELECT CONSTRAINT_NAME
+                            FROM information_schema.TABLE_CONSTRAINTS
+                            WHERE TABLE_SCHEMA = :db_name
+                            AND TABLE_NAME = :table_name
+                            AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+                            AND CONSTRAINT_NAME = :fk_name
+                        """)
+                        result = conn.execute(check_sql, {
+                            'db_name': target_db.database_name,
+                            'table_name': target_table,
+                            'fk_name': new_fk_name
+                        })
+                    elif target_db_type == 'postgresql':
+                        check_sql = text(f"""
+                            SELECT constraint_name
+                            FROM information_schema.table_constraints
+                            WHERE table_name = :table_name
+                            AND constraint_type = 'FOREIGN KEY'
+                            AND constraint_name = :fk_name
+                        """)
+                        result = conn.execute(check_sql, {
+                            'table_name': target_table,
+                            'fk_name': new_fk_name
+                        })
+
+                    if result.fetchone():
+                        logger.info(f"   ℹ️ FK {new_fk_name} already exists on {target_table}")
+                        skipped_count += 1
+                        continue
+
+                    # Execute ALTER TABLE
+                    conn.execute(text(alter_sql))
+                    logger.info(f"   ✅ Created FK: {new_fk_name} on {target_table} -> {target_referred_table}")
+                    created_count += 1
+
+                except Exception as e:
+                    error_msg = f"Failed to create FK on {target_table}: {e}"
+                    logger.error(f"   ❌ {error_msg}")
+                    errors.append(error_msg)
+
+        # Summary
+        logger.info(f"{'='*60}")
+        logger.info(f"📊 FOREIGN KEY CREATION SUMMARY:")
+        logger.info(f"   ✅ Created: {created_count} foreign keys")
+        logger.info(f"   ⏭️ Skipped: {skipped_count} (already exist or incomplete)")
+        if errors:
+            logger.info(f"   ❌ Errors: {len(errors)}")
+        logger.info(f"{'='*60}")
+
+    finally:
+        source_engine.dispose()
+        target_engine.dispose()
+
+    return created_count, skipped_count, errors
+
+
+def add_foreign_keys_after_sink(replication_config_id: int, table_names: list = None) -> tuple:
+    """
+    Add foreign keys to target tables after sink connector has created them.
+
+    Call this function AFTER the sink connector has successfully created the tables
+    in the target database. It will:
+    1. Read foreign key definitions from source tables
+    2. Create matching foreign key constraints on target tables
+
+    Args:
+        replication_config_id: ID of the ReplicationConfig
+        table_names: Optional list of source table names to process.
+                    If None, processes all enabled tables.
+
+    Returns:
+        Tuple[bool, str, dict]: (success, message, details)
+
+    Example usage:
+        # After sink connector creates tables:
+        success, message, details = add_foreign_keys_after_sink(config_id)
+
+        # For specific tables only:
+        success, message, details = add_foreign_keys_after_sink(config_id, ['orders', 'order_items'])
+    """
+    from client.models.replication import ReplicationConfig
+
+    try:
+        replication_config = ReplicationConfig.objects.get(pk=replication_config_id)
+    except ReplicationConfig.DoesNotExist:
+        return False, f"ReplicationConfig with ID {replication_config_id} not found", {}
+
+    try:
+        logger.info(f"Adding foreign keys for config ID: {replication_config_id}")
+
+        created, skipped, errors = add_foreign_keys_to_target(replication_config, specific_tables=table_names)
+
+        client = replication_config.client_database.client
+        target_db = client.get_target_database()
+
+        details = {
+            'config_id': replication_config_id,
+            'connector_name': replication_config.connector_name,
+            'foreign_keys_created': created,
+            'foreign_keys_skipped': skipped,
+            'errors': errors,
+            'target_database': target_db.database_name if target_db else None,
+        }
+
+        if errors:
+            return False, f"Created {created} FK(s) with {len(errors)} error(s)", details
+
+        return True, f"Successfully created {created} foreign key(s)", details
+
+    except Exception as e:
+        error_msg = f"Failed to add foreign keys: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return False, error_msg, {}
+
+
 def drop_tables_for_mappings(target_db, table_mappings):
     """
     Drop specific target tables given table mappings.

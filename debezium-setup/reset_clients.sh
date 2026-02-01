@@ -44,7 +44,7 @@ ClientDatabase.objects.create(
     port=3306,
     username="vivek",
     password="root",
-    database_name="kbe",
+    database_name="industry_db",
 )
 
 ClientDatabase.objects.create(

@@ -460,6 +460,35 @@ services:
     restart: unless-stopped
 
   # ============================================
+  # Celery DDL Consumer - Real-time DDL Sync
+  # ============================================
+  celery-ddl-consumer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: celery-ddl-consumer
+    hostname: celery-ddl-consumer
+    depends_on:
+      - django
+      - redis
+      - kafka-1
+    environment:
+      - DJANGO_SETTINGS_MODULE=jovoclient.settings
+    env_file:
+      - ../.env.docker
+    volumes:
+      - ..:/app
+      - ../logs:/app/logs
+    networks:
+      - replication-network
+    command: celery -A jovoclient worker -l debug -Q ddl_consumer -P solo
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
+
+  # ============================================
   # Celery Beat - Periodic Tasks Scheduler
   # ============================================
   celery-beat:

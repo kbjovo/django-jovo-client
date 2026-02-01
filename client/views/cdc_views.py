@@ -37,21 +37,12 @@ from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
 from client.replication import ReplicationOrchestrator
 
-from jovoclient.utils.debezium.connector_templates import (
-    get_connector_config_for_database,
-    generate_connector_name
-)
 from client.utils.database_utils import (
     get_table_list,
     get_table_schema,
     get_database_engine,
     check_binary_logging,
     check_oracle_logminer
-)
-from client.tasks import (
-    create_debezium_connector,
-    delete_debezium_connector,
-    restart_replication
 )
 
 logger = logging.getLogger(__name__)

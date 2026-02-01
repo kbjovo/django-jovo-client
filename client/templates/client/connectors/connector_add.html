@@ -157,6 +157,124 @@
         </div>
     </div>
 
+    <!-- Connector Settings -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
+        <div class="bg-orange-600 text-white px-4 py-2 flex justify-between items-center cursor-pointer"
+             onclick="toggleConnectorSettings()">
+            <h5 class="text-base font-semibold">⚙️ Connector Settings</h5>
+            <svg class="w-5 h-5 transition-transform" id="connector-settings-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+            </svg>
+        </div>
+        <div id="connector-settings-content" class="p-4 hidden">
+            <p class="text-gray-600 dark:text-gray-400 mb-4 text-sm">
+                Configure connector settings. Default values work well for most use cases.
+            </p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <!-- Snapshot Mode -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Snapshot Mode
+                    </label>
+                    <select name="snapshot_mode"
+                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                        <option value="initial" selected>Initial (Recommended)</option>
+                        <option value="when_needed">When Needed</option>
+                        <option value="never">Never</option>
+                        <option value="schema_only">Schema Only</option>
+                    </select>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        How to handle initial data snapshot
+                    </p>
+                </div>
+
+                <!-- Max Queue Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Max Queue Size
+                    </label>
+                    <input type="number"
+                           name="max_queue_size"
+                           value="8192"
+                           min="1024"
+                           max="65536"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Max events in memory queue
+                    </p>
+                </div>
+
+                <!-- Max Batch Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Max Batch Size
+                    </label>
+                    <input type="number"
+                           name="max_batch_size"
+                           value="2048"
+                           min="256"
+                           max="16384"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Max events per batch
+                    </p>
+                </div>
+
+                <!-- Poll Interval -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Poll Interval (ms)
+                    </label>
+                    <input type="number"
+                           name="poll_interval_ms"
+                           value="500"
+                           min="100"
+                           max="10000"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        How often to poll for changes
+                    </p>
+                </div>
+
+                <!-- Incremental Snapshot Chunk Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Incremental Snapshot Chunk Size
+                    </label>
+                    <input type="number"
+                           name="incremental_snapshot_chunk_size"
+                           value="1024"
+                           min="256"
+                           max="65536"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Rows per incremental snapshot chunk
+                    </p>
+                </div>
+
+                <!-- Drop Before Sync -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Target Table Handling
+                    </label>
+                    <div class="flex items-center mt-2">
+                        <input type="checkbox"
+                               name="drop_before_sync"
+                               id="drop_before_sync"
+                               class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
+                        <label for="drop_before_sync" class="ml-2 text-sm text-gray-900 dark:text-white">
+                            Drop target tables before sync
+                        </label>
+                    </div>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        ⚠️ Warning: This will delete existing data
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Table & Column Configuration with Accordion -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
         <div class="bg-green-600 text-white px-4 py-2">
@@ -474,6 +592,20 @@ function toggleBatchOptions() {
     } else {
         batchOptions.classList.add('hidden');
         infoText.innerHTML = '<strong>CDC Mode:</strong> Changes are streamed continuously. Best for real-time requirements.';
+    }
+}
+
+// Toggle connector settings visibility
+function toggleConnectorSettings() {
+    const content = document.getElementById('connector-settings-content');
+    const icon = document.getElementById('connector-settings-icon');
+
+    if (content.classList.contains('hidden')) {
+        content.classList.remove('hidden');
+        icon.style.transform = 'rotate(180deg)';
+    } else {
+        content.classList.add('hidden');
+        icon.style.transform = 'rotate(0deg)';
     }
 }
 

@@ -197,6 +197,15 @@ class ReplicationOrchestrator:
             self.config.save()
 
             # ========================================
+            # Start Continuous DDL Consumer
+            # ========================================
+            source_type = self.config.client_database.db_type.lower()
+            if source_type in ('mysql', 'mssql', 'sqlserver'):
+                from client.tasks import start_continuous_ddl_consumer
+                start_continuous_ddl_consumer.delay(self.config.id)
+                self._log_info("✓ Started continuous DDL consumer for real-time schema sync")
+
+            # ========================================
             # Success Summary
             # ========================================
             self._log_info("=" * 60)
@@ -258,6 +267,11 @@ class ReplicationOrchestrator:
             # It's shared by all source connectors for this client
             # Other active sources should continue feeding into the sink
             self._log_info("ℹ️ Sink connector not paused (shared by multiple sources)")
+
+            # Stop continuous DDL consumer
+            from client.tasks import stop_continuous_ddl_consumer
+            stop_continuous_ddl_consumer.delay(self.config.id)
+            self._log_info("✓ Stopped continuous DDL consumer")
 
             if errors:
                 error_msg = "; ".join(errors)
@@ -1355,6 +1369,22 @@ class ReplicationOrchestrator:
                 self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
 
             # ========================================
+            # STEP 5.5: Add foreign keys to new target tables
+            # ========================================
+            self._log_info("STEP 5.5/6: Adding foreign keys to new target tables...")
+            from client.utils.table_creator import add_foreign_keys_to_target
+            try:
+                # Wait a moment for sink to create the tables
+                import time
+                time.sleep(5)
+                created, skipped, errors = add_foreign_keys_to_target(self.config, specific_tables=added_tables)
+                self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
+                if errors:
+                    self._log_warning(f"⚠️ FK errors: {errors}")
+            except Exception as e:
+                self._log_warning(f"⚠️ Could not add foreign keys: {e}")
+
+            # ========================================
             # STEP 6: Handle batch mode state
             # ========================================
             # NOTE: For add_tables, we do NOT re-pause immediately because the
@@ -1845,6 +1875,17 @@ class ReplicationOrchestrator:
                 if not success:
                     self._log_warning(f"Snapshot wait issue: {message}")
                     # Continue anyway - connector might still be usable
+
+            # Step 2.5: Add foreign keys to target tables
+            self._log_info("Step 2.5/4: Adding foreign keys to target tables...")
+            from client.utils.table_creator import add_foreign_keys_to_target
+            try:
+                created, skipped, errors = add_foreign_keys_to_target(self.config)
+                self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
+                if errors:
+                    self._log_warning(f"⚠️ FK errors: {errors}")
+            except Exception as e:
+                self._log_warning(f"⚠️ Could not add foreign keys: {e}")
 
             # Step 3: Pause source connector (batch mode waits between syncs)
             self._log_info("Step 3/4: Pausing connector for batch scheduling...")

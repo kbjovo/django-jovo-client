@@ -5,222 +5,291 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
-
-from client.models import Client
+from django.conf import settings
 from client.models.replication import ReplicationConfig
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
-from client.utils.notification_utils import send_error_notification
+from client.utils.database_utils import get_database_engine
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# TASKS
+# UNIFIED DDL PROCESSING TASKS
 # ============================================================================
 
 @shared_task(bind=True, max_retries=3)
-def create_debezium_connector(self, replication_config_id):
+def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
     """
-    Task: Create Debezium source connector for a replication config
+    Unified DDL processing for all source database types.
+
+    Automatically selects the appropriate processor based on source database type:
+    - MySQL/MSSQL: Kafka-based DDL processor (consumes schema history topic)
+    - PostgreSQL: Schema sync service (periodic comparison)
+
+    Args:
+        config_id: ReplicationConfig ID
+        auto_destructive: Auto-execute destructive operations (DROP COLUMN, etc.)
+
+    Returns:
+        Dict with processing results
     """
+    from client.utils.ddl import KafkaDDLProcessor, PostgreSQLSchemaSyncService
+
     try:
-        logger.info(f"Creating Debezium connector for ReplicationConfig {replication_config_id}")
-
-        config = ReplicationConfig.objects.get(id=replication_config_id)
-
-        from jovoclient.utils.debezium.connector_templates import (
-            generate_connector_name,
-            get_connector_config_for_database
-        )
-
-        # Generate connector configuration
-        client = config.client_database.client
-        db_config = config.client_database
-
-        connector_name = generate_connector_name(client, db_config)
-
-        # Get tables to replicate
-        enabled_tables = config.table_mappings.filter(is_enabled=True)
-        tables_list = [tm.source_table for tm in enabled_tables]
-
-        if not tables_list:
-            logger.warning(f"No tables enabled for replication in config {replication_config_id}")
-            return {'success': False, 'error': 'No tables enabled'}
-
-        logger.info(f"Tables to replicate: {tables_list}")
-
-        # Generate connector config
-        connector_config = get_connector_config_for_database(
-            db_config=db_config,
-            replication_config=config,
-            tables_whitelist=tables_list,
-            kafka_bootstrap_servers='kafka-1:29092,kafka-2:29092,kafka-3:29092',
-            schema_registry_url='http://schema-registry:8081'
-        )
-
-        if not connector_config:
-            raise Exception("Failed to generate connector configuration")
-
-        # Create connector via Debezium Manager
-        manager = DebeziumConnectorManager()
-
-        # Check Kafka Connect health first
-        is_healthy, error = manager.check_kafka_connect_health()
-        if not is_healthy:
-            raise Exception(f"Kafka Connect is not healthy: {error}")
-
-        success, error = manager.create_connector(
-            connector_name=connector_name,
-            config=connector_config,
-            notify_on_error=True
-        )
-
-        if success:
-            # Update replication config
-            config.connector_name = connector_name
-            # Topic prefix includes version for JMX uniqueness
-            config.kafka_topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{config.connector_version}"
-            config.status = 'configured'
-            config.is_active = False
-            config.save()
-
-            logger.info(f"Successfully created connector: {connector_name}")
-
-            return {
-                'success': True,
-                'connector_name': connector_name,
-                'tables': len(tables_list)
-            }
-        else:
-            raise Exception(f"Failed to create connector: {error}")
-
+        config = ReplicationConfig.objects.get(id=config_id)
     except ReplicationConfig.DoesNotExist:
-        logger.error(f"ReplicationConfig {replication_config_id} not found")
+        logger.error(f"ReplicationConfig {config_id} not found")
         return {'success': False, 'error': 'Config not found'}
 
-    except Exception as e:
-        logger.error(f"Error creating connector: {e}", exc_info=True)
+    # Get target database engine
+    target_db = config.client_database.client.client_databases.filter(is_target=True).first()
+    if not target_db:
+        logger.error(f"No target database for config {config_id}")
+        return {'success': False, 'error': 'No target database'}
 
+    target_engine = get_database_engine(target_db)
+    source_type = config.client_database.db_type.lower()
+
+    processor = None
+
+    try:
+        if source_type in ('mysql', 'mssql', 'sqlserver'):
+            # Kafka-based processor for MySQL/MSSQL
+            kafka_servers = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS',
+                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
+            processor = KafkaDDLProcessor(
+                replication_config=config,
+                target_engine=target_engine,
+                bootstrap_servers=kafka_servers,
+                auto_execute_destructive=auto_destructive
+            )
+            processed, errors = processor.process(timeout_sec=30, max_messages=100)
+
+        elif source_type in ('postgresql', 'postgres'):
+            # Schema sync service for PostgreSQL
+            processor = PostgreSQLSchemaSyncService(
+                replication_config=config,
+                target_engine=target_engine,
+                auto_execute_destructive=auto_destructive
+            )
+            processed, errors = processor.process()
+
+        else:
+            logger.warning(f"DDL processing not supported for source type: {source_type}")
+            return {'success': False, 'error': f'Unsupported source type: {source_type}'}
+
+        if processed > 0 or errors > 0:
+            logger.info(f"DDL processing for config {config_id}: {processed} processed, {errors} errors")
+
+        return {
+            'success': True,
+            'config_id': config_id,
+            'source_type': source_type,
+            'processed': processed,
+            'errors': errors
+        }
+
+    except Exception as e:
+        logger.error(f"DDL processing failed for config {config_id}: {e}", exc_info=True)
         # Retry with exponential backoff
         try:
             raise self.retry(countdown=60 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
-            logger.error(f"Max retries exceeded for connector creation")
-
+            logger.error(f"Max retries exceeded for DDL processing config {config_id}")
         return {'success': False, 'error': str(e)}
+
+    finally:
+        if processor:
+            processor.close()
 
 
 @shared_task
-def delete_debezium_connector(connector_name, replication_config_id=None, delete_topics=True, clear_offsets=True):
+def schedule_ddl_processing_all():
     """
-    Task: Delete a Debezium connector and optionally its topics and offsets
+    Schedule DDL processing for all active replication configs.
+
+    Called periodically by Celery Beat (every 1 minute).
+    Processes DDL for MySQL, MSSQL, and PostgreSQL sources.
     """
+    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+
+    active_configs = ReplicationConfig.objects.filter(
+        status='active',
+        is_active=True
+    ).select_related('client_database')
+
+    scheduled = 0
+    for config in active_configs:
+        source_type = config.client_database.db_type.lower()
+        if source_type not in supported_types:
+            continue
+
+        # Schedule DDL processing task
+        process_ddl_changes.delay(config.id)
+        scheduled += 1
+
+    if scheduled > 0:
+        logger.info(f"Scheduled DDL processing for {scheduled} configs")
+
+    return {'scheduled': scheduled}
+
+
+# Global flag to track running continuous consumers
+_running_consumers = {}
+
+
+@shared_task(bind=True, queue='ddl_consumer')
+def start_continuous_ddl_consumer(self, config_id: int):
+    """
+    Start a continuous Kafka consumer for real-time DDL processing.
+
+    This runs indefinitely, processing DDL changes as they arrive.
+    Use stop_continuous_ddl_consumer() to stop it.
+    """
+    from client.utils.ddl import KafkaDDLProcessor
+    import time
+
+    global _running_consumers
+
+    # Check if already running for this config
+    if config_id in _running_consumers and _running_consumers[config_id]:
+        logger.info(f"Continuous DDL consumer already running for config {config_id}")
+        return {'success': False, 'error': 'Already running'}
+
     try:
-        logger.info(f"Deleting connector: {connector_name} (delete_topics={delete_topics}, clear_offsets={clear_offsets})")
+        config = ReplicationConfig.objects.get(id=config_id)
+    except ReplicationConfig.DoesNotExist:
+        logger.error(f"ReplicationConfig {config_id} not found")
+        return {'success': False, 'error': 'Config not found'}
 
-        # Delete connector
-        manager = DebeziumConnectorManager()
-        success, error = manager.delete_connector(connector_name, notify=True, delete_topics=delete_topics)
+    source_type = config.client_database.db_type.lower()
+    if source_type not in ('mysql', 'mssql', 'sqlserver'):
+        logger.error(f"Continuous consumer only supports MySQL/MSSQL, not {source_type}")
+        return {'success': False, 'error': f'Unsupported source type: {source_type}'}
 
-        if success:
-            logger.info(f"Successfully deleted connector: {connector_name}")
+    target_db = config.client_database.client.client_databases.filter(is_target=True).first()
+    if not target_db:
+        logger.error(f"No target database for config {config_id}")
+        return {'success': False, 'error': 'No target database'}
 
-            # Update config
-            if replication_config_id:
-                try:
-                    config = ReplicationConfig.objects.get(id=replication_config_id)
-                    config.connector_name = None
-                    config.status = 'disabled'
-                    config.is_active = False
-                    config.save()
-                except:
-                    pass
+    target_engine = get_database_engine(target_db)
+    kafka_servers = settings.DEBEZIUM_CONFIG.get(
+        'KAFKA_INTERNAL_SERVERS',
+        'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+    )
 
-            return {'success': True}
-        else:
-            raise Exception(f"Failed to delete connector: {error}")
+    _running_consumers[config_id] = True
+    logger.info(f"Starting continuous DDL consumer for config {config_id}")
+
+    processor = None
+    try:
+        processor = KafkaDDLProcessor(
+            replication_config=config,
+            target_engine=target_engine,
+            bootstrap_servers=kafka_servers,
+            auto_execute_destructive=True
+        )
+
+        # Continuous loop
+        while _running_consumers.get(config_id, False):
+            try:
+                # Process with short timeout for responsiveness
+                processed, errors = processor.process(timeout_sec=5, max_messages=10)
+
+                if processed > 0 or errors > 0:
+                    logger.info(f"[Continuous] Config {config_id}: {processed} processed, {errors} errors")
+
+                # Small sleep to prevent tight loop when no messages
+                time.sleep(0.1)
+
+            except Exception as e:
+                logger.error(f"Error in continuous consumer for config {config_id}: {e}")
+                time.sleep(5)  # Back off on error
 
     except Exception as e:
-        logger.error(f"Error deleting connector: {e}")
+        logger.error(f"Continuous DDL consumer failed for config {config_id}: {e}", exc_info=True)
         return {'success': False, 'error': str(e)}
+    finally:
+        _running_consumers[config_id] = False
+        if processor:
+            processor.close()
+        logger.info(f"Continuous DDL consumer stopped for config {config_id}")
+
+    return {'success': True, 'config_id': config_id}
 
 
 @shared_task
-def restart_replication(replication_config_id):
-    """
-    Task: Restart replication by restarting the Debezium connector
-    """
-    try:
-        logger.info(f"Restarting replication for config {replication_config_id}")
-
-        config = ReplicationConfig.objects.get(id=replication_config_id)
-
-        if config.connector_name:
-            # Restart connector
-            manager = DebeziumConnectorManager()
-            success, error = manager.restart_connector(config.connector_name)
-
-            if not success:
-                raise Exception(f"Failed to restart connector: {error}")
-
-        config.status = 'active'
-        config.is_active = True
-        config.save()
-
-        logger.info(f"Successfully restarted replication")
-
+def stop_continuous_ddl_consumer(config_id: int):
+    """Stop a running continuous DDL consumer."""
+    global _running_consumers
+    if config_id in _running_consumers:
+        _running_consumers[config_id] = False
+        logger.info(f"Stopping continuous DDL consumer for config {config_id}")
         return {'success': True}
-
-    except Exception as e:
-        logger.error(f"Error restarting replication: {e}")
-        return {'success': False, 'error': str(e)}
+    return {'success': False, 'error': 'Not running'}
 
 
 @shared_task
-def force_resnapshot(replication_config_id):
+def ensure_continuous_ddl_consumers():
     """
-    Task: Force a fresh snapshot by clearing offsets and restarting connector
+    Ensure continuous DDL consumers are running for all active MySQL/MSSQL replications.
+
+    Called periodically by Celery Beat to auto-start/restart consumers.
+    This keeps DDL sync always on.
     """
-    try:
-        logger.info(f"Forcing resnapshot for config {replication_config_id}")
+    global _running_consumers
 
-        config = ReplicationConfig.objects.get(id=replication_config_id)
+    supported_types = ('mysql', 'mssql', 'sqlserver')
 
-        if not config.connector_name:
-            raise Exception("No connector configured for this replication config")
+    active_configs = ReplicationConfig.objects.filter(
+        status='active',
+        is_active=True
+    ).select_related('client_database')
 
-        connector_name = config.connector_name
+    started = 0
+    for config in active_configs:
+        source_type = config.client_database.db_type.lower()
+        if source_type not in supported_types:
+            continue
 
-        # Step 1: Delete connector
-        logger.info(f"Step 1/2: Deleting connector...")
-        manager = DebeziumConnectorManager()
-        success, error = manager.delete_connector(connector_name, notify=False, delete_topics=False)
-        if not success:
-            raise Exception(f"Failed to delete connector: {error}")
+        # Check if consumer is running
+        if config.id not in _running_consumers or not _running_consumers[config.id]:
+            logger.info(f"Starting continuous DDL consumer for config {config.id}")
+            start_continuous_ddl_consumer.delay(config.id)
+            started += 1
 
-        # Step 2: Recreate connector
-        logger.info(f"Step 2/2: Recreating connector for fresh snapshot...")
-        from client.replication.orchestrator import ReplicationOrchestrator
-        orchestrator = ReplicationOrchestrator(config)
+    if started > 0:
+        logger.info(f"Started {started} continuous DDL consumers")
 
-        result = orchestrator.create_debezium_connector()
-        if not result['success']:
-            raise Exception(f"Failed to recreate connector: {result.get('error')}")
+    return {'started': started}
 
-        config.status = 'active'
-        config.is_active = True
-        config.save()
 
-        logger.info(f"Successfully forced resnapshot for {connector_name}")
+@shared_task
+def sync_postgresql_schemas():
+    """
+    Periodic schema sync for PostgreSQL source databases.
 
-        return {
-            'success': True,
-            'message': 'Connector deleted and recreated with fresh snapshot.'
-        }
+    Called every 5 minutes by Celery Beat.
+    PostgreSQL doesn't emit DDL events, so we compare schemas periodically.
+    """
+    pg_configs = ReplicationConfig.objects.filter(
+        status='active',
+        is_active=True,
+        client_database__db_type__in=['postgresql', 'postgres']
+    )
 
-    except Exception as e:
-        logger.error(f"Error forcing resnapshot: {e}", exc_info=True)
-        return {'success': False, 'error': str(e)}
+    scheduled = 0
+    for config in pg_configs:
+        process_ddl_changes.delay(config.id)
+        scheduled += 1
+
+    if scheduled > 0:
+        logger.info(f"Scheduled PostgreSQL schema sync for {scheduled} configs")
+
+    return {'scheduled': scheduled}
+
 
 
 @shared_task
@@ -343,10 +412,6 @@ def check_replication_health():
     except Exception as e:
         logger.error(f"Error checking health: {e}")
         return {'success': False, 'error': str(e)}
-
-
-# Import health monitor task (connector monitoring only)
-from client.replication.health_monitor import monitor_replication_health
 
 
 # ============================================================================
@@ -533,3 +598,64 @@ def trigger_batch_sync_now(replication_config_id: int):
         'task_id': result.id,
         'message': 'Batch sync started'
     }
+
+
+# ============================================================================
+# FOREIGN KEY TASKS
+# ============================================================================
+
+@shared_task(bind=True, max_retries=3)
+def add_foreign_keys_task(self, replication_config_id: int):
+    """
+    Add foreign key constraints to target tables after sink connector creates them.
+
+    This task is called after connector creation with a delay to allow the sink
+    connector to create tables from the initial snapshot.
+
+    Args:
+        replication_config_id: ID of the ReplicationConfig
+
+    Returns:
+        Dict with success status and details
+    """
+    try:
+        logger.info(f"Adding foreign keys for config {replication_config_id}")
+
+        config = ReplicationConfig.objects.get(id=replication_config_id)
+
+        from client.utils.table_creator import add_foreign_keys_to_target
+
+        created, skipped, errors = add_foreign_keys_to_target(config)
+
+        logger.info(f"Foreign keys for config {replication_config_id}: "
+                    f"{created} created, {skipped} skipped, {len(errors)} errors")
+
+        if errors:
+            logger.warning(f"FK errors: {errors}")
+
+        return {
+            'success': True,
+            'config_id': replication_config_id,
+            'created': created,
+            'skipped': skipped,
+            'errors': errors
+        }
+
+    except ReplicationConfig.DoesNotExist:
+        logger.error(f"ReplicationConfig {replication_config_id} not found")
+        return {'success': False, 'error': 'Config not found'}
+
+    except Exception as e:
+        logger.error(f"Error adding foreign keys: {e}", exc_info=True)
+
+        # Retry with exponential backoff (30s, 60s, 120s)
+        try:
+            raise self.retry(countdown=30 * (2 ** self.request.retries))
+        except self.MaxRetriesExceededError:
+            logger.error(f"Max retries exceeded for FK creation config {replication_config_id}")
+
+        return {'success': False, 'error': str(e)}
+
+
+
+
