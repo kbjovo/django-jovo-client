@@ -125,6 +125,7 @@ class ClientDetailView(DetailView):
     Shows:
     - Basic client information
     - Associated datasource connections
+    - Connectors across all databases
     - Status and timestamps
     """
     model = Client
@@ -136,10 +137,58 @@ class ClientDetailView(DetailView):
         # Prefetch related replication_configs to avoid N+1 queries
         # and ensure the relationship data is available in the template
         from client.models.database import ClientDatabase
+        from client.models.replication import ReplicationConfig
+        from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+
         databases = ClientDatabase.objects.filter(
             client=self.object
         ).prefetch_related('replication_configs')
         context['databases'] = databases
+
+        # Get all connectors for this client
+        all_connectors = ReplicationConfig.objects.filter(
+            client_database__client=self.object,
+            status__in=['configured', 'active', 'paused', 'error']
+        ).select_related('client_database').prefetch_related('table_mappings').order_by('client_database__connection_name', 'connector_version')
+
+        # Get Debezium status for each connector
+        connector_manager = DebeziumConnectorManager()
+        total_tables = 0
+        running_count = 0
+
+        for connector in all_connectors:
+            try:
+                status = connector_manager.get_connector_status(connector.connector_name)
+                connector.debezium_status = status
+                if status.get('state') == 'RUNNING':
+                    running_count += 1
+            except Exception:
+                connector.debezium_status = {'state': 'UNKNOWN'}
+
+            # Get table count
+            connector.table_count = connector.table_mappings.filter(is_enabled=True).count()
+            total_tables += connector.table_count
+
+        context['all_connectors'] = all_connectors
+
+        # Calculate connector stats
+        total_count = all_connectors.count()
+        if total_count == 0:
+            health_status = 'none'
+        elif running_count == total_count:
+            health_status = 'healthy'
+        elif running_count > 0:
+            health_status = 'partial'
+        else:
+            health_status = 'degraded'
+
+        context['connector_stats'] = {
+            'total': total_count,
+            'running': running_count,
+            'total_tables': total_tables,
+            'health_status': health_status,
+        }
+
         return context
 
 

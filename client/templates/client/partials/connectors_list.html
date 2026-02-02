@@ -1,0 +1,233 @@
+<!-- Connectors List Partial for Client Detail -->
+<div>
+  <!-- Tab Header -->
+  <div class="flex justify-between items-center mb-6">
+    <div>
+      <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Source Connectors</h3>
+      <p class="text-sm text-gray-600 dark:text-gray-400 mt-0.5">
+        All CDC connectors across all databases for this client
+      </p>
+    </div>
+  </div>
+
+  {% if all_connectors %}
+    <!-- Health Summary -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700">
+        <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ connector_stats.total }}</div>
+        <p class="text-sm text-gray-600 dark:text-gray-400">Total Connectors</p>
+      </div>
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700">
+        <div class="text-2xl font-bold text-green-600 dark:text-green-400">{{ connector_stats.running }}</div>
+        <p class="text-sm text-gray-600 dark:text-gray-400">Running</p>
+      </div>
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700">
+        <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ connector_stats.total_tables }}</div>
+        <p class="text-sm text-gray-600 dark:text-gray-400">Tables Replicated</p>
+      </div>
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700">
+        {% if connector_stats.health_status == 'healthy' %}
+          <div class="text-2xl font-bold text-green-600 dark:text-green-400">Healthy</div>
+        {% elif connector_stats.health_status == 'degraded' %}
+          <div class="text-2xl font-bold text-red-600 dark:text-red-400">Degraded</div>
+        {% elif connector_stats.health_status == 'partial' %}
+          <div class="text-2xl font-bold text-yellow-600 dark:text-yellow-400">Partial</div>
+        {% else %}
+          <div class="text-2xl font-bold text-gray-500 dark:text-gray-400">-</div>
+        {% endif %}
+        <p class="text-sm text-gray-600 dark:text-gray-400">Status</p>
+      </div>
+    </div>
+
+    <!-- Connectors Grouped by Database -->
+    {% regroup all_connectors by client_database as connectors_by_db %}
+    {% for db_group in connectors_by_db %}
+    <div class="mb-6">
+      <!-- Database Header -->
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-2">
+          <h4 class="text-md font-semibold text-gray-900 dark:text-white">{{ db_group.grouper.connection_name }}</h4>
+          <span class="text-sm text-gray-500 dark:text-gray-400">
+            {{ db_group.grouper.db_type|upper }} @ {{ db_group.grouper.host }}:{{ db_group.grouper.port }}
+          </span>
+        </div>
+        <a href="{% url 'connector_list' db_group.grouper.pk %}"
+           class="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
+          View All ->
+        </a>
+      </div>
+
+      <!-- Connectors Table for this Database -->
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden border border-gray-200 dark:border-gray-700">
+        <!-- Table Header -->
+        <div class="bg-gray-100 dark:bg-gray-700 px-4 py-3 border-b border-gray-200 dark:border-gray-600">
+          <div class="grid grid-cols-12 gap-4 items-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+            <div class="col-span-4">Connector Name</div>
+            <div class="col-span-1 text-center">Mode</div>
+            <div class="col-span-1 text-center">Tables</div>
+            <div class="col-span-2 text-center">Created</div>
+            <div class="col-span-4 text-right">Actions</div>
+          </div>
+        </div>
+
+        <!-- Connector Rows -->
+        {% for config in db_group.list %}
+        <div class="border-b border-gray-200 dark:border-gray-700 last:border-b-0" x-data="{ expanded: false }">
+          <!-- Main Row -->
+          <div class="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
+            <div class="grid grid-cols-12 gap-4 items-center">
+              <!-- Connector Name & Status -->
+              <div class="col-span-4">
+                <div class="flex items-center gap-3">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="font-semibold text-gray-900 dark:text-white">{{ config.connector_name }}</span>
+                      {% if config.debezium_status.state == 'RUNNING' %}
+                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">RUNNING</span>
+                      {% elif config.debezium_status.state == 'FAILED' %}
+                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400">FAILED</span>
+                      {% elif config.debezium_status.state == 'PAUSED' %}
+                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400">PAUSED</span>
+                      {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-900/30 text-gray-700 dark:text-gray-400">{{ config.debezium_status.state|default:"UNKNOWN" }}</span>
+                      {% endif %}
+                    </div>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">v{{ config.connector_version }}</p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Mode -->
+              <div class="col-span-1 text-center">
+                {% if config.processing_mode == 'batch' %}
+                  <span class="px-2 py-1 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400">Batch</span>
+                {% else %}
+                  <span class="px-2 py-1 rounded text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">CDC</span>
+                {% endif %}
+              </div>
+
+              <!-- Tables Count -->
+              <div class="col-span-1 text-center">
+                <span class="font-semibold text-gray-900 dark:text-white">{{ config.table_count }}</span>
+              </div>
+
+              <!-- Created Date -->
+              <div class="col-span-2 text-center text-sm text-gray-600 dark:text-gray-400">
+                {{ config.created_at|date:"M d, Y" }}
+              </div>
+
+              <!-- Actions -->
+              <div class="col-span-4 flex justify-end items-center gap-2">
+                <button @click="expanded = !expanded"
+                        class="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition">
+                  <svg class="w-4 h-4 transition-transform" :class="expanded ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                  </svg>
+                  <span x-text="expanded ? 'Hide Tables' : 'Show Tables'">Show Tables</span>
+                </button>
+                <a href="{% url 'connector_edit_tables' config.pk %}"
+                   class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
+                  Edit
+                </a>
+                <a href="{% url 'connector_delete' config.pk %}"
+                   class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition">
+                  Delete
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- Expandable Tables Section -->
+          <div x-show="expanded" x-collapse x-cloak class="bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700">
+            <div class="p-4">
+              <!-- Connector Settings Summary -->
+              {% if config.processing_mode == 'batch' %}
+              <div class="flex flex-wrap gap-4 mb-4 text-sm">
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-500 dark:text-gray-400">Sync Interval:</span>
+                  <span class="font-medium text-gray-900 dark:text-white">{{ config.get_batch_interval_display|default:"-" }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-500 dark:text-gray-400">Max Duration:</span>
+                  <span class="font-medium text-gray-900 dark:text-white">{{ config.batch_max_catchup_minutes }} min</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-500 dark:text-gray-400">Snapshot:</span>
+                  <span class="font-medium text-gray-900 dark:text-white">{{ config.get_snapshot_mode_display }}</span>
+                </div>
+              </div>
+              {% else %}
+              <div class="flex flex-wrap gap-4 mb-4 text-sm">
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-500 dark:text-gray-400">Snapshot:</span>
+                  <span class="font-medium text-gray-900 dark:text-white">{{ config.get_snapshot_mode_display }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-500 dark:text-gray-400">Max Queue:</span>
+                  <span class="font-medium text-gray-900 dark:text-white">{{ config.max_queue_size }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-500 dark:text-gray-400">Max Batch:</span>
+                  <span class="font-medium text-gray-900 dark:text-white">{{ config.max_batch_size }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-gray-500 dark:text-gray-400">Poll Interval:</span>
+                  <span class="font-medium text-gray-900 dark:text-white">{{ config.poll_interval_ms }}ms</span>
+                </div>
+              </div>
+              {% endif %}
+
+              <!-- Tables List -->
+              <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead class="bg-gray-100 dark:bg-gray-700">
+                    <tr>
+                      <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 dark:text-gray-300 uppercase">Source Table</th>
+                      <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 dark:text-gray-300 uppercase">Target Table</th>
+                      <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 dark:text-gray-300 uppercase">Columns</th>
+                      <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 dark:text-gray-300 uppercase">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for mapping in config.table_mappings.all %}
+                    {% if mapping.is_enabled %}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                      <td class="px-4 py-2 text-sm font-medium text-gray-900 dark:text-white">{{ mapping.source_table }}</td>
+                      <td class="px-4 py-2 text-sm text-gray-900 dark:text-white">{{ mapping.target_table }}</td>
+                      <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">{{ mapping.get_column_count }}</td>
+                      <td class="px-4 py-2">
+                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">Enabled</span>
+                      </td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+
+  {% else %}
+    <!-- Empty State -->
+    <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6 text-center">
+      <svg class="mx-auto h-12 w-12 text-blue-400 dark:text-blue-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+      </svg>
+      <h5 class="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-2">No connectors configured</h5>
+      <p class="text-blue-700 dark:text-blue-300 mb-4">Go to the Databases tab and create a connector for one of your database connections.</p>
+      <button
+        @click="activeTab = 'databases'; history.replaceState(null, '', '?tab=databases')"
+        class="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path>
+        </svg>
+        Go to Databases
+      </button>
+    </div>
+  {% endif %}
+</div>

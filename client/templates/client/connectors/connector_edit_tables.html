@@ -6,153 +6,363 @@
 <!-- Page Header -->
 <div class="flex justify-between items-center mb-6">
     <div>
-        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">✏️ Edit Tables - Connector v{{ replication_config.connector_version }}</h2>
+        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Edit Tables - Connector v{{ replication_config.connector_version }}</h2>
         <p class="text-gray-600 dark:text-gray-400 mt-1">
             Database: <span class="font-semibold">{{ database.connection_name }}</span> |
             Connector: <span class="font-semibold">{{ replication_config.connector_name }}</span>
         </p>
     </div>
-    <div>
+    <div class="flex gap-2">
         <a href="{% url 'connector_list' database.pk %}"
            class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
-            ← Back to Connectors
+            <- Back to Connectors
         </a>
+        <button type="submit"
+                form="edit-connector-form"
+                class="inline-flex items-center px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition"
+                id="submit-btn-top">
+            Save Changes
+        </button>
     </div>
 </div>
 
-<!-- Info Card -->
-<div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-    <p class="text-blue-900 dark:text-blue-100">
-        <span class="font-semibold">ℹ️ How it works:</span><br>
-    </p>
-    <ul class="text-blue-800 dark:text-blue-200 list-disc list-inside mt-2 space-y-1">
-        <li><strong>Adding tables:</strong> Uses Debezium signals for incremental snapshot (no restart required!)</li>
-        <li><strong>Removing tables:</strong> Requires connector restart (brief interruption)</li>
-        <li><strong>Minimum requirement:</strong> Connector must have at least 1 table</li>
-    </ul>
-</div>
-
-<form method="POST">
+<form method="POST" id="edit-connector-form">
     {% csrf_token %}
 
-    <!-- Current Tables -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
-        <div class="bg-blue-600 text-white px-6 py-4">
-            <h5 class="text-lg font-semibold">📋 Current Tables ({{ current_tables|length }})</h5>
+    <!-- Connector Settings -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4">
+        <div class="bg-purple-600 text-white px-4 py-3 rounded-t-lg flex justify-between items-center cursor-pointer"
+             onclick="toggleConnectorSettings()">
+            <h5 class="text-base font-semibold">Connector Settings</h5>
+            <svg class="w-5 h-5 transition-transform" id="connector-settings-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+            </svg>
         </div>
-        <div class="p-6">
+        <div id="connector-settings-content" class="p-4 hidden border-t border-gray-200 dark:border-gray-700">
+            <p class="text-gray-600 dark:text-gray-400 mb-4 text-sm">
+                Configure connector settings. Default values work well for most use cases.
+            </p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <!-- Snapshot Mode -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Snapshot Mode
+                    </label>
+                    <select name="snapshot_mode"
+                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                        <option value="initial" selected>Initial (Recommended)</option>
+                        <option value="when_needed">When Needed</option>
+                        <option value="never">Never</option>
+                        <option value="schema_only">Schema Only</option>
+                    </select>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        How to handle initial data snapshot
+                    </p>
+                </div>
+
+                <!-- Max Queue Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Max Queue Size
+                    </label>
+                    <input type="number"
+                           name="max_queue_size"
+                           value="8192"
+                           min="1024"
+                           max="65536"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Max events in memory queue
+                    </p>
+                </div>
+
+                <!-- Max Batch Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Max Batch Size
+                    </label>
+                    <input type="number"
+                           name="max_batch_size"
+                           value="2048"
+                           min="256"
+                           max="16384"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Max events per batch
+                    </p>
+                </div>
+
+                <!-- Poll Interval -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Poll Interval (ms)
+                    </label>
+                    <input type="number"
+                           name="poll_interval_ms"
+                           value="500"
+                           min="100"
+                           max="10000"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        How often to poll for changes
+                    </p>
+                </div>
+
+                <!-- Incremental Snapshot Chunk Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Incremental Snapshot Chunk Size
+                    </label>
+                    <input type="number"
+                           name="incremental_snapshot_chunk_size"
+                           value="1024"
+                           min="256"
+                           max="65536"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Rows per incremental snapshot chunk
+                    </p>
+                </div>
+
+                <!-- Drop Before Sync -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Target Table Handling
+                    </label>
+                    <div class="flex items-center mt-2">
+                        <input type="checkbox"
+                               name="drop_before_sync"
+                               id="drop_before_sync"
+                               class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
+                        <label for="drop_before_sync" class="ml-2 text-sm text-gray-900 dark:text-white">
+                            Drop target tables before sync
+                        </label>
+                    </div>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Warning: This will delete existing data
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Current Tables with Accordion -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
+        <div class="bg-blue-600 text-white px-4 py-2">
+            <h5 class="text-base font-semibold">Current Tables ({{ current_tables|length }})</h5>
+        </div>
+        <div class="p-4">
             {% if current_tables %}
-            <p class="text-gray-600 dark:text-gray-400 mb-4">Select tables to remove from this connector. Removing tables requires a connector restart.</p>
+            <p class="text-gray-600 dark:text-gray-400 mb-3 text-sm">
+                Click on a table to view columns. Check tables to remove them (requires connector restart).
+            </p>
 
             {% if current_tables|length == 1 %}
-            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
+            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3 mb-3 text-sm">
                 <p class="text-yellow-800 dark:text-yellow-200">
-                    <span class="font-semibold">⚠️ Warning:</span> This connector has only 1 table. You cannot remove all tables.
-                    If you want to remove this table, you must delete the entire connector instead.
+                    <span class="font-semibold">Warning:</span> This connector has only 1 table. You cannot remove all tables.
                 </p>
             </div>
             {% endif %}
 
-            <div class="overflow-x-auto">
-                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                    <thead class="bg-gray-50 dark:bg-gray-700">
-                        <tr>
-                            <th class="px-6 py-3 text-left" style="width: 50px;">
-                                {% if current_tables|length > 1 %}
-                                <input type="checkbox" id="remove-all-checkbox" onchange="toggleRemove(this)" class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
-                                {% endif %}
-                            </th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Table Name</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Status</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                        {% for table in current_tables %}
-                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
-                            <td class="px-6 py-4">
-                                {% if current_tables|length > 1 %}
-                                <input type="checkbox"
-                                       name="remove_tables"
-                                       value="{{ table }}"
-                                       class="remove-checkbox w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
-                                {% else %}
-                                <input type="checkbox" disabled title="Cannot remove the only table" class="w-4 h-4 text-gray-400 bg-gray-200 border-gray-300 rounded cursor-not-allowed">
-                                {% endif %}
-                            </td>
-                            <td class="px-6 py-4"><span class="font-semibold text-gray-900 dark:text-white">{{ table }}</span></td>
-                            <td class="px-6 py-4">
-                                <span class="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">✅ Active</span>
-                            </td>
-                            <td class="px-6 py-4">
-                                {% if current_tables|length > 1 %}
-                                <span class="text-red-600 dark:text-red-400 text-sm">Remove (requires restart)</span>
-                                {% else %}
-                                <span class="text-gray-500 dark:text-gray-400 text-sm">Cannot remove</span>
-                                {% endif %}
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+            <!-- Accordion for Current Tables -->
+            <div id="current-tables-accordion" class="space-y-2">
+                {% for table in current_tables %}
+                {% with escaped_name=table|cut:'.' %}
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden current-table-item"
+                     data-table-name="{{ table }}">
+
+                    <!-- Table Header -->
+                    <div class="flex items-center bg-gray-50 dark:bg-gray-700 px-4 py-3 hover:bg-gray-100 dark:hover:bg-gray-600 transition cursor-pointer"
+                         onclick="toggleCurrentAccordion('{{ table }}')">
+
+                        <!-- Remove Checkbox -->
+                        {% if current_tables|length > 1 %}
+                        <input type="checkbox"
+                               name="remove_tables"
+                               value="{{ table }}"
+                               class="remove-checkbox w-5 h-5 text-red-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-red-500 mr-3"
+                               onclick="event.stopPropagation()"
+                               onchange="updateWarnings()">
+                        {% else %}
+                        <input type="checkbox"
+                               disabled
+                               title="Cannot remove the only table"
+                               class="w-5 h-5 text-gray-400 bg-gray-200 border-gray-300 rounded cursor-not-allowed mr-3">
+                        {% endif %}
+
+                        <!-- Expand/Collapse Icon -->
+                        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400 mr-2 transition-transform current-accordion-icon"
+                             id="current-icon-{{ escaped_name }}"
+                             fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                        </svg>
+
+                        <!-- Table Info -->
+                        <div class="flex-1">
+                            <span class="font-semibold text-gray-900 dark:text-white">{{ table }}</span>
+                            <span class="ml-2 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">Active</span>
+                        </div>
+
+                        <!-- Column count indicator -->
+                        <span class="text-xs text-gray-500 dark:text-gray-400" id="current-column-count-{{ escaped_name }}"></span>
+                    </div>
+
+                    <!-- Accordion Content -->
+                    <div id="current-accordion-{{ escaped_name }}"
+                         class="current-accordion-content hidden bg-white dark:bg-gray-800 px-4 py-4 border-t border-gray-200 dark:border-gray-700">
+
+                        <!-- Loading State -->
+                        <div id="current-loading-{{ escaped_name }}" class="flex items-center justify-center py-6">
+                            <svg class="animate-spin h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <span class="ml-2 text-gray-600 dark:text-gray-400">Loading columns...</span>
+                        </div>
+
+                        <!-- Columns Display -->
+                        <div id="current-columns-{{ escaped_name }}" class="hidden">
+                            <div class="mb-2">
+                                <p class="text-sm font-medium text-gray-700 dark:text-gray-300" id="current-column-count-display-{{ escaped_name }}">
+                                    All columns are being replicated
+                                </p>
+                            </div>
+                            <div id="current-column-list-{{ escaped_name }}" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                <!-- Columns populated via JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endwith %}
+                {% endfor %}
             </div>
             {% else %}
-            <p class="text-center text-gray-600 dark:text-gray-400 py-8">No tables currently assigned to this connector.</p>
+            <p class="text-center text-gray-600 dark:text-gray-400 py-6">No tables currently assigned to this connector.</p>
             {% endif %}
         </div>
     </div>
 
-    <!-- Available Tables to Add -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
-        <div class="bg-green-600 text-white px-6 py-4">
-            <h5 class="text-lg font-semibold">➕ Available Tables to Add ({{ unassigned_tables|length }})</h5>
+    <!-- Available Tables to Add with Accordion -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
+        <div class="bg-green-600 text-white px-4 py-2">
+            <h5 class="text-base font-semibold">Available Tables to Add ({{ unassigned_tables|length }})</h5>
         </div>
-        <div class="p-6">
+        <div class="p-4">
             {% if unassigned_tables %}
-            <p class="text-gray-600 dark:text-gray-400 mb-4">
-                Select tables to add to this connector. Adding tables uses incremental snapshot signals - no connector restart required!
+            <p class="text-gray-600 dark:text-gray-400 mb-3 text-sm">
+                Select tables to add. Click on a table to view columns. Adding uses incremental snapshot - no restart required.
             </p>
 
-            <div class="flex gap-2 mb-4">
-                <button type="button" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition" onclick="selectAllAdd()">
-                    ☑️ Select All
-                </button>
-                <button type="button" class="px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-sm font-medium transition" onclick="deselectAllAdd()">
-                    ☐ Deselect All
+            <div class="mb-3">
+                <button type="button"
+                        id="toggleAddTablesBtn"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition"
+                        onclick="toggleAllAddTables()">
+                    Select All Tables
                 </button>
             </div>
 
-            <div class="overflow-x-auto">
-                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                    <thead class="bg-gray-50 dark:bg-gray-700">
-                        <tr>
-                            <th class="px-6 py-3 text-left" style="width: 50px;">
-                                <input type="checkbox" id="add-all-checkbox" onchange="toggleAdd(this)" class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
-                            </th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Table Name</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                        {% for table in unassigned_tables %}
-                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
-                            <td class="px-6 py-4">
-                                <input type="checkbox"
-                                       name="add_tables"
-                                       value="{{ table }}"
-                                       class="add-checkbox w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
-                            </td>
-                            <td class="px-6 py-4"><span class="font-semibold text-gray-900 dark:text-white">{{ table }}</span></td>
-                            <td class="px-6 py-4">
-                                <span class="text-green-600 dark:text-green-400 text-sm">Add (no restart needed)</span>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+            <!-- Accordion for Available Tables -->
+            <div id="add-tables-accordion" class="space-y-2">
+                {% for table in unassigned_tables %}
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden add-table-item"
+                     data-table-name="{{ table.name }}">
+
+                    <!-- Table Header -->
+                    <div class="flex items-center bg-gray-50 dark:bg-gray-700 px-4 py-3 hover:bg-gray-100 dark:hover:bg-gray-600 transition cursor-pointer"
+                         onclick="toggleAddAccordion('{{ table.name }}')">
+
+                        <!-- Add Checkbox -->
+                        {% with escaped_name=table.name|cut:'.' %}
+                        <input type="checkbox"
+                               name="add_tables"
+                               value="{{ table.name }}"
+                               data-table-name="{{ table.name }}"
+                               class="add-checkbox w-5 h-5 text-green-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-green-500 mr-3"
+                               onclick="event.stopPropagation()"
+                               onchange="handleAddTableCheckboxChange('{{ table.name }}')">
+
+                        <!-- Expand/Collapse Icon -->
+                        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400 mr-2 transition-transform add-accordion-icon"
+                             id="add-icon-{{ escaped_name }}"
+                             fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                        </svg>
+
+                        <!-- Table Info -->
+                        <div class="flex-1">
+                            <span class="font-semibold text-gray-900 dark:text-white">{{ table.name }}</span>
+                            <span class="ml-3 text-sm text-gray-500 dark:text-gray-400">
+                                {% if table.row_count is not None %}
+                                    {% if table.row_count > 1000000 %}
+                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">{{ table.row_count|floatformat:0 }} rows</span>
+                                    {% elif table.row_count > 100000 %}
+                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400">{{ table.row_count|floatformat:0 }} rows</span>
+                                    {% elif table.row_count == 0 %}
+                                        <span class="text-xs">0 rows (empty)</span>
+                                    {% else %}
+                                        {{ table.row_count|floatformat:0 }} rows
+                                    {% endif %}
+                                {% else %}
+                                    <span class="text-xs">N/A</span>
+                                {% endif %}
+                            </span>
+                        </div>
+
+                        <!-- Column count indicator -->
+                        <span class="text-xs text-gray-500 dark:text-gray-400" id="add-column-count-{{ escaped_name }}"></span>
+                        {% endwith %}
+                    </div>
+
+                    <!-- Accordion Content -->
+                    {% with escaped_name=table.name|cut:'.' %}
+                    <div id="add-accordion-{{ escaped_name }}"
+                         class="add-accordion-content hidden bg-white dark:bg-gray-800 px-4 py-4 border-t border-gray-200 dark:border-gray-700">
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                            <!-- Target Table Name -->
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                    Target Table Name
+                                </label>
+                                <input type="text"
+                                       name="target_table_{{ table.name }}"
+                                       value="{{ database.database_name }}_{{ table.name }}"
+                                       class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
+                                       placeholder="Target table name">
+                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Default: {database}_{table}</p>
+                            </div>
+                        </div>
+
+                        <!-- Loading State -->
+                        <div id="add-loading-{{ escaped_name }}" class="flex items-center justify-center py-6">
+                            <svg class="animate-spin h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <span class="ml-2 text-gray-600 dark:text-gray-400">Loading columns...</span>
+                        </div>
+
+                        <!-- Columns Display -->
+                        <div id="add-columns-{{ escaped_name }}" class="hidden">
+                            <div class="mb-2">
+                                <p class="text-sm font-medium text-gray-700 dark:text-gray-300" id="add-column-count-display-{{ escaped_name }}">
+                                    All columns will be replicated
+                                </p>
+                            </div>
+                            <div id="add-column-list-{{ escaped_name }}" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                <!-- Columns populated via JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                    {% endwith %}
+                </div>
+                {% endfor %}
             </div>
             {% else %}
-            <p class="text-center text-gray-600 dark:text-gray-400 py-8">
+            <p class="text-center text-gray-600 dark:text-gray-400 py-6">
                 No unassigned tables available. All tables are already assigned to connectors.
             </p>
             {% endif %}
@@ -162,50 +372,262 @@
     <!-- Warnings -->
     <div id="warnings-container"></div>
 
-    <!-- Action Buttons -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 overflow-hidden">
-        <div class="p-6">
-            <div class="flex justify-between">
-                <a href="{% url 'connector_list' database.pk %}"
-                   class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition">
-                    ❌ Cancel
-                </a>
-                <button type="submit"
-                        class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-lg font-semibold transition"
-                        id="submit-btn">
-                    💾 Save Changes
-                </button>
-            </div>
-        </div>
-    </div>
 </form>
 
 <script>
-// Toggle remove checkboxes
-function toggleRemove(checkbox) {
-    const checkboxes = document.querySelectorAll('.remove-checkbox');
-    checkboxes.forEach(cb => cb.checked = checkbox.checked);
-    updateWarnings();
+const DATABASE_ID = {{ database.pk }};
+let loadedCurrentTables = new Set();
+let loadedAddTables = new Set();
+let allAddTablesSelected = false;
+
+// Escape table names for use in IDs
+function escapeTableName(name) {
+    return name.replace(/[.]/g, '');
 }
 
-// Toggle add checkboxes
-function toggleAdd(checkbox) {
-    const checkboxes = document.querySelectorAll('.add-checkbox');
-    checkboxes.forEach(cb => cb.checked = checkbox.checked);
+// Toggle connector settings visibility
+function toggleConnectorSettings() {
+    const content = document.getElementById('connector-settings-content');
+    const icon = document.getElementById('connector-settings-icon');
+
+    if (content.classList.contains('hidden')) {
+        content.classList.remove('hidden');
+        icon.style.transform = 'rotate(180deg)';
+    } else {
+        content.classList.add('hidden');
+        icon.style.transform = 'rotate(0deg)';
+    }
 }
 
-// Select all add
-function selectAllAdd() {
-    const checkboxes = document.querySelectorAll('.add-checkbox');
-    checkboxes.forEach(cb => cb.checked = true);
-    document.getElementById('add-all-checkbox').checked = true;
+// Toggle current table accordion
+function toggleCurrentAccordion(tableName) {
+    const escapedName = escapeTableName(tableName);
+    const accordion = document.getElementById(`current-accordion-${escapedName}`);
+    const icon = document.getElementById(`current-icon-${escapedName}`);
+
+    if (accordion.classList.contains('hidden')) {
+        accordion.classList.remove('hidden');
+        icon.style.transform = 'rotate(90deg)';
+
+        // Load columns if not already loaded
+        if (!loadedCurrentTables.has(tableName)) {
+            loadCurrentTableSchema(tableName);
+        }
+    } else {
+        accordion.classList.add('hidden');
+        icon.style.transform = 'rotate(0deg)';
+    }
 }
 
-// Deselect all add
-function deselectAllAdd() {
+// Toggle add table accordion
+function toggleAddAccordion(tableName) {
+    const escapedName = escapeTableName(tableName);
+    const accordion = document.getElementById(`add-accordion-${escapedName}`);
+    const icon = document.getElementById(`add-icon-${escapedName}`);
+
+    if (accordion.classList.contains('hidden')) {
+        accordion.classList.remove('hidden');
+        icon.style.transform = 'rotate(90deg)';
+
+        // Load columns if not already loaded
+        if (!loadedAddTables.has(tableName)) {
+            loadAddTableSchema(tableName);
+        }
+    } else {
+        accordion.classList.add('hidden');
+        icon.style.transform = 'rotate(0deg)';
+    }
+}
+
+// Handle add table checkbox change
+function handleAddTableCheckboxChange(tableName) {
+    const escapedName = escapeTableName(tableName);
+    const checkbox = document.querySelector(`.add-checkbox[data-table-name="${tableName}"]`);
+    const accordion = document.getElementById(`add-accordion-${escapedName}`);
+
+    if (checkbox.checked) {
+        // Expand accordion when checked
+        if (accordion.classList.contains('hidden')) {
+            toggleAddAccordion(tableName);
+        }
+    }
+}
+
+// Toggle all add tables
+function toggleAllAddTables() {
     const checkboxes = document.querySelectorAll('.add-checkbox');
-    checkboxes.forEach(cb => cb.checked = false);
-    document.getElementById('add-all-checkbox').checked = false;
+    const btn = document.getElementById('toggleAddTablesBtn');
+
+    if (allAddTablesSelected) {
+        // Deselect all
+        checkboxes.forEach(cb => cb.checked = false);
+        btn.innerHTML = 'Select All Tables';
+        btn.classList.remove('bg-gray-600', 'hover:bg-gray-700');
+        btn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+        allAddTablesSelected = false;
+    } else {
+        // Select all
+        checkboxes.forEach(cb => {
+            cb.checked = true;
+            handleAddTableCheckboxChange(cb.value);
+        });
+        btn.innerHTML = 'Deselect All Tables';
+        btn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+        btn.classList.add('bg-gray-600', 'hover:bg-gray-700');
+        allAddTablesSelected = true;
+    }
+}
+
+// Load current table schema via AJAX
+async function loadCurrentTableSchema(tableName) {
+    const escapedName = escapeTableName(tableName);
+    const loadingEl = document.getElementById(`current-loading-${escapedName}`);
+    const columnsEl = document.getElementById(`current-columns-${escapedName}`);
+
+    try {
+        const response = await fetch(`/ajax/table-schema/${DATABASE_ID}/${tableName}/`);
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
+        // Hide loading, show columns
+        loadingEl.classList.add('hidden');
+        columnsEl.classList.remove('hidden');
+
+        // Render columns
+        renderCurrentColumns(tableName, data.columns);
+
+        // Mark as loaded
+        loadedCurrentTables.add(tableName);
+
+        // Update column count indicator
+        document.getElementById(`current-column-count-${escapedName}`).textContent =
+            `${data.columns.length} columns`;
+
+    } catch (error) {
+        console.error('Error loading table schema:', error);
+        loadingEl.innerHTML = `
+            <div class="text-red-600 dark:text-red-400 text-sm">
+                Error loading columns: ${error.message}
+            </div>
+        `;
+    }
+}
+
+// Load add table schema via AJAX
+async function loadAddTableSchema(tableName) {
+    const escapedName = escapeTableName(tableName);
+    const loadingEl = document.getElementById(`add-loading-${escapedName}`);
+    const columnsEl = document.getElementById(`add-columns-${escapedName}`);
+
+    try {
+        const response = await fetch(`/ajax/table-schema/${DATABASE_ID}/${tableName}/`);
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
+        // Hide loading, show columns
+        loadingEl.classList.add('hidden');
+        columnsEl.classList.remove('hidden');
+
+        // Render columns
+        renderAddColumns(tableName, data.columns);
+
+        // Mark as loaded
+        loadedAddTables.add(tableName);
+
+        // Update column count indicator
+        document.getElementById(`add-column-count-${escapedName}`).textContent =
+            `${data.columns.length} columns`;
+
+    } catch (error) {
+        console.error('Error loading table schema:', error);
+        loadingEl.innerHTML = `
+            <div class="text-red-600 dark:text-red-400 text-sm">
+                Error loading columns: ${error.message}
+            </div>
+        `;
+    }
+}
+
+// Render columns for current tables
+function renderCurrentColumns(tableName, columns) {
+    const escapedName = escapeTableName(tableName);
+    const columnListEl = document.getElementById(`current-column-list-${escapedName}`);
+
+    columnListEl.innerHTML = columns.map(col => {
+        const isPK = col.primary_key ?
+            '<span class="ml-1 px-1 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-400 text-xs rounded">PK</span>' :
+            '';
+
+        const isNullable = col.nullable ?
+            '' :
+            '<span class="ml-1 px-1 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs rounded">NOT NULL</span>';
+
+        return `
+            <div class="flex items-center p-2 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">
+                <span class="text-green-500 mr-2">✓</span>
+                <span class="text-sm text-gray-900 dark:text-white flex-1">
+                    <span class="font-medium">${col.name}</span>
+                    <span class="text-xs text-gray-500 dark:text-gray-400 ml-1">(${col.type})</span>
+                    ${isPK}${isNullable}
+                </span>
+            </div>
+        `;
+    }).join('');
+
+    // Update column count display
+    const countDisplay = document.getElementById(`current-column-count-display-${escapedName}`);
+    if (countDisplay) {
+        countDisplay.textContent = `${columns.length} columns being replicated`;
+    }
+}
+
+// Render columns for add tables
+function renderAddColumns(tableName, columns) {
+    const escapedName = escapeTableName(tableName);
+    const columnListEl = document.getElementById(`add-column-list-${escapedName}`);
+
+    columnListEl.innerHTML = columns.map(col => {
+        const isPK = col.primary_key ?
+            '<span class="ml-1 px-1 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-400 text-xs rounded">PK</span>' :
+            '';
+
+        const isNullable = col.nullable ?
+            '' :
+            '<span class="ml-1 px-1 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs rounded">NOT NULL</span>';
+
+        return `
+            <div class="flex items-center p-2 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">
+                <span class="text-green-500 mr-2">✓</span>
+                <span class="text-sm text-gray-900 dark:text-white flex-1">
+                    <span class="font-medium">${col.name}</span>
+                    <span class="text-xs text-gray-500 dark:text-gray-400 ml-1">(${col.type})</span>
+                    ${isPK}${isNullable}
+                </span>
+            </div>
+        `;
+    }).join('');
+
+    // Update column count display
+    const countDisplay = document.getElementById(`add-column-count-display-${escapedName}`);
+    if (countDisplay) {
+        countDisplay.textContent = `${columns.length} columns will be replicated`;
+    }
 }
 
 // Update warnings based on selections
@@ -214,39 +636,38 @@ function updateWarnings() {
     const totalTables = {{ current_tables|length }};
     const remainingTables = totalTables - removeChecked;
     const warningsContainer = document.getElementById('warnings-container');
+    const submitBtnTop = document.getElementById('submit-btn-top');
 
     if (remainingTables === 0) {
         warningsContainer.innerHTML = `
-            <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-6">
+            <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-4">
                 <p class="text-red-800 dark:text-red-200">
-                    <span class="font-semibold">❌ Error:</span> You are trying to remove all tables.
+                    <span class="font-semibold">Error:</span> You are trying to remove all tables.
                     Connectors must have at least 1 table.
                     If you want to remove this connector entirely, use the Delete button instead.
                 </p>
             </div>
         `;
-        document.getElementById('submit-btn').disabled = true;
+        submitBtnTop.disabled = true;
+        submitBtnTop.classList.add('opacity-50', 'cursor-not-allowed');
     } else if (removeChecked > 0) {
         warningsContainer.innerHTML = `
-            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-6">
+            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
                 <p class="text-yellow-800 dark:text-yellow-200">
-                    <span class="font-semibold">⚠️ Warning:</span> Removing ${removeChecked} table(s) will restart the connector.
+                    <span class="font-semibold">Warning:</span> Removing ${removeChecked} table(s) will restart the connector.
                     This will cause a brief interruption (typically 10-30 seconds).
                     ${remainingTables} table(s) will remain in this connector.
                 </p>
             </div>
         `;
-        document.getElementById('submit-btn').disabled = false;
+        submitBtnTop.disabled = false;
+        submitBtnTop.classList.remove('opacity-50', 'cursor-not-allowed');
     } else {
         warningsContainer.innerHTML = '';
-        document.getElementById('submit-btn').disabled = false;
+        submitBtnTop.disabled = false;
+        submitBtnTop.classList.remove('opacity-50', 'cursor-not-allowed');
     }
 }
-
-// Add event listeners to remove checkboxes
-document.querySelectorAll('.remove-checkbox').forEach(cb => {
-    cb.addEventListener('change', updateWarnings);
-});
 
 // Form validation
 document.querySelector('form').addEventListener('submit', function(e) {
@@ -255,7 +676,7 @@ document.querySelector('form').addEventListener('submit', function(e) {
 
     if (removeChecked.length === 0 && addChecked.length === 0) {
         e.preventDefault();
-        alert('⚠️ No changes selected. Please select tables to add or remove.');
+        alert('No changes selected. Please select tables to add or remove.');
         return false;
     }
 
@@ -264,21 +685,21 @@ document.querySelector('form').addEventListener('submit', function(e) {
 
     if (remainingTables === 0) {
         e.preventDefault();
-        alert('❌ Cannot remove all tables. Connectors must have at least 1 table.');
+        alert('Cannot remove all tables. Connectors must have at least 1 table.');
         return false;
     }
 
     // Confirm removal
     if (removeChecked.length > 0) {
-        if (!confirm(`⚠️ Are you sure you want to remove ${removeChecked.length} table(s)? This will restart the connector.`)) {
+        if (!confirm(`Are you sure you want to remove ${removeChecked.length} table(s)? This will restart the connector.`)) {
             e.preventDefault();
             return false;
         }
     }
 
     // Disable submit button to prevent double submission
-    document.getElementById('submit-btn').disabled = true;
-    document.getElementById('submit-btn').innerHTML = '⏳ Saving...';
+    document.getElementById('submit-btn-top').disabled = true;
+    document.getElementById('submit-btn-top').innerHTML = 'Saving...';
 });
 
 // Initialize warnings on page load

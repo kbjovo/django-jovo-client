@@ -801,12 +801,30 @@ def connector_edit_tables(request, config_pk):
         .values_list('source_table', flat=True)
     )
 
-    # Get available tables to add
+    # Get available tables to add with row counts
     try:
-        unassigned_tables = get_unassigned_tables(database.id)
+        unassigned_table_names = get_unassigned_tables(database.id)
+
+        # Get row counts for each table (same as connector_add)
+        unassigned_tables = []
+        for table_name in unassigned_table_names:
+            try:
+                schema = get_table_schema(database, table_name)
+                row_count = schema.get('row_count', 0)
+                unassigned_tables.append({
+                    'name': table_name,
+                    'row_count': row_count,
+                })
+            except Exception as e:
+                logger.warning(f"Could not get info for table {table_name}: {e}")
+                unassigned_tables.append({
+                    'name': table_name,
+                    'row_count': None,
+                })
     except Exception as e:
         logger.error(f"Error getting unassigned tables: {e}")
         unassigned_tables = []
+        unassigned_table_names = []
 
     # POST: Process changes
     if request.method == 'POST':
@@ -841,7 +859,7 @@ def connector_edit_tables(request, config_pk):
             # Handle additions
             if tables_to_add:
                 # Validate tables are unassigned
-                invalid_tables = [t for t in tables_to_add if t not in unassigned_tables]
+                invalid_tables = [t for t in tables_to_add if t not in unassigned_table_names]
                 if invalid_tables:
                     messages.error(request, f"Tables already assigned: {', '.join(invalid_tables)}")
                     return redirect('connector_edit_tables', config_pk=config_pk)
