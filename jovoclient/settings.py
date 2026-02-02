@@ -35,8 +35,6 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-sd-&4j-s=6t(tj47cyr2fzx2&y
 DEBUG = os.getenv('DEBUG', 'True').lower() in ('true', '1', 'yes')
 
 
-
-
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
@@ -171,6 +169,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
 
 TAILWIND_APP_NAME = 'theme'
 
