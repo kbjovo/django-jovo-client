@@ -67,6 +67,8 @@ if DEBUG:
     INSTALLED_APPS += ['django_browser_reload']
     
 
+CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost').split(',')
+
 
 MIDDLEWARE = [    
     'django_prometheus.middleware.PrometheusBeforeMiddleware',
@@ -175,8 +177,6 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 TAILWIND_APP_NAME = 'theme'
 
 NPM_BIN_PATH = os.getenv("NPM_BIN_PATH","/usr/local/bin/npm")
-
-
 
 
 # Default primary key field type
