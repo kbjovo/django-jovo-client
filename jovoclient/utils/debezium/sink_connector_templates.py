@@ -124,7 +124,9 @@ def get_mysql_sink_connector_config(
     # Use topics.regex for auto-subscription to all source connector topics
     # This allows sink to automatically subscribe when new source connectors are added
     # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
-    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
+    # Excludes: ddl_events and debezium_signal tables (DDL events are processed separately)
+    # Note: signals topic (client_X_db_Y_v_Z.signals) is naturally excluded as it has only 2 parts
+    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
@@ -239,7 +241,9 @@ def get_postgresql_sink_connector_config(
     # Use topics.regex for auto-subscription to all source connector topics
     # This allows sink to automatically subscribe when new source connectors are added
     # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
-    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
+    # Excludes: ddl_events and debezium_signal tables (DDL events are processed separately)
+    # Note: signals topic (client_X_db_Y_v_Z.signals) is naturally excluded as it has only 2 parts
+    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 

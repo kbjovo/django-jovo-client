@@ -32,6 +32,12 @@ RUN cd /tmp && \
     chown -R kafka:kafka /kafka/connect/confluent-avro-converter
 
 # ============================================
+# PREPARE JOLOKIA DIRECTORY
+# ============================================
+# Jolokia JAR will be mounted from host via docker-compose volumes
+RUN mkdir -p /opt/jolokia && chown -R kafka:kafka /opt/jolokia
+
+# ============================================
 # CONFIGURE LOGGING TO STDOUT/STDERR (Log4j2 format)
 # ============================================
 
@@ -59,6 +65,15 @@ RUN mkdir -p /kafka/config && \
 # Set environment variables for log4j2
 ENV KAFKA_LOG4J_OPTS="-Dlog4j2.configurationFile=file:/kafka/config/log4j2.properties"
 ENV CONNECT_LOG4J_ROOT_LOGLEVEL=INFO
+
+# ============================================
+# ENABLE JOLOKIA AGENT
+# ============================================
+# Load Jolokia as Java agent on startup
+# Port 8778 - Jolokia HTTP endpoint
+# host=0.0.0.0 - Listen on all interfaces (accessible from outside container)
+# agentId=kafka-connect - Unique identifier for this JVM
+ENV KAFKA_OPTS="-javaagent:/opt/jolokia/jolokia-jvm-agent.jar=port=8778,host=0.0.0.0,agentId=kafka-connect"
 
 # Switch back to kafka user
 USER kafka

@@ -499,19 +499,22 @@ CELERY_WORKER_DISABLE_RATE_LIMITS = os.getenv('CELERY_DISABLE_RATE_LIMITS', 'Fal
 # ====================================
 DEBEZIUM_CONFIG = {
     'KAFKA_CONNECT_URL': os.getenv('KAFKA_CONNECT_URL', 'http://localhost:8083'),
-    
+
+    # Jolokia JMX HTTP endpoint (for snapshot monitoring and metrics)
+    'JOLOKIA_URL': os.getenv('JOLOKIA_URL', 'http://localhost:8778/jolokia'),
+
     # External bootstrap servers (for host machine connections)
     'KAFKA_BOOTSTRAP_SERVERS': os.getenv(
-        'KAFKA_BOOTSTRAP_SERVERS', 
+        'KAFKA_BOOTSTRAP_SERVERS',
         'localhost:9092,localhost:9094,localhost:9096'
     ),
-    
+
     # Internal bootstrap servers (for Docker container communication)
     'KAFKA_INTERNAL_SERVERS': os.getenv(
-        'KAFKA_INTERNAL_SERVERS', 
+        'KAFKA_INTERNAL_SERVERS',
         'kafka-1:29092,kafka-2:29092,kafka-3:29092'
     ),
-    
+
     'SCHEMA_REGISTRY_URL': os.getenv('SCHEMA_REGISTRY_URL', 'http://localhost:8082'),
     'CONSUMER_GROUP_PREFIX': 'cdc_consumer',
 }

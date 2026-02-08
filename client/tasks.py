@@ -68,13 +68,18 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
             processed, errors = processor.process(timeout_sec=30, max_messages=100)
 
         elif source_type in ('postgresql', 'postgres'):
-            # Schema sync service for PostgreSQL
-            processor = PostgreSQLSchemaSyncService(
-                replication_config=config,
-                target_engine=target_engine,
-                auto_execute_destructive=auto_destructive
-            )
-            processed, errors = processor.process()
+            # PostgreSQL DDL is handled by continuous DDL consumer (PostgreSQLKafkaDDLProcessor)
+            # which consumes from ddl_capture.ddl_events Kafka topic.
+            # Schema sync service is DISABLED because it detects RENAME as DROP+ADD causing data loss.
+            logger.debug(f"Skipping PostgreSQL schema sync for config {config_id} - handled by continuous DDL consumer")
+            return {
+                'success': True,
+                'config_id': config_id,
+                'source_type': source_type,
+                'processed': 0,
+                'errors': 0,
+                'message': 'PostgreSQL DDL handled by continuous consumer'
+            }
 
         else:
             logger.warning(f"DDL processing not supported for source type: {source_type}")
@@ -147,8 +152,12 @@ def start_continuous_ddl_consumer(self, config_id: int):
 
     This runs indefinitely, processing DDL changes as they arrive.
     Use stop_continuous_ddl_consumer() to stop it.
+
+    Supports:
+    - MySQL/MSSQL: Uses KafkaDDLProcessor (schema history topic)
+    - PostgreSQL: Uses PostgreSQLKafkaDDLProcessor (ddl_capture.ddl_events topic)
     """
-    from client.utils.ddl import KafkaDDLProcessor
+    from client.utils.ddl import KafkaDDLProcessor, PostgreSQLKafkaDDLProcessor
     import time
 
     global _running_consumers
@@ -165,8 +174,9 @@ def start_continuous_ddl_consumer(self, config_id: int):
         return {'success': False, 'error': 'Config not found'}
 
     source_type = config.client_database.db_type.lower()
-    if source_type not in ('mysql', 'mssql', 'sqlserver'):
-        logger.error(f"Continuous consumer only supports MySQL/MSSQL, not {source_type}")
+    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+    if source_type not in supported_types:
+        logger.error(f"Continuous consumer only supports MySQL/MSSQL/PostgreSQL, not {source_type}")
         return {'success': False, 'error': f'Unsupported source type: {source_type}'}
 
     target_db = config.client_database.client.client_databases.filter(is_target=True).first()
@@ -181,16 +191,26 @@ def start_continuous_ddl_consumer(self, config_id: int):
     )
 
     _running_consumers[config_id] = True
-    logger.info(f"Starting continuous DDL consumer for config {config_id}")
+    logger.info(f"Starting continuous DDL consumer for config {config_id} (source: {source_type})")
 
     processor = None
     try:
-        processor = KafkaDDLProcessor(
-            replication_config=config,
-            target_engine=target_engine,
-            bootstrap_servers=kafka_servers,
-            auto_execute_destructive=True
-        )
+        # Select appropriate processor based on source type
+        if source_type in ('postgresql', 'postgres'):
+            processor = PostgreSQLKafkaDDLProcessor(
+                replication_config=config,
+                target_engine=target_engine,
+                bootstrap_servers=kafka_servers,
+                auto_execute_destructive=True
+            )
+        else:
+            # MySQL/MSSQL use KafkaDDLProcessor
+            processor = KafkaDDLProcessor(
+                replication_config=config,
+                target_engine=target_engine,
+                bootstrap_servers=kafka_servers,
+                auto_execute_destructive=True
+            )
 
         # Continuous loop
         while _running_consumers.get(config_id, False):
@@ -234,14 +254,18 @@ def stop_continuous_ddl_consumer(config_id: int):
 @shared_task
 def ensure_continuous_ddl_consumers():
     """
-    Ensure continuous DDL consumers are running for all active MySQL/MSSQL replications.
+    Ensure continuous DDL consumers are running for all active replications.
 
     Called periodically by Celery Beat to auto-start/restart consumers.
     This keeps DDL sync always on.
+
+    Supports:
+    - MySQL/MSSQL: Schema history topic
+    - PostgreSQL: ddl_capture.ddl_events topic (requires event triggers on source)
     """
     global _running_consumers
 
-    supported_types = ('mysql', 'mssql', 'sqlserver')
+    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
 
     active_configs = ReplicationConfig.objects.filter(
         status='active',
@@ -271,24 +295,15 @@ def sync_postgresql_schemas():
     """
     Periodic schema sync for PostgreSQL source databases.
 
-    Called every 5 minutes by Celery Beat.
-    PostgreSQL doesn't emit DDL events, so we compare schemas periodically.
+    DISABLED: PostgreSQL DDL is now handled by the continuous DDL consumer
+    (PostgreSQLKafkaDDLProcessor) which consumes DDL events from Kafka.
+
+    The schema comparison approach caused data loss on RENAME operations
+    (detected as DROP + ADD instead of proper RENAME).
     """
-    pg_configs = ReplicationConfig.objects.filter(
-        status='active',
-        is_active=True,
-        client_database__db_type__in=['postgresql', 'postgres']
-    )
-
-    scheduled = 0
-    for config in pg_configs:
-        process_ddl_changes.delay(config.id)
-        scheduled += 1
-
-    if scheduled > 0:
-        logger.info(f"Scheduled PostgreSQL schema sync for {scheduled} configs")
-
-    return {'scheduled': scheduled}
+    # PostgreSQL DDL handled by continuous DDL consumer - no schema sync needed
+    logger.debug("PostgreSQL schema sync disabled - handled by continuous DDL consumer")
+    return {'scheduled': 0}
 
 
 

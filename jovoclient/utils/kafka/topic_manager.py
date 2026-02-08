@@ -499,6 +499,13 @@ class KafkaTopicManager:
         # Add heartbeat topic (for connector health monitoring)
         topics.append(f"__debezium-heartbeat.{topic_prefix}")
 
+        # Add DDL events topic for PostgreSQL sources (for real-time DDL sync)
+        # This topic receives changes from the ddl_capture.ddl_events table
+        if db_config.db_type.lower() in ('postgresql', 'postgres'):
+            ddl_events_topic = f"{topic_prefix}.{db_config.database_name}.ddl_events"
+            topics.append(ddl_events_topic)
+            logger.info(f"Added PostgreSQL DDL events topic: {ddl_events_topic}")
+
         return topics
 
     def create_topics_for_config(self, replication_config) -> Tuple[bool, str]:

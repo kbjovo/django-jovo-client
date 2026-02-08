@@ -684,26 +684,19 @@ def connector_create_debezium(request, config_pk):
             if not target_database:
                 messages.warning(request, "No target database configured. Sink connector not created.")
             else:
-                # Generate sink connector config with regex to match all DATA topics from this database
-                # Topic format: client_{client_id}_db_{db_id}_v_{version}.{database}.{table}
-                # or: client_{client_id}_db_{db_id}_v_{version}.{schema}.{table} (for PostgreSQL/Oracle)
-                # IMPORTANT: Exclude .signals topic (used for Debezium signaling)
-                # NOTE: Topic prefix includes version (_v_\d+) for JMX uniqueness
-                topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
-
                 # Configure sink connector to handle tables with and without PKs
                 # - primary.key.mode=record_key: Extract PK from message key (Debezium extracts automatically)
                 # - DO NOT specify primary.key.fields when using record_key mode - it auto-extracts from key schema
                 # - This allows different tables with different PKs to work correctly
                 # - delete_enabled=True: Process tombstone delete events
                 # - schema.evolution=basic: Allow table schema to evolve with source changes
+                # - topics.regex is set by sink_connector_templates.py (excludes ddl_events and debezium_signal)
                 sink_config = get_sink_connector_config_for_database(
                     db_config=target_database,
                     topics=None,  # Use regex instead of explicit topic list
                     delete_enabled=True,
                     custom_config={
                         'name': sink_connector_name,
-                        'topics.regex': topic_regex,  # Regex to match all data topics from this database
                         # Do NOT include 'primary.key.fields' - record_key mode extracts keys automatically
                     }
                 )
@@ -736,20 +729,18 @@ def connector_create_debezium(request, config_pk):
             ).first()
 
             if target_database:
-                topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
-
+                # topics.regex is set by sink_connector_templates.py (excludes ddl_events and debezium_signal)
                 sink_config = get_sink_connector_config_for_database(
                     db_config=target_database,
                     topics=None,
                     delete_enabled=True,
                     custom_config={
                         'name': sink_connector_name,
-                        'topics.regex': topic_regex,
                     }
                 )
 
                 connector_manager.update_connector_config(sink_connector_name, sink_config)
-                logger.info(f"✓ Updated sink connector to use topics.regex: {topic_regex}")
+                logger.info(f"✓ Updated sink connector with topics.regex from template")
 
             replication_config.sink_connector_name = sink_connector_name
             replication_config.save()

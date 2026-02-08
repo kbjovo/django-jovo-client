@@ -204,6 +204,12 @@ class ReplicationOrchestrator:
                 from client.tasks import start_continuous_ddl_consumer
                 start_continuous_ddl_consumer.delay(self.config.id)
                 self._log_info("✓ Started continuous DDL consumer for real-time schema sync")
+            elif source_type in ('postgresql', 'postgres'):
+                # PostgreSQL DDL consumer requires ddl_capture.ddl_events table
+                # to be included in Debezium table.include.list
+                from client.tasks import start_continuous_ddl_consumer
+                start_continuous_ddl_consumer.delay(self.config.id)
+                self._log_info("✓ Started PostgreSQL DDL consumer (ddl_capture.ddl_events topic)")
 
             # ========================================
             # Success Summary
@@ -642,13 +648,10 @@ class ReplicationOrchestrator:
                 'kafka-1:29092,kafka-2:29092,kafka-3:29092'
             )
 
-            # Use topics.regex for auto-subscription
-            client = self.config.client_database.client
-            topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
-
+            # Let sink_connector_templates.py handle topics.regex
+            # (excludes ddl_events and debezium_signal tables)
             custom_config = {
                 'name': sink_connector_name,
-                'topics.regex': topic_regex,
             }
 
             new_config = get_sink_connector_config_for_database(
@@ -666,7 +669,6 @@ class ReplicationOrchestrator:
             )
 
             if success:
-                self._log_info(f"✓ Updated sink connector with topics.regex: {topic_regex}")
                 self.config.sink_connector_name = sink_connector_name
                 self.config.sink_connector_state = 'RUNNING'
                 self.config.save()
@@ -706,13 +708,10 @@ class ReplicationOrchestrator:
                 'kafka-1:29092,kafka-2:29092,kafka-3:29092'
             )
 
-            # Use topics.regex for auto-subscription to all source connector topics
-            client = self.config.client_database.client
-            topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.(?!signals$).*"
-
+            # Let sink_connector_templates.py handle topics.regex
+            # (excludes ddl_events and debezium_signal tables)
             custom_config = {
                 'name': sink_connector_name,
-                'topics.regex': topic_regex,
             }
 
             sink_config = get_sink_connector_config_for_database(
@@ -744,7 +743,6 @@ class ReplicationOrchestrator:
                 self._log_info(f"  Connector: {sink_connector_name}")
                 self._log_info(f"  Target: {target_db.db_type} ({target_db.host}:{target_db.port})")
                 self._log_info(f"  Database: {target_db.database_name}")
-                self._log_info(f"  Topics regex: {topic_regex}")
                 self._log_info(f"  Primary key fields: {primary_key_fields or 'auto-detected'}")
                 self._log_info(f"  Kafka bootstrap: {kafka_bootstrap}")
 
@@ -752,7 +750,7 @@ class ReplicationOrchestrator:
                 self.config.sink_connector_state = 'RUNNING'
                 self.config.save()
 
-                return True, f"Sink connector created (topics.regex: {topic_regex})"
+                return True, 
             else:
                 return False, f"Failed to create sink connector: {error}"
 

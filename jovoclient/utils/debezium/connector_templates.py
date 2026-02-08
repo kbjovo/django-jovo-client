@@ -355,7 +355,8 @@ def get_postgresql_connector_config(
         "hstore.handling.mode": "json",
         "interval.handling.mode": "string",
 
-        "schema.include.list": schema_name,
+        # Include both user schema and ddl_capture schema for DDL sync
+        "schema.include.list": f"{schema_name},ddl_capture",
 
         "heartbeat.interval.ms": "10000",
         "heartbeat.action.query": "",
@@ -385,8 +386,15 @@ def get_postgresql_connector_config(
                 # Add schema prefix (e.g., 'busy_acc_greenera' -> 'public.busy_acc_greenera')
                 tables_full.append(f"{schema_name}.{table}")
 
+        # Add DDL capture table for real-time DDL sync
+        # This table is populated by PostgreSQL event triggers and enables DDL replication
+        ddl_capture_table = "ddl_capture.ddl_events"
+        if ddl_capture_table not in tables_full:
+            tables_full.append(ddl_capture_table)
+            logger.info(f"✅ Added DDL capture table for schema sync: {ddl_capture_table}")
+
         config["table.include.list"] = ",".join(tables_full)
-        logger.debug(f"Adding table whitelist: {len(tables_whitelist)} tables")
+        logger.debug(f"Adding table whitelist: {len(tables_full)} tables (including DDL capture)")
 
     if replication_config:
         if hasattr(replication_config, 'snapshot_mode') and replication_config.snapshot_mode:

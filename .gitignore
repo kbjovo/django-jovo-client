@@ -66,5 +66,6 @@ logs/
 
 docs/
 
+debezium-setup/
 
 migrations/

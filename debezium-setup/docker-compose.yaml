@@ -312,7 +312,8 @@ services:
       mysql:
         condition: service_healthy
     ports:
-      - "8083:8083"
+      - "8083:8083"    # Kafka Connect REST API
+      - "8778:8778"    # Jolokia JMX HTTP endpoint
     environment:
       # Kafka Bootstrap Servers
       BOOTSTRAP_SERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
@@ -362,6 +363,12 @@ services:
       CONNECT_PLUGIN_PATH: /kafka/connect
     
     # ============================================
+    # VOLUMES - Mount Jolokia JAR from host
+    # ============================================
+    volumes:
+      - ./jolokia/jolokia-jvm-agent.jar:/opt/jolokia/jolokia-jvm-agent.jar:ro
+
+    # ============================================
     # DOCKER LOGGING DRIVER CONFIGURATION
     # ============================================
     logging:
@@ -370,7 +377,7 @@ services:
         max-size: "50m"
         max-file: "5"
         labels: "service=kafka-connect,component=debezium"
-    
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/"]
       interval: 10s
@@ -479,6 +486,7 @@ services:
     volumes:
       - ..:/app
       - ../logs:/app/logs
+      - /app/.venv
     networks:
       - replication-network
     command: celery -A jovoclient worker -l debug -Q ddl_consumer -P solo
