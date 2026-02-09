@@ -69,3 +69,5 @@ docs/
 debezium-setup/
 
 migrations/
+
+gunicorn.conf.py

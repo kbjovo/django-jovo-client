@@ -1,64 +1,5 @@
 services:
-  # ============================================
-  # MySQL Database
-  # ============================================
-  mysql:
-    image: mysql:8.0
-    container_name: mysql_wsl
-    hostname: mysql
-    command:
-      - --server-id=1
-      - --log-bin=mysql-bin
-      - --binlog-format=ROW
-      - --binlog-row-image=FULL
-      - --binlog-expire-logs-seconds=259200
-      - --default-authentication-plugin=mysql_native_password
-      - --bind-address=0.0.0.0
-      - --max-connections=500
-      - --gtid-mode=ON
-      - --enforce-gtid-consistency=ON
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: client
-      MYSQL_USER: jovo_test
-      MYSQL_PASSWORD: root
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql-data:/var/lib/mysql
-    networks:
-      - replication-network
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # ============================================
-  # Redis - WITH FIXES FOR CELERY IDLE ISSUES
-  # ============================================
-  redis:
-    image: redis:7-alpine
-    container_name: redis
-    hostname: redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - replication-network
-    command: redis-server --appendonly yes --bind 0.0.0.0 --protected-mode no
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
-
-  # ============================================
   # Kafka Broker 1 (KRaft mode)
-  # ============================================
   kafka-1:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka-1
@@ -94,9 +35,6 @@ services:
       resources:
         limits:
           memory: 2G
-          cpus: '1'
-        reservations:
-          memory: 1G
     restart: unless-stopped
     command: >
       bash -c "
@@ -106,9 +44,6 @@ services:
       /etc/confluent/docker/run
       "
 
-  # ============================================
-  # Kafka Broker 2 (KRaft mode)
-  # ============================================
   kafka-2:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka-2
@@ -144,9 +79,6 @@ services:
       resources:
         limits:
           memory: 2G
-          cpus: '1'
-        reservations:
-          memory: 1G
     restart: unless-stopped
     command: >
       bash -c "
@@ -156,9 +88,6 @@ services:
       /etc/confluent/docker/run
       "
 
-  # ============================================
-  # Kafka Broker 3 (KRaft mode)
-  # ============================================
   kafka-3:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka-3
@@ -194,9 +123,6 @@ services:
       resources:
         limits:
           memory: 2G
-          cpus: '1'
-        reservations:
-          memory: 1G
     restart: unless-stopped
     command: >
       bash -c "
@@ -206,18 +132,11 @@ services:
       /etc/confluent/docker/run
       "
 
-  # ============================================
-  # Kafka UI - Web Interface
-  # ============================================
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
     depends_on:
       kafka-1:
-        condition: service_healthy
-      kafka-2:
-        condition: service_healthy
-      kafka-3:
         condition: service_healthy
     ports:
       - "8080:8080"
@@ -227,14 +146,10 @@ services:
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
-      DYNAMIC_CONFIG_ENABLED: 'true'
     networks:
       - replication-network
     restart: unless-stopped
 
-  # ============================================
-  # Schema Registry
-  # ============================================
   schema-registry:
     image: confluentinc/cp-schema-registry:7.5.0
     container_name: schema-registry
@@ -242,33 +157,16 @@ services:
     depends_on:
       kafka-1:
         condition: service_healthy
-      kafka-2:
-        condition: service_healthy
-      kafka-3:
-        condition: service_healthy
     ports:
       - "8082:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-      SCHEMA_REGISTRY_LOG4J_ROOT_LOGLEVEL: WARN
-      
-      # CRITICAL FIXES FOR KRAFT:
-      # Increase timeout for multi-broker KRaft clusters
       SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS: 10000
       SCHEMA_REGISTRY_KAFKASTORE_INIT_TIMEOUT_MS: 120000
-      
-      # Consumer/Producer settings for better connectivity
-      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: PLAINTEXT
-      
-      # Schema registry topic settings
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 3
-      
-      # Debug setting (optional - remove in production)
-      SCHEMA_REGISTRY_DEBUG: "false"
-      
     networks:
       - replication-network
     healthcheck:
@@ -276,23 +174,9 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
-      start_period: 120s  # CRITICAL: Wait 2 minutes before checking health
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '0.5'
-        reservations:
-          memory: 512M
+      start_period: 120s
     restart: unless-stopped
 
-  # ============================================
-  # Kafka Connect (Confluent + Debezium plugins)
-  # ============================================
-  # ============================================
-  # Kafka Connect (Debezium 3.3 + Confluent Avro Converter)
-  # WITH CONSOLE LOGGING ENABLED
-  # ============================================
   kafka-connect:
     build:
       context: .
@@ -303,65 +187,26 @@ services:
     depends_on:
       kafka-1:
         condition: service_healthy
-      kafka-2:
-        condition: service_healthy
-      kafka-3:
-        condition: service_healthy
       schema-registry:
-        condition: service_healthy
-      mysql:
         condition: service_healthy
     ports:
       - "8083:8083"    # Kafka Connect REST API
       - "8778:8778"    # Jolokia JMX HTTP endpoint
     environment:
-      # Kafka Bootstrap Servers
       BOOTSTRAP_SERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
-      
-      # Connect Cluster Configuration
       GROUP_ID: connect-cluster
       CONFIG_STORAGE_TOPIC: connect-configs
       OFFSET_STORAGE_TOPIC: connect-offsets
       STATUS_STORAGE_TOPIC: connect-statuses
-      
-      # Replication Factors
       CONFIG_STORAGE_REPLICATION_FACTOR: 3
       OFFSET_STORAGE_REPLICATION_FACTOR: 3
       STATUS_STORAGE_REPLICATION_FACTOR: 3
-      
-      # Key/Value Converters
       KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      
-      # Internal Converters
-      INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      
-      # Performance Tuning
-      CONNECT_TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS: 30000
-      CONNECT_PRODUCER_BATCH_SIZE: 32768
-      CONNECT_PRODUCER_LINGER_MS: 10
-      CONNECT_PRODUCER_BUFFER_MEMORY: 67108864
-      CONNECT_PRODUCER_MAX_REQUEST_SIZE: 10485760
-      CONNECT_PRODUCER_COMPRESSION_TYPE: lz4
-      CONNECT_CONSUMER_MAX_POLL_RECORDS: 1000
-      CONNECT_CONSUMER_FETCH_MIN_BYTES: 1048576
-      
-      # JVM Heap Settings (configurable via .env.docker)
-      KAFKA_HEAP_OPTS: "${KAFKA_CONNECT_HEAP_OPTS:--Xms4G -Xmx4G}"
-      
-      # ============================================
-      # CRITICAL LOGGING CONFIGURATION
-      # Force all logs to stdout/stderr for Docker (Log4j2 format)
-      # ============================================
-      KAFKA_LOG4J_OPTS: "-Dlog4j2.configurationFile=file:/kafka/config/log4j2.properties"
-      CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
-      
-      # Additional Debezium settings
+      KAFKA_HEAP_OPTS: "-Xms4G -Xmx4G"
       CONNECT_PLUGIN_PATH: /kafka/connect
-    
     # ============================================
     # VOLUMES - Mount Jolokia JAR from host
     # ============================================
@@ -378,22 +223,14 @@ services:
         max-file: "5"
         labels: "service=kafka-connect,component=debezium"
 
+    networks:
+      - replication-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/"]
       interval: 10s
       timeout: 10s
       retries: 20
       start_period: 120s
-    
-    networks:
-      - replication-network
-    deploy:
-      resources:
-        limits:
-          memory: 6G
-          cpus: '2'
-        reservations:
-          memory: 4G
     restart: unless-stopped
 
   # ============================================
@@ -522,24 +359,12 @@ services:
     restart: unless-stopped
 
 
+=======
+>>>>>>> 00ad81b (Commit from github)
 volumes:
-  mysql-data:
-    driver: local
-  redis-data:
-    driver: local
   kafka1-data:
-    driver: local
   kafka2-data:
-    driver: local
   kafka3-data:
-    driver: local
-  django-static:
-    driver: local
-  django-media:
-    driver: local
-  celery-beat-schedule:
-    driver: local
-
 
 networks:
   replication-network:
