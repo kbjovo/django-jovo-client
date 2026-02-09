@@ -1,0 +1,83 @@
+<!-- Delete Connector Modal -->
+<div x-show="deleteModal.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4"
+     @keydown.escape.window="deleteModal.open = false; deleteModal.confirmed = false">
+  <div x-show="deleteModal.open" x-transition.opacity class="fixed inset-0 bg-black/50"
+       @click="deleteModal.open = false; deleteModal.confirmed = false"></div>
+
+  <div x-show="deleteModal.open" x-transition @click.stop
+       class="relative w-full max-w-xs bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden">
+
+    <!-- Header -->
+    <div class="bg-red-600 px-5 py-3 flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-semibold text-white">Delete Connector</h3>
+        <p class="text-red-100 text-xs" x-text="deleteModal.name"></p>
+      </div>
+      <span class="text-xs text-red-100" x-text="deleteModal.tables + ' tables'"></span>
+    </div>
+
+    <form :action="'/connector/' + deleteModal.pk + '/delete/'" method="POST">
+      {% csrf_token %}
+      <input type="hidden" name="next" value="database">
+      <div class="px-5 py-4 space-y-3 text-xs">
+
+        <!-- Always happens -->
+        <div class="space-y-1.5">
+          <p class="font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">Always</p>
+          <label class="flex items-center gap-2 text-gray-400 dark:text-gray-500">
+            <input type="checkbox" checked disabled class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-green-600">
+            Delete source connector
+          </label>
+          <label class="flex items-center gap-2 text-gray-400 dark:text-gray-500">
+            <input type="checkbox" checked disabled class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-green-600">
+            Update / remove sink connector
+          </label>
+          <label class="flex items-center gap-2 text-gray-400 dark:text-gray-500">
+            <input type="checkbox" checked disabled class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-green-600">
+            Stop CDC replication
+          </label>
+        </div>
+
+        <hr class="border-gray-200 dark:border-gray-700">
+
+        <!-- Optional -->
+        <div class="space-y-1.5">
+          <p class="font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">Optional</p>
+          <label class="flex items-center gap-2 text-gray-700 dark:text-gray-300 cursor-pointer">
+            <input type="checkbox" name="delete_topics" value="1"
+                   class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-red-600 focus:ring-red-500">
+            Delete Kafka topics
+          </label>
+          <label class="flex items-center gap-2 text-gray-700 dark:text-gray-300 cursor-pointer">
+            <input type="checkbox" name="drop_tables" value="1"
+                   class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-red-600 focus:ring-red-500">
+            Drop target tables
+          </label>
+        </div>
+
+        <hr class="border-gray-200 dark:border-gray-700">
+
+        <!-- Confirm -->
+        <label class="flex items-center gap-2 text-gray-900 dark:text-white cursor-pointer">
+          <input type="checkbox" x-model="deleteModal.confirmed"
+                 class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-red-600 focus:ring-red-500">
+          I understand this cannot be undone
+        </label>
+      </div>
+
+      <!-- Footer -->
+      <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 flex justify-end gap-2">
+        <button type="button"
+                @click="deleteModal.open = false; deleteModal.confirmed = false"
+                class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+          Cancel
+        </button>
+        <button type="submit"
+                :disabled="!deleteModal.confirmed"
+                class="px-3 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+          Delete
+        </button>
+      </div>
+    </form>
+  </div>
+</div>

@@ -614,7 +614,7 @@ def connector_create_debezium(request, config_pk):
                 replication_config.last_error_message = message
                 replication_config.save()
 
-            return redirect('connector_list', database_pk=database.id)
+            return redirect('connector_monitor', config_pk=replication_config.pk)
 
         except Exception as e:
             logger.error(f"Error creating batch connector: {e}", exc_info=True)
@@ -622,7 +622,7 @@ def connector_create_debezium(request, config_pk):
             replication_config.status = 'error'
             replication_config.last_error_message = str(e)
             replication_config.save()
-            return redirect('connector_list', database_pk=database.id)
+            return redirect('connector_monitor', config_pk=replication_config.pk)
 
     # CDC mode - continue with existing logic
     try:
@@ -758,7 +758,7 @@ def connector_create_debezium(request, config_pk):
         except Exception as e:
             logger.warning(f"Could not schedule FK task: {e}")
 
-        return redirect('connector_list', database_pk=database.id)
+        return redirect('connector_monitor', config_pk=replication_config.pk)
 
     except Exception as e:
         logger.error(f"Error creating connectors: {e}", exc_info=True)
@@ -908,16 +908,26 @@ def connector_delete(request, config_pk):
         try:
             from client.replication.orchestrator import ReplicationOrchestrator
 
-            # Always delete topics and target tables
-            # Use orchestrator for proper cleanup
+            # Read optional cleanup flags from modal checkboxes
+            delete_topics = bool(request.POST.get('delete_topics'))
+            drop_tables = bool(request.POST.get('drop_tables'))
+
             orchestrator = ReplicationOrchestrator(replication_config)
-            success, message = orchestrator.delete_replication(delete_topics=True)
+            success, message = orchestrator.delete_replication(
+                delete_topics=delete_topics,
+                drop_tables=drop_tables,
+            )
 
             if success:
+                extras = []
+                if delete_topics:
+                    extras.append("topics deleted")
+                if drop_tables:
+                    extras.append("target tables dropped")
+                suffix = f" ({', '.join(extras)})" if extras else ""
                 messages.success(
                     request,
-                    f"Connector {replication_config.connector_name} deleted successfully "
-                    "(Topics and target tables deleted)"
+                    f"Connector {replication_config.connector_name} deleted successfully{suffix}"
                 )
             else:
                 messages.error(request, f"Error deleting connector: {message}")
@@ -948,5 +958,70 @@ def connector_delete(request, config_pk):
     return render(request, 'client/connectors/connector_delete.html', context)
 
 
+# ========================================
+# Connector Monitor (Real-time Status + Snapshot Progress)
+# ========================================
+
+def connector_monitor(request, config_pk):
+    """
+    Real-time monitoring page for a connector.
+    Shows connector status, snapshot progress via Jolokia, and table mappings.
+    """
+    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+    database = replication_config.client_database
+    client = database.client
+
+    if not replication_config.connector_name:
+        messages.info(request, 'No connector created yet for this configuration.')
+        return redirect('connector_list', database_pk=database.id)
+
+    try:
+        from client.replication.orchestrator import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(replication_config)
+        unified_status = orchestrator.get_unified_status()
+
+        source_state = unified_status['source_connector']['state']
+        sink_state = unified_status['sink_connector']['state']
+        source_exists = source_state not in ('NOT_FOUND', 'ERROR')
+        sink_exists = sink_state not in ('NOT_FOUND', 'ERROR', 'NOT_CONFIGURED')
+
+        context = {
+            'replication_config': replication_config,
+            'database': database,
+            'client': client,
+            'unified_status': unified_status,
+            'source_exists': source_exists,
+            'sink_exists': sink_exists,
+            'source_state': source_state,
+            'sink_state': sink_state,
+            'snapshot': unified_status.get('snapshot'),
+            'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True),
+        }
+
+        return render(request, 'client/connectors/connector_monitor.html', context)
+
+    except Exception as e:
+        logger.error(f'Failed to get connector status: {e}', exc_info=True)
+        messages.error(request, f'Failed to get connector status: {str(e)}')
+        return redirect('connector_list', database_pk=database.id)
 
 
+def connector_status_api(request, config_pk):
+    """
+    AJAX endpoint returning unified status JSON including snapshot progress.
+    Polled by the monitor page for live updates.
+    """
+    try:
+        replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+
+        from client.replication.orchestrator import ReplicationOrchestrator
+
+        orchestrator = ReplicationOrchestrator(replication_config)
+        unified_status = orchestrator.get_unified_status()
+
+        return JsonResponse({'success': True, 'status': unified_status})
+
+    except Exception as e:
+        logger.error(f'Failed to get connector status: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)

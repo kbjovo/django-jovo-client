@@ -47,6 +47,8 @@ from .views.connector_views import (
     connector_create_debezium,
     connector_edit_tables,
     connector_delete,
+    connector_monitor,
+    connector_status_api,
 )
 
 
@@ -170,6 +172,16 @@ urlpatterns = [
     path('connector/<int:config_pk>/delete/',
          connector_delete,
          name='connector_delete'),
+
+    # Monitor connector (real-time status + snapshot progress)
+    path('connector/<int:config_pk>/monitor/',
+         connector_monitor,
+         name='connector_monitor'),
+
+    # AJAX: Connector status JSON (polled by monitor page)
+    path('connector/<int:config_pk>/status/',
+         connector_status_api,
+         name='connector_status_api'),
 
     # ==========================================
     # AJAX Endpoints

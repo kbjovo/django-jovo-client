@@ -2,6 +2,7 @@
 {% load static %}
 
 {% block content %}
+<div x-data="{ deleteModal: { open: false, pk: null, name: '', tables: 0, confirmed: false } }">
 
 <!-- Page Header -->
 <div class="flex justify-between items-center mb-6">
@@ -26,31 +27,19 @@
     </div>
 </div>
 
-<!-- Health Summary Card -->
-<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ health_summary.total_source_connectors }}</div>
-        <p class="text-sm text-gray-600 dark:text-gray-400">Source Connectors</p>
+<!-- Summary Cards -->
+<div class="flex gap-4 mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-5 py-3 flex items-center gap-3">
+        <span class="text-2xl font-bold text-gray-900 dark:text-white">{{ health_summary.total_source_connectors }}</span>
+        <span class="text-sm text-gray-600 dark:text-gray-400">Source Connectors</span>
     </div>
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div class="text-2xl font-bold text-green-600 dark:text-green-400">{{ health_summary.running_source_connectors }}</div>
-        <p class="text-sm text-gray-600 dark:text-gray-400">Running</p>
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-5 py-3 flex items-center gap-3">
+        <span class="text-2xl font-bold text-green-600 dark:text-green-400">{{ health_summary.running_source_connectors }}</span>
+        <span class="text-sm text-gray-600 dark:text-gray-400">Running</span>
     </div>
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ health_summary.total_tables }}</div>
-        <p class="text-sm text-gray-600 dark:text-gray-400">Tables Replicated</p>
-    </div>
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        {% if health_summary.health_status == 'healthy' %}
-            <div class="text-2xl font-bold text-green-600 dark:text-green-400">Healthy</div>
-        {% elif health_summary.health_status == 'degraded' %}
-            <div class="text-2xl font-bold text-red-600 dark:text-red-400">Degraded</div>
-        {% elif health_summary.health_status == 'partial' %}
-            <div class="text-2xl font-bold text-yellow-600 dark:text-yellow-400">Partial</div>
-        {% else %}
-            <div class="text-2xl font-bold text-gray-500 dark:text-gray-400">-</div>
-        {% endif %}
-        <p class="text-sm text-gray-600 dark:text-gray-400">Status</p>
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-5 py-3 flex items-center gap-3">
+        <span class="text-2xl font-bold text-gray-900 dark:text-white">{{ health_summary.total_tables }}</span>
+        <span class="text-sm text-gray-600 dark:text-gray-400">Tables Replicated</span>
     </div>
 </div>
 
@@ -123,14 +112,18 @@
                             </svg>
                             <span x-text="expanded ? 'Hide Tables' : 'Show Tables'">Show Tables</span>
                         </button>
+                        <a href="{% url 'connector_monitor' config.pk %}"
+                           class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition">
+                            Monitor
+                        </a>
                         <a href="{% url 'connector_edit_tables' config.pk %}"
                            class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
                             Edit
                         </a>
-                        <a href="{% url 'connector_delete' config.pk %}"
-                           class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition">
+                        <button @click="deleteModal = { open: true, pk: {{ config.pk }}, name: '{{ config.connector_name }}', tables: {{ config.table_count }}, confirmed: false }"
+                                class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition">
                             Delete
-                        </a>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -231,5 +224,8 @@
     </div>
 </div>
 {% endif %}
+
+{% include "client/connectors/_delete_modal.html" %}
+</div>
 
 {% endblock %}

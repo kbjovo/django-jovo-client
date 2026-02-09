@@ -2,12 +2,24 @@
 <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
 
 <script>
-    // Initialize Notyf
+    // Initialize Notyf with custom types for Django message tags
     const notyf = new Notyf({
         duration: 3000,
         position: { x: 'right', y: 'top' },
         dismissible: true,
-        ripple: true
+        ripple: true,
+        types: [
+            {
+                type: 'info',
+                background: '#3b82f6',
+                icon: { className: 'notyf__icon--info', tagName: 'i' }
+            },
+            {
+                type: 'warning',
+                background: '#f59e0b',
+                icon: { className: 'notyf__icon--warning', tagName: 'i' }
+            }
+        ]
     });
 
     // Global toast helper
@@ -19,12 +31,16 @@
     };
     
 
+    // Show Django messages framework toasts (works on any page after redirect)
+    {% for message in messages %}
+    showToast('{{ message.tags|default:"info" }}', '{{ message|escapejs }}');
+    {% endfor %}
+
     // Global event listeners
     document.body.addEventListener('clientCreated', () => notyf.success('Client created successfully!'));
     document.body.addEventListener('clientUpdated', () => notyf.success('Client updated successfully!'));
     document.body.addEventListener('clientDeleted', () => notyf.success('Client deleted successfully!'));
     document.body.addEventListener('formError', () => notyf.error('Please fix the errors in the form'));
-
 
 
 

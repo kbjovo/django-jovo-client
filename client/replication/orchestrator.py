@@ -14,6 +14,7 @@ from django.utils import timezone
 from django.conf import settings
 
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+from jovoclient.utils.debezium.jolokia_client import JolokiaClient
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager, format_topic_name
 from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
@@ -43,6 +44,7 @@ class ReplicationOrchestrator:
         self.validator = ReplicationValidator(replication_config)
         self.connector_manager = DebeziumConnectorManager()
         self.topic_manager = KafkaTopicManager()
+        self.jolokia = JolokiaClient()
 
     # ==========================================
     # Utility Methods
@@ -320,12 +322,13 @@ class ReplicationOrchestrator:
 
         return True, "Replication restarted successfully"
 
-    def delete_replication(self, delete_topics: bool = False) -> Tuple[bool, str]:
+    def delete_replication(self, delete_topics: bool = False, drop_tables: bool = False) -> Tuple[bool, str]:
         """
         Delete replication completely.
 
         Args:
             delete_topics: If True, permanently delete Kafka topics
+            drop_tables: If True, drop target database tables
 
         Returns:
             (success, message)
@@ -419,7 +422,7 @@ class ReplicationOrchestrator:
                     self._log_info("ℹ️ No other source connectors - deleting sink connector")
                     self._delete_sink_connector(sink_connector_name)
 
-            # Optionally delete topics and target tables
+            # Optionally delete Kafka topics
             if delete_topics:
                 self._log_info("Deleting Kafka topics...")
                 success, message = self.delete_topics()
@@ -428,7 +431,8 @@ class ReplicationOrchestrator:
                 else:
                     self._log_warning(f"⚠️ {message}")
 
-                # Also drop target database tables
+            # Optionally drop target database tables
+            if drop_tables:
                 self._log_info("Dropping target database tables...")
                 from client.models.database import ClientDatabase
                 client = self.config.client_database.client
@@ -1355,6 +1359,9 @@ class ReplicationOrchestrator:
 
             self._log_info(f"✓ Signal sent via {method} - ID: {signal_id}")
 
+            # Verify incremental snapshot started via Jolokia
+            self._verify_incremental_snapshot_started(signal_id)
+
             # ========================================
             # STEP 5: Restart sink connector
             # ========================================
@@ -1420,6 +1427,47 @@ class ReplicationOrchestrator:
             return False, error_msg
 
     # ==========================================
+    # Jolokia Snapshot Verification
+    # ==========================================
+
+    def _verify_incremental_snapshot_started(
+        self, signal_id: str, grace_seconds: int = 10, polls: int = 3
+    ):
+        """Best-effort check that an incremental snapshot actually started.
+
+        Polls Jolokia a few times after the signal is sent. Logs a
+        confirmation or warning but never fails the overall operation —
+        the signal may simply be delayed or Jolokia may be unavailable.
+        """
+        import time
+
+        db_type = self.config.client_database.db_type
+        topic_prefix = self.config.kafka_topic_prefix
+
+        # Give Debezium a moment to pick up the signal
+        time.sleep(grace_seconds)
+
+        for attempt in range(polls):
+            progress = self.jolokia.get_incremental_snapshot_progress(
+                db_type, topic_prefix
+            )
+            if progress and progress.get('running'):
+                tables = progress.get('total_tables', '?')
+                self._log_info(
+                    f"  Incremental snapshot confirmed running "
+                    f"(signal {signal_id}): {tables} tables queued"
+                )
+                return
+
+            if attempt < polls - 1:
+                time.sleep(5)
+
+        self._log_warning(
+            f"  Could not confirm incremental snapshot via Jolokia "
+            f"(signal {signal_id}) — may still be starting"
+        )
+
+    # ==========================================
     # Status and Health
     # ==========================================
 
@@ -1428,11 +1476,13 @@ class ReplicationOrchestrator:
         connector_status = self._get_connector_status()
         sink_status = self._get_sink_connector_status()
         overall_health = self._calculate_overall_health(connector_status, sink_status)
+        snapshot_progress = self._get_snapshot_progress()
 
         return {
             'overall': overall_health,
             'source_connector': connector_status,
             'sink_connector': sink_status,
+            'snapshot': snapshot_progress,
             'config': {
                 'status': self.config.status,
                 'is_active': self.config.is_active,
@@ -1448,7 +1498,32 @@ class ReplicationOrchestrator:
                 'tables_enabled': self.config.table_mappings.filter(is_enabled=True).count(),
                 'last_sync_at': self.config.last_sync_at.isoformat() if self.config.last_sync_at else None,
             },
+            'batch_schedule': self._get_batch_schedule() if self.config.processing_mode == 'batch' else None,
             'timestamp': timezone.now().isoformat(),
+        }
+
+    def _get_snapshot_progress(self) -> Optional[Dict[str, Any]]:
+        """Get current snapshot progress via Jolokia.
+
+        Returns a normalised progress dict if a snapshot (initial or
+        incremental) is active, or None if nothing is running / Jolokia
+        is unreachable.
+        """
+        try:
+            db_type = self.config.client_database.db_type
+            topic_prefix = self.config.kafka_topic_prefix
+            return self.jolokia.get_active_snapshot_progress(db_type, topic_prefix)
+        except Exception:
+            return None
+
+    def _get_batch_schedule(self) -> Dict[str, Any]:
+        """Get batch schedule info for the monitor page."""
+        return {
+            'next_batch_run': self.config.next_batch_run.isoformat() if self.config.next_batch_run else None,
+            'last_batch_run': self.config.last_batch_run.isoformat() if self.config.last_batch_run else None,
+            'batch_interval': self.config.batch_interval,
+            'batch_interval_display': self.config.get_batch_interval_display() if self.config.batch_interval else None,
+            'batch_max_catchup_minutes': self.config.batch_max_catchup_minutes,
         }
 
     def _get_connector_status(self) -> Dict[str, Any]:
@@ -1773,7 +1848,8 @@ class ReplicationOrchestrator:
         """
         Wait for initial snapshot to complete before transitioning to streaming.
 
-        Monitors connector status until snapshot is complete or timeout.
+        Uses Jolokia JMX metrics for real progress tracking when available,
+        with a fallback to the Kafka Connect REST API.
 
         Args:
             max_wait_minutes: Maximum time to wait for snapshot (default 60 min)
@@ -1788,8 +1864,14 @@ class ReplicationOrchestrator:
         max_wait_seconds = max_wait_minutes * 60
         poll_interval = 10  # Check every 10 seconds
         elapsed = 0
+        jolokia_available = True  # Assume available; disable on first failure
+        db_type = self.config.client_database.db_type
+        topic_prefix = self.config.kafka_topic_prefix
 
         while elapsed < max_wait_seconds:
+            # ---------------------------------------------------
+            # 1. Check connector health via REST API
+            # ---------------------------------------------------
             try:
                 exists, status_data = self.connector_manager.get_connector_status(
                     self.config.connector_name
@@ -1801,11 +1883,9 @@ class ReplicationOrchestrator:
                 if status_data:
                     connector_state = status_data.get('connector', {}).get('state', '')
 
-                    # Check if connector failed
                     if connector_state == 'FAILED':
                         return False, "Connector failed during snapshot"
 
-                    # Check task states for snapshot status
                     tasks = status_data.get('tasks', [])
                     if tasks:
                         task_state = tasks[0].get('state', '')
@@ -1813,21 +1893,69 @@ class ReplicationOrchestrator:
                             trace = tasks[0].get('trace', 'Unknown error')
                             return False, f"Connector task failed: {trace[:200]}"
 
-                        # Connector is running - check if in streaming mode
-                        # Debezium moves to streaming after snapshot completes
-                        if connector_state == 'RUNNING' and task_state == 'RUNNING':
-                            # Log progress
-                            self._log_info(f"  Snapshot in progress... ({int(elapsed)}s elapsed)")
-
-                            # After initial delay, assume streaming if still running
-                            # Debezium doesn't expose explicit "snapshot complete" status via REST API
-                            # We wait a minimum time then check if connector is stable
-                            if elapsed >= 30:  # Minimum 30 seconds
-                                self._log_info("  Connector is running and stable, assuming snapshot complete")
-                                return True, "Snapshot complete (connector streaming)"
-
             except Exception as e:
-                self._log_warning(f"  Error checking status: {e}")
+                self._log_warning(f"  Error checking connector status: {e}")
+
+            # ---------------------------------------------------
+            # 2. Check snapshot progress via Jolokia
+            # ---------------------------------------------------
+            if jolokia_available:
+                progress = self.jolokia.get_snapshot_progress(db_type, topic_prefix)
+
+                if progress is None and elapsed == 0:
+                    # First poll – MBean may not be registered yet; that's normal.
+                    self._log_info("  Waiting for snapshot MBean to register...")
+
+                elif progress is None and elapsed > 0:
+                    # Jolokia was working but now returned None – disable.
+                    self._log_warning(
+                        "Jolokia unavailable, falling back to REST API status checks"
+                    )
+                    jolokia_available = False
+
+                elif progress is not None:
+                    if progress['aborted']:
+                        return False, "Snapshot was aborted"
+
+                    if progress['completed'] and not progress['running']:
+                        total = progress['total_tables']
+                        rows = progress['total_rows_scanned']
+                        dur = progress['duration_seconds']
+                        msg = (
+                            f"Snapshot complete: {total} tables, "
+                            f"{rows:,} rows in {dur}s"
+                        )
+                        self._log_info(f"  {msg}")
+                        return True, msg
+
+                    if progress['running']:
+                        done = progress['completed_tables']
+                        total = progress['total_tables']
+                        rows = progress['total_rows_scanned']
+                        cur = progress['current_table'] or '...'
+                        self._log_info(
+                            f"  Snapshot in progress: {done}/{total} tables, "
+                            f"{rows:,} rows scanned, "
+                            f"current: {cur} ({int(elapsed)}s elapsed)"
+                        )
+
+                    # Keep polling – snapshot still running.
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                    continue
+
+            # ---------------------------------------------------
+            # 3. Fallback: REST-only heuristic (Jolokia unavailable)
+            # ---------------------------------------------------
+            # Streaming MBean appearing means the snapshot finished and
+            # Debezium transitioned to CDC streaming.
+            if not jolokia_available:
+                streaming = self.jolokia.get_streaming_metrics(db_type, topic_prefix)
+                if streaming is not None:
+                    self._log_info("  Streaming MBean detected – snapshot complete")
+                    return True, "Snapshot complete (streaming MBean detected)"
+
+                self._log_info(f"  Snapshot in progress... ({int(elapsed)}s elapsed)")
 
             time.sleep(poll_interval)
             elapsed += poll_interval

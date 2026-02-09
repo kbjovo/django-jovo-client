@@ -1,0 +1,494 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Monitor - {{ replication_config.connector_name }}{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+
+  <!-- Header -->
+  <div class="flex justify-between items-center mb-6">
+    <div>
+      <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Connector Monitor</h2>
+      <p class="text-gray-600 dark:text-gray-400 mt-1">
+        <span class="font-mono text-sm">{{ replication_config.connector_name }}</span>
+        &middot; {{ client.name }} &middot; {{ database.connection_name }}
+      </p>
+    </div>
+    <div class="flex gap-2">
+      <a href="{% url 'connector_list' database.pk %}"
+         class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition text-sm">
+        &larr; Back to Connectors
+      </a>
+    </div>
+  </div>
+
+  <!-- Status Cards -->
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+    <!-- Source Connector -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Source Connector</p>
+      <p id="source-state" class="text-2xl font-semibold mt-1 {% if source_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif source_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
+        {{ source_state }}
+      </p>
+    </div>
+
+    <!-- Sink Connector -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Sink Connector</p>
+      <p id="sink-state" class="text-2xl font-semibold mt-1 {% if sink_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif sink_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
+        {{ sink_state }}
+      </p>
+    </div>
+
+    <!-- Overall Health -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Overall Health</p>
+      <p id="overall-health" class="text-2xl font-semibold mt-1 {% if unified_status.overall == 'healthy' %}text-green-600 dark:text-green-400{% elif unified_status.overall == 'degraded' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
+        {{ unified_status.overall|title }}
+      </p>
+    </div>
+
+    <!-- Tables -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Tables</p>
+      <p class="text-2xl font-semibold mt-1 text-gray-900 dark:text-white">
+        {{ enabled_table_mappings.count }}
+      </p>
+    </div>
+  </div>
+
+  <!-- Snapshot Progress Panel (shown/hidden by JS) -->
+  <div id="snapshot-panel" class="{% if not snapshot %}hidden{% endif %} mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
+        <div id="snapshot-spinner" class="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
+          <span id="snapshot-title">
+            {% if snapshot %}
+              {% if snapshot.type == 'initial' %}Initial Snapshot{% else %}Incremental Snapshot{% endif %}
+            {% else %}
+              Snapshot
+            {% endif %}
+          </span>
+        </h3>
+        <span id="snapshot-badge" class="ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+          {% if snapshot.running %}bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400
+          {% elif snapshot.completed %}bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400
+          {% else %}bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400{% endif %}">
+          {% if snapshot.running %}Running{% elif snapshot.completed %}Complete{% else %}--{% endif %}
+        </span>
+      </div>
+      <div class="p-6">
+        <!-- Progress Bar -->
+        <div class="mb-4">
+          <div class="flex justify-between text-sm text-gray-600 dark:text-gray-400 mb-1">
+            <span>Tables: <span id="snap-done">{{ snapshot.completed_tables|default:"0" }}</span> / <span id="snap-total">{{ snapshot.total_tables|default:"0" }}</span></span>
+            <span id="snap-pct">
+              {% if snapshot and snapshot.total_tables %}
+                {{ snapshot.completed_tables|default:0 }}%
+              {% else %}
+                0%
+              {% endif %}
+            </span>
+          </div>
+          <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3">
+            <div id="snap-bar" class="bg-blue-600 h-3 rounded-full transition-all duration-500" style="width: {% if snapshot and snapshot.total_tables %}{% widthratio snapshot.completed_tables snapshot.total_tables 100 %}%{% else %}0%{% endif %}"></div>
+          </div>
+        </div>
+
+        <!-- Snapshot Details Grid -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Rows Scanned</p>
+            <p id="snap-rows" class="font-semibold text-gray-900 dark:text-white">{{ snapshot.total_rows_scanned|default:"0" }}</p>
+          </div>
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Duration</p>
+            <p id="snap-duration" class="font-semibold text-gray-900 dark:text-white">{{ snapshot.duration_seconds|default:"0" }}s</p>
+          </div>
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Current Table</p>
+            <p id="snap-current" class="font-semibold text-gray-900 dark:text-white font-mono truncate" title="{{ snapshot.current_table|default:'' }}">{{ snapshot.current_table|default:"--" }}</p>
+          </div>
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Remaining</p>
+            <p id="snap-remaining" class="font-semibold text-gray-900 dark:text-white"><span id="snap-remain-val">{{ snapshot.remaining_tables|default:"0" }}</span> tables</p>
+          </div>
+        </div>
+
+        <!-- Per-table rows scanned (collapsible) -->
+        <details id="snap-rows-detail" class="mt-4 {% if not snapshot.rows_scanned %}hidden{% endif %}">
+          <summary class="text-sm text-gray-500 dark:text-gray-400 cursor-pointer hover:text-gray-700 dark:hover:text-gray-300">Rows per table</summary>
+          <div id="snap-rows-table" class="mt-2 space-y-1 text-sm font-mono">
+            {% if snapshot.rows_scanned %}
+              {% for table, count in snapshot.rows_scanned.items %}
+                <div class="flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded">
+                  <span class="text-gray-700 dark:text-gray-300 truncate">{{ table }}</span>
+                  <span class="text-gray-900 dark:text-white font-semibold">{{ count }}</span>
+                </div>
+              {% endfor %}
+            {% endif %}
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Schedule Panel (only for batch connectors) -->
+  {% if replication_config.processing_mode == 'batch' %}
+  <div id="batch-panel" class="mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
+        <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+        </svg>
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Batch Schedule</h3>
+        <span id="batch-status-badge" class="ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400">
+          Scheduled
+        </span>
+      </div>
+      <div class="p-6">
+        <!-- Countdown / Syncing display -->
+        <div class="text-center mb-5">
+          <p id="batch-countdown-label" class="text-sm text-gray-500 dark:text-gray-400 mb-1">Next sync in</p>
+          <p id="batch-countdown" class="text-3xl font-bold text-purple-600 dark:text-purple-400 font-mono">--:--:--</p>
+        </div>
+
+        <!-- Schedule details grid -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Sync Interval</p>
+            <p id="batch-interval" class="font-semibold text-gray-900 dark:text-white">{{ replication_config.get_batch_interval_display|default:"--" }}</p>
+          </div>
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Max Duration</p>
+            <p id="batch-max-duration" class="font-semibold text-gray-900 dark:text-white">{{ replication_config.batch_max_catchup_minutes }} min</p>
+          </div>
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Last Synced</p>
+            <p id="batch-last-run" class="font-semibold text-gray-900 dark:text-white">
+              {% if replication_config.last_batch_run %}
+                {{ replication_config.last_batch_run|timesince }} ago
+              {% else %}
+                Never
+              {% endif %}
+            </p>
+          </div>
+          <div>
+            <p class="text-gray-500 dark:text-gray-400">Next Run</p>
+            <p id="batch-next-run" class="font-semibold text-gray-900 dark:text-white">
+              {% if replication_config.next_batch_run %}
+                {{ replication_config.next_batch_run|date:"M d, g:i A" }}
+              {% else %}
+                --
+              {% endif %}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Connector Information -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Connector Info</h3>
+      </div>
+      <div class="p-6 space-y-3 text-sm">
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Connector Name</span>
+          <span class="font-mono text-gray-900 dark:text-white">{{ replication_config.connector_name }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Version</span>
+          <span class="text-gray-900 dark:text-white">v{{ replication_config.connector_version }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Topic Prefix</span>
+          <span class="font-mono text-gray-900 dark:text-white">{{ replication_config.kafka_topic_prefix }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Processing Mode</span>
+          <span class="text-gray-900 dark:text-white">{{ replication_config.processing_mode|upper }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Snapshot Mode</span>
+          <span class="text-gray-900 dark:text-white">{{ replication_config.snapshot_mode }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Last Sync</span>
+          <span class="text-gray-900 dark:text-white">{{ replication_config.last_sync_at|date:"M d, Y g:i A"|default:"Never" }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Statistics -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Statistics</h3>
+      </div>
+      <div class="p-6 space-y-3 text-sm">
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Total Rows Synced</span>
+          <span id="stat-rows" class="font-semibold text-gray-900 dark:text-white">{{ unified_status.statistics.total_rows_synced|default:"0" }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Tables Enabled</span>
+          <span class="text-gray-900 dark:text-white">{{ unified_status.statistics.tables_enabled }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Sink Connector</span>
+          <span class="font-mono text-gray-900 dark:text-white">{{ replication_config.sink_connector_name|default:"--" }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Database Type</span>
+          <span class="text-gray-900 dark:text-white">{{ database.db_type|upper }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Host</span>
+          <span class="font-mono text-gray-900 dark:text-white">{{ database.host }}:{{ database.port }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+</div>
+
+<!-- AJAX Polling Script -->
+<script>
+(function() {
+  const STATUS_URL = '{% url "connector_status_api" replication_config.pk %}';
+  const POLL_INTERVAL = 5000;
+  const IDLE_INTERVAL = 30000;
+  let currentInterval = POLL_INTERVAL;
+  let timer = null;
+
+  // Batch schedule state
+  let batchNextRun = null;   // Date object
+  let batchLastRun = null;   // Date object
+  let batchSyncing = false;  // true when source connector is RUNNING in batch mode
+  let batchSyncStart = null; // Date when sync started
+  let countdownTimer = null;
+  const isBatch = '{{ replication_config.processing_mode }}' === 'batch';
+
+  function formatNumber(n) {
+    return Number(n || 0).toLocaleString();
+  }
+
+  function stateColor(state) {
+    if (state === 'RUNNING') return 'text-green-600 dark:text-green-400';
+    if (state === 'PAUSED') return 'text-yellow-600 dark:text-yellow-400';
+    return 'text-red-600 dark:text-red-400';
+  }
+
+  function healthColor(h) {
+    if (h === 'healthy') return 'text-green-600 dark:text-green-400';
+    if (h === 'degraded') return 'text-yellow-600 dark:text-yellow-400';
+    return 'text-red-600 dark:text-red-400';
+  }
+
+  function formatDuration(totalSeconds) {
+    if (totalSeconds <= 0) return '00:00';
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    const pad = v => String(v).padStart(2, '0');
+    return h > 0 ? pad(h) + ':' + pad(m) + ':' + pad(s) : pad(m) + ':' + pad(s);
+  }
+
+  function timeAgo(date) {
+    if (!date) return 'Never';
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 60) return seconds + 's ago';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + 'm ago';
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + 'h ' + (minutes % 60) + 'm ago';
+    const days = Math.floor(hours / 24);
+    return days + 'd ago';
+  }
+
+  function updateBatchCountdown() {
+    const label = document.getElementById('batch-countdown-label');
+    const display = document.getElementById('batch-countdown');
+    const badge = document.getElementById('batch-status-badge');
+    if (!label || !display) return;
+
+    if (batchSyncing) {
+      // Show elapsed sync time
+      label.textContent = 'Syncing...';
+      const elapsed = Math.floor((Date.now() - (batchSyncStart || Date.now())) / 1000);
+      display.textContent = formatDuration(elapsed);
+      display.className = 'text-3xl font-bold text-green-600 dark:text-green-400 font-mono';
+      badge.textContent = 'Syncing';
+      badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+    } else if (batchNextRun) {
+      // Show countdown to next run
+      const remaining = Math.max(0, Math.floor((batchNextRun.getTime() - Date.now()) / 1000));
+      label.textContent = 'Next sync in';
+      display.textContent = formatDuration(remaining);
+      display.className = 'text-3xl font-bold text-purple-600 dark:text-purple-400 font-mono';
+      badge.textContent = 'Scheduled';
+      badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400';
+
+      if (remaining <= 0) {
+        display.textContent = '00:00';
+        label.textContent = 'Starting soon...';
+      }
+    } else {
+      label.textContent = 'Next sync';
+      display.textContent = '--:--';
+      display.className = 'text-3xl font-bold text-gray-400 dark:text-gray-500 font-mono';
+      badge.textContent = 'No schedule';
+      badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400';
+    }
+
+    // Update last synced (keeps ticking)
+    const lastRunEl = document.getElementById('batch-last-run');
+    if (lastRunEl) lastRunEl.textContent = timeAgo(batchLastRun);
+  }
+
+  function updateBatchSchedule(s) {
+    const batch = s.batch_schedule;
+    if (!batch) return;
+
+    // Determine if currently syncing (source connector RUNNING in batch mode = active sync)
+    const sourceState = s.source_connector.state;
+    const wasSyncing = batchSyncing;
+    batchSyncing = sourceState === 'RUNNING';
+
+    if (batchSyncing && !wasSyncing) {
+      batchSyncStart = new Date();
+    } else if (!batchSyncing) {
+      batchSyncStart = null;
+    }
+
+    // Update schedule timestamps
+    batchNextRun = batch.next_batch_run ? new Date(batch.next_batch_run) : null;
+    batchLastRun = batch.last_batch_run ? new Date(batch.last_batch_run) : null;
+
+    // Update static fields
+    const intervalEl = document.getElementById('batch-interval');
+    if (intervalEl) intervalEl.textContent = batch.batch_interval_display || '--';
+
+    const maxEl = document.getElementById('batch-max-duration');
+    if (maxEl) maxEl.textContent = batch.batch_max_catchup_minutes + ' min';
+
+    const nextRunEl = document.getElementById('batch-next-run');
+    if (nextRunEl && batchNextRun) {
+      nextRunEl.textContent = batchNextRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ', ' +
+        batchNextRun.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    }
+
+    updateBatchCountdown();
+  }
+
+  function updateStatus(data) {
+    const s = data.status;
+
+    // Source / Sink / Health cards
+    const srcEl = document.getElementById('source-state');
+    srcEl.textContent = s.source_connector.state;
+    srcEl.className = 'text-2xl font-semibold mt-1 ' + stateColor(s.source_connector.state);
+
+    const sinkEl = document.getElementById('sink-state');
+    sinkEl.textContent = s.sink_connector.state;
+    sinkEl.className = 'text-2xl font-semibold mt-1 ' + stateColor(s.sink_connector.state);
+
+    const healthEl = document.getElementById('overall-health');
+    healthEl.textContent = s.overall.charAt(0).toUpperCase() + s.overall.slice(1);
+    healthEl.className = 'text-2xl font-semibold mt-1 ' + healthColor(s.overall);
+
+    // Statistics
+    document.getElementById('stat-rows').textContent = formatNumber(s.statistics.total_rows_synced);
+
+    // Batch schedule update
+    if (isBatch && s.batch_schedule) {
+      updateBatchSchedule(s);
+    }
+
+    // Snapshot panel
+    const panel = document.getElementById('snapshot-panel');
+    const snap = s.snapshot;
+
+    if (snap && (snap.running || snap.completed)) {
+      panel.classList.remove('hidden');
+
+      const typeLabel = snap.type === 'initial' ? 'Initial Snapshot' : 'Incremental Snapshot';
+      document.getElementById('snapshot-title').textContent = typeLabel;
+
+      const badge = document.getElementById('snapshot-badge');
+      if (snap.running) {
+        badge.textContent = 'Running';
+        badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
+        document.getElementById('snapshot-spinner').classList.remove('hidden');
+      } else if (snap.completed) {
+        badge.textContent = 'Complete';
+        badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+        document.getElementById('snapshot-spinner').classList.add('hidden');
+      }
+
+      const done = snap.completed_tables || 0;
+      const total = snap.total_tables || 0;
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+      document.getElementById('snap-done').textContent = done;
+      document.getElementById('snap-total').textContent = total;
+      document.getElementById('snap-pct').textContent = pct + '%';
+      document.getElementById('snap-bar').style.width = pct + '%';
+
+      document.getElementById('snap-rows').textContent = formatNumber(snap.total_rows_scanned);
+      document.getElementById('snap-duration').textContent = (snap.duration_seconds || 0) + 's';
+      document.getElementById('snap-current').textContent = snap.current_table || '--';
+      document.getElementById('snap-current').title = snap.current_table || '';
+      document.getElementById('snap-remain-val').textContent = snap.remaining_tables || 0;
+
+      const rowsDetail = document.getElementById('snap-rows-detail');
+      const rowsTable = document.getElementById('snap-rows-table');
+      if (snap.rows_scanned && Object.keys(snap.rows_scanned).length > 0) {
+        rowsDetail.classList.remove('hidden');
+        rowsTable.innerHTML = '';
+        for (const [table, count] of Object.entries(snap.rows_scanned)) {
+          const row = document.createElement('div');
+          row.className = 'flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded';
+          row.innerHTML = '<span class="text-gray-700 dark:text-gray-300 truncate">' + table + '</span>'
+            + '<span class="text-gray-900 dark:text-white font-semibold">' + formatNumber(count) + '</span>';
+          rowsTable.appendChild(row);
+        }
+      }
+
+      currentInterval = snap.running ? POLL_INTERVAL : IDLE_INTERVAL;
+    } else {
+      if (!snap || (!snap.running && !snap.completed)) {
+        panel.classList.add('hidden');
+      }
+      currentInterval = batchSyncing ? POLL_INTERVAL : IDLE_INTERVAL;
+    }
+  }
+
+  function poll() {
+    fetch(STATUS_URL)
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) updateStatus(data);
+      })
+      .catch(err => console.warn('Status poll failed:', err))
+      .finally(() => {
+        timer = setTimeout(poll, currentInterval);
+      });
+  }
+
+  // Start polling
+  timer = setTimeout(poll, POLL_INTERVAL);
+
+  // Start 1-second countdown ticker for batch mode
+  if (isBatch) {
+    countdownTimer = setInterval(updateBatchCountdown, 1000);
+  }
+})();
+</script>
+{% endblock %}
