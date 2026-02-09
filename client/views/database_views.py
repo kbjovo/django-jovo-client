@@ -17,6 +17,7 @@ import logging
 from client.models.client import Client
 from client.models.database import ClientDatabase
 from client.forms import ClientDatabaseForm
+from client.replication.orchestrator import ReplicationOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -254,15 +255,33 @@ class ClientDatabaseUpdateView(UpdateView):
 
 class ClientDatabaseDeleteView(View):
     """
-    Delete a database connection.
+    Delete a database connection and clean up all associated CDC resources.
 
-    This is a hard delete that removes the ClientDatabase entry.
-    The actual database itself is not dropped.
+    Cleanup includes:
+    - Deleting Debezium source connectors from Kafka Connect
+    - Updating/removing shared sink connectors
+    - Marking ConnectorHistory as deleted
+    - Optionally deleting Kafka topics (if requested via form checkbox)
+    - Removing the ClientDatabase row (CASCADE deletes ReplicationConfig/TableMapping/ColumnMapping)
     """
 
     def post(self, request, pk):
         database = get_object_or_404(ClientDatabase, pk=pk)
         client = database.client
+        delete_topics = request.POST.get('delete_topics') == '1'
+        drop_tables = request.POST.get('drop_tables') == '1'
+
+        # Clean up all replication configs BEFORE cascade delete.
+        # Django's CASCADE uses bulk SQL and does NOT call ReplicationConfig.delete(),
+        # so we must explicitly clean up connectors in Kafka Connect via the orchestrator.
+        for config in database.replication_configs.all():
+            try:
+                orchestrator = ReplicationOrchestrator(config)
+                orchestrator.delete_replication(delete_topics=delete_topics, drop_tables=drop_tables)
+            except Exception as e:
+                logger.warning(f"Failed to clean up replication config {config.id}: {e}")
+
+        # Delete the database (CASCADE cleans up any remaining DB rows)
         database.delete()
 
         if request.headers.get('HX-Request'):

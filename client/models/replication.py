@@ -63,7 +63,7 @@ class ConnectorHistory(models.Model):
     # Connector details
     connector_name = models.CharField(
         max_length=255,
-        unique=True,
+        db_index=True,
         help_text="Full connector name including version"
     )
     connector_version = models.IntegerField(
@@ -186,17 +186,20 @@ class ConnectorHistory(models.Model):
     @classmethod
     def mark_connector_deleted(cls, connector_name: str, notes: str = ''):
         """Mark a connector as deleted in history."""
-        try:
-            history = cls.objects.get(connector_name=connector_name)
-            history.status = 'deleted'
-            history.deleted_at = timezone.now()
-            if notes:
-                history.notes = notes
-            history.save()
-            return True
-        except cls.DoesNotExist:
+        history = cls.objects.filter(
+            connector_name=connector_name
+        ).exclude(status='deleted').order_by('-created_at').first()
+
+        if not history:
             logger.warning(f"Connector {connector_name} not found in history")
             return False
+
+        history.status = 'deleted'
+        history.deleted_at = timezone.now()
+        if notes:
+            history.notes = notes
+        history.save()
+        return True
 
 
 class ReplicationConfig(models.Model):
