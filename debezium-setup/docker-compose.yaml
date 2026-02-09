@@ -359,8 +359,6 @@ services:
     restart: unless-stopped
 
 
-=======
->>>>>>> 00ad81b (Commit from github)
 volumes:
   kafka1-data:
   kafka2-data:
