@@ -1,8 +1,5 @@
-from django.db import models, connection
+from django.db import models
 from django.utils import timezone
-from django.db.models.signals import post_save, post_delete
-from django.dispatch import receiver
-from django.conf import settings 
 
 
 class Client(models.Model):
@@ -26,17 +23,7 @@ class Client(models.Model):
     name = models.CharField(max_length=100, blank=False, null=False)
     email = models.EmailField(null=False, unique=True, db_index=True, blank=False)
     phone = models.CharField(max_length=10, unique=True, db_index=True, null=False, blank=False)
-    
-    # Database
-    db_name = models.CharField(
-        max_length=20, 
-        null=False, 
-        unique=True, 
-        db_index=True, 
-        default="temp",
-        help_text="Database name where replicated data will be stored"
-    )
-    
+
     # Company Details
     company_name = models.CharField(max_length=255, blank=True)
     address = models.TextField(blank=True)
@@ -90,11 +77,10 @@ class Client(models.Model):
         self.save(update_fields=["status"])
 
     def soft_delete(self):
-        """Mark as deleted and drop its database."""
+        """Mark as deleted and clean up associated resources."""
         self.status = "deleted"
         self.deleted_at = timezone.now()
         self.save(update_fields=["status", "deleted_at"])
-        self.drop_database()  
         self.client_databases.all().delete()
 
     @property
@@ -102,18 +88,6 @@ class Client(models.Model):
         """Check if client is active"""
         return self.status == "active"
 
-    def save(self, *args, **kwargs):
-        """Validate db_name before saving."""
-        if not self.db_name or self.db_name == "temp":
-            raise ValueError("Database name is required and cannot be 'temp'")
-        super().save(*args, **kwargs)
-
-    def drop_database(self):
-        """Drop the client's dedicated database."""
-        if self.db_name:
-            with connection.cursor() as cursor:
-                cursor.execute(f"DROP DATABASE IF EXISTS `{self.db_name}`;")
-    
     def get_target_database(self):
         """Get the target database for this client"""
         return self.client_databases.filter(is_target=True).first()
@@ -121,48 +95,3 @@ class Client(models.Model):
     def get_source_databases(self):
         """Get all source databases for this client"""
         return self.client_databases.filter(is_primary=True)
-
-
-# ──────────────────────────────
-# SIGNALS
-# ──────────────────────────────
-
-@receiver(post_save, sender=Client)
-def create_client_database(sender, instance, created, **kwargs):
-    """
-    Create database on Client creation AND create a ClientDatabase entry for it
-    """
-    if created:
-        db_name = instance.db_name
-        
-        # 1. Create the physical database
-        with connection.cursor() as cursor:
-            cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")
-        
-        # 2. Create a ClientDatabase entry for this target database
-        from client.models.database import ClientDatabase
-        
-        # Get database credentials from settings or use defaults
-        db_config = settings.DATABASES.get('default', {})
-        
-        ClientDatabase.objects.get_or_create(
-            client=instance,
-            database_name=db_name,  # Use this as unique identifier
-            defaults={
-                'connection_name': f"{instance.name} - Target DB",
-                'db_type': 'mysql',
-                'host': db_config.get('HOST', 'localhost'),
-                'port': int(db_config.get('PORT', 3306)),
-                'username': db_config.get('USER', 'root'),
-                'password': db_config.get('PASSWORD', ''),
-                'is_primary': False,
-                'is_target': True,  # Mark as target database
-                'connection_status': 'success',
-            }
-        )
-
-
-@receiver(post_delete, sender=Client)
-def delete_client_database(sender, instance, **kwargs):
-    """Drop database on hard delete"""
-    instance.drop_database()

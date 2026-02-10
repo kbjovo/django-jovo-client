@@ -312,19 +312,8 @@
       </div>
     </div>
 
-    <!-- Is Primary -->
-    <div class="flex items-center gap-3">
-      <input 
-        type="checkbox" 
-        name="is_primary" 
-        id="id_is_primary"
-        x-model="formData.is_primary"
-        class="w-4 h-4 text-blue-600 bg-gray-50 dark:bg-gray-800 border-gray-300 dark:border-gray-600 rounded focus:ring-2 focus:ring-blue-500"
-        {% if form.is_primary.value %}checked{% endif %}>
-      <label for="id_is_primary" class="text-sm font-medium text-gray-700 dark:text-gray-300">
-        Set as primary database connection
-      </label>
-    </div>
+    <!-- Source connection — always primary -->
+    <input type="hidden" name="is_primary" value="on">
 
     <!-- Form Actions -->
     <div class="flex items-center justify-end gap-3 pt-5 border-t border-gray-200 dark:border-gray-700">
@@ -394,7 +383,6 @@
         username: '{{ form.username.value|default_if_none:"" }}',
         password: '',
         oracle_connection_mode: '{{ form.oracle_connection_mode.value|default:"service" }}',
-        is_primary: {{ form.is_primary.value|yesno:"true,false" }}
       },
       originalData: {},
       errors: {},
@@ -427,7 +415,7 @@
 
       get hasChanges() {
         if (!this.isUpdateMode) return true;
-        const fields = ['connection_name', 'db_type', 'host', 'port', 'database_name', 'username', 'oracle_connection_mode', 'is_primary'];
+        const fields = ['connection_name', 'db_type', 'host', 'port', 'database_name', 'username', 'oracle_connection_mode'];
         return fields.some(k => String(this.formData[k]) !== String(this.originalData[k])) || this.formData.password.trim() !== '';
       },
 

@@ -18,7 +18,7 @@ from django.contrib import messages
 import logging
 
 from client.models.client import Client
-from client.forms import ClientForm
+from client.forms import ClientForm, ClientDatabaseForm, SinkConnectorForm
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,8 @@ class ClientDetailView(DetailView):
             client=self.object
         ).prefetch_related('replication_configs')
         context['databases'] = databases
+        context['form'] = ClientDatabaseForm(client=self.object)
+        context['sink_form'] = SinkConnectorForm(client=self.object)
 
         # Get all connectors for this client
         all_connectors = ReplicationConfig.objects.filter(

@@ -143,55 +143,6 @@
           <p class="mt-1 text-sm text-red-600">{{ form.phone.errors.0 }}</p>
         {% endif %}
       </div>
-      
-
-      <!-- Database Name (only show in add form) -->
-      {% if not is_update %}
-      <div>
-        <label for="id_db_name" class="block mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
-          Database Name <span class="text-red-500">*</span>
-        </label>
-        <div class="relative">
-          <input 
-            type="text" 
-            name="db_name" 
-            id="id_db_name"
-            x-model="formData.db_name"
-            @blur="checkUnique('db_name')"
-            @input="errors.db_name = ''; success.db_name = false; formData.db_name = formData.db_name.toLowerCase().replace(/[^a-z0-9_]/g, '')"
-            maxlength="20"
-            :class="{
-              'border-red-500 focus:ring-red-500': errors.db_name,
-              'border-green-500 focus:ring-green-500': success.db_name,
-              'border-gray-300 dark:border-gray-700 focus:ring-blue-500': !errors.db_name && !success.db_name
-            }"
-            class="w-full px-4 py-2 text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
-            value="{{ form.db_name.value|default:'' }}"
-            placeholder="e.g., client_db_2024">
-          
-          <!-- Loading spinner -->
-          <span x-show="checking.db_name" class="absolute right-3 top-1/2 transform -translate-y-1/2">
-            <svg class="animate-spin h-5 w-5 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-          </span>
-          
-          <!-- Success checkmark -->
-          <span x-show="success.db_name && !checking.db_name" class="absolute right-3 top-1/2 transform -translate-y-1/2">
-            <svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-            </svg>
-          </span>
-        </div>
-        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Only lowercase letters, numbers, and underscores allowed</p>
-        <p x-show="errors.db_name" x-text="errors.db_name" class="mt-1 text-sm text-red-600"></p>
-        <p x-show="success.db_name" class="mt-1 text-sm text-green-600">✓ This database name is available</p>
-        {% if form.db_name.errors %}
-          <p class="mt-1 text-sm text-red-600">{{ form.db_name.errors.0 }}</p>
-        {% endif %}
-      </div>
-      {% endif %}
 
       <!-- Company Name -->
       <div>
@@ -340,7 +291,6 @@
       name: '{{ form.name.value|default_if_none:"" }}',
       email: '{{ form.email.value|default_if_none:"" }}',
       phone: '{{ form.phone.value|default_if_none:"" }}',
-      db_name: '{{ form.db_name.value|default_if_none:"" }}',
       company_name: '{{ form.company_name.value|default_if_none:"" }}',
       address: `{{ form.address.value|default_if_none:"" }}`,
       city: '{{ form.city.value|default_if_none:"" }}',
@@ -354,17 +304,14 @@
       name: '',
       email: '',
       phone: '',
-      db_name: '',
     },
-    success: {  
+    success: {
       email: false,
       phone: false,
-      db_name: false
     },
     checking: {
       phone: false,
       email: false,
-      db_name: false
     },
     isSubmitting: false,
     showSuccess: false,
@@ -390,7 +337,7 @@
     },
 
     get canSubmit() {
-      const notChecking = !this.checking.email && !this.checking.phone && !this.checking.db_name;
+      const notChecking = !this.checking.email && !this.checking.phone;
       return this.hasChanges && !this.hasErrors && notChecking && !this.isSubmitting;
     },
 
@@ -466,13 +413,6 @@
         }
       }
 
-      if (field === 'db_name') {
-        if (!this.formData.db_name.trim()) {
-          this.errors.db_name = 'Database name is required';
-        } else if (!/^[a-z0-9_]+$/.test(this.formData.db_name)) {
-          this.errors.db_name = 'Only lowercase letters, numbers, and underscores allowed';
-        }
-      }
     },
 
     isValidEmail(email) {
@@ -486,12 +426,8 @@
       this.validateField('email');
       this.validateField('phone');
       
-      if (!this.isUpdate) {
-        this.validateField('db_name');
-      }
-
       // Check if there are any errors
-      if (this.errors.name || this.errors.email || this.errors.phone || this.errors.db_name) {
+      if (this.errors.name || this.errors.email || this.errors.phone) {
         const firstError = document.querySelector('.text-red-600');
         if (firstError) {
           firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });

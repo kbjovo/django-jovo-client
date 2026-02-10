@@ -1,0 +1,391 @@
+<!-- Sink Connector Form (Add/Edit Target Database) -->
+<div x-data="sinkConnectorForm()">
+  <!-- Header -->
+  <div class="mb-6">
+    <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
+      {% if is_update %}Edit{% else %}Add{% endif %} Sink Connector
+    </h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+      Configure the target database where replicated data will be stored
+    </p>
+  </div>
+
+  <!-- Loading Spinner -->
+  <div
+    x-show="isTestingConnection"
+    class="absolute inset-0 bg-white/80 dark:bg-gray-800/80 flex items-center justify-center z-10 rounded-lg">
+    <div class="flex flex-col items-center gap-3">
+      <svg class="animate-spin h-10 w-10 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+      </svg>
+      <p class="text-sm text-gray-900 dark:text-white font-medium">Testing connection...</p>
+    </div>
+  </div>
+
+  <form
+    method="post"
+    action="{% if is_update %}{% url 'sink_connector_update' object.pk %}{% else %}{% url 'sink_connector_add' client.pk %}{% endif %}"
+    @submit.prevent="submitForm"
+    class="space-y-5 relative">
+    {% csrf_token %}
+
+    <!-- Connection Name & DB Type -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <!-- Connection Name -->
+      <div>
+        <label for="sink_connection_name" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Connection Name <span class="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          name="connection_name"
+          id="sink_connection_name"
+          x-model="formData.connection_name"
+          @blur="validateField('connection_name')"
+          @input="errors.connection_name = ''"
+          :class="errors.connection_name ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-purple-500'"
+          required
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+          placeholder="e.g., Target Production DB"
+          value="{{ form.connection_name.value|default:'' }}">
+        <p x-show="errors.connection_name" x-text="errors.connection_name" class="mt-1 text-xs text-red-600"></p>
+      </div>
+
+      <!-- Database Type (MySQL or PostgreSQL only) -->
+      <div>
+        <label for="sink_db_type" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Database Type <span class="text-red-500">*</span>
+          <span class="ml-2 inline-flex items-center px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400 rounded">Sink Target</span>
+        </label>
+        <select
+          name="db_type"
+          id="sink_db_type"
+          x-model="formData.db_type"
+          @change="updateDefaultPort()"
+          required
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none transition">
+          <option value="mysql" {% if form.db_type.value == 'mysql' %}selected{% endif %}>MySQL</option>
+          <option value="postgresql" {% if form.db_type.value == 'postgresql' %}selected{% endif %}>PostgreSQL</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Host & Port -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+      <div class="md:col-span-2">
+        <label for="sink_host" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Host <span class="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          name="host"
+          id="sink_host"
+          x-model="formData.host"
+          @blur="validateField('host')"
+          @input="errors.host = ''"
+          :class="errors.host ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-purple-500'"
+          required
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+          placeholder="e.g., localhost or 192.168.1.100"
+          value="{{ form.host.value|default:'' }}">
+        <p x-show="errors.host" x-text="errors.host" class="mt-1 text-xs text-red-600"></p>
+      </div>
+
+      <div>
+        <label for="sink_port" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Port <span class="text-red-500">*</span>
+        </label>
+        <input
+          type="number"
+          name="port"
+          id="sink_port"
+          x-model="formData.port"
+          @blur="validateField('port')"
+          @input="errors.port = ''"
+          :class="errors.port ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-purple-500'"
+          min="1" max="65535" required
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+          value="{{ form.port.value|default:'3306' }}">
+        <p x-show="errors.port" x-text="errors.port" class="mt-1 text-xs text-red-600"></p>
+      </div>
+    </div>
+
+    <!-- Database Name -->
+    <div>
+      <label for="sink_database_name" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+        Database Name <span class="text-red-500">*</span>
+      </label>
+      <input
+        type="text"
+        name="database_name"
+        id="sink_database_name"
+        x-model="formData.database_name"
+        @blur="validateField('database_name')"
+        @input="errors.database_name = ''"
+        :class="errors.database_name ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-purple-500'"
+        required
+        class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+        placeholder="e.g., my_target_db"
+        value="{{ form.database_name.value|default:'' }}">
+      <p x-show="errors.database_name" x-text="errors.database_name" class="mt-1 text-xs text-red-600"></p>
+    </div>
+
+    <!-- Username & Password -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+      <div>
+        <label for="sink_username" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Username <span class="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          name="username"
+          id="sink_username"
+          x-model="formData.username"
+          @blur="validateField('username')"
+          @input="errors.username = ''"
+          :class="errors.username ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-purple-500'"
+          autocomplete="off" required
+          class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition"
+          value="{{ form.username.value|default:'' }}">
+        <p x-show="errors.username" x-text="errors.username" class="mt-1 text-xs text-red-600"></p>
+      </div>
+
+      <div>
+        <label for="sink_password" class="block mb-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+          Password <span class="text-red-500" x-show="!isUpdateMode">*</span>
+          <template x-if="isUpdateMode">
+            <span class="text-xs text-gray-500 font-normal">(leave blank to keep current)</span>
+          </template>
+        </label>
+        <div class="relative">
+          <input
+            :type="showPassword ? 'text' : 'password'"
+            name="password"
+            id="sink_password"
+            x-model="formData.password"
+            @blur="validateField('password')"
+            @input="errors.password = ''"
+            :required="!isUpdateMode"
+            :class="errors.password ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 dark:border-gray-700 focus:ring-purple-500'"
+            autocomplete="new-password"
+            class="w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-gray-800 border rounded-lg focus:ring-2 outline-none transition pr-10"
+            {% if is_update %}placeholder="••••••••"{% endif %}
+            value="">
+          <button
+            type="button"
+            @click="showPassword = !showPassword"
+            class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+            <svg x-show="!showPassword" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+            </svg>
+            <svg x-show="showPassword" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path>
+            </svg>
+          </button>
+        </div>
+        <p x-show="errors.password" x-text="errors.password" class="mt-1 text-xs text-red-600"></p>
+      </div>
+    </div>
+
+    {% if is_update %}
+    <!-- Destructive change warning -->
+    <div x-show="isDestructiveChange" x-transition
+         class="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+      <div class="flex items-start gap-2">
+        <svg class="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+        </svg>
+        <div>
+          <p class="text-sm font-medium text-amber-800 dark:text-amber-300">Destructive change detected</p>
+          <p class="text-xs text-amber-700 dark:text-amber-400 mt-1">
+            Changing the database type or name will recreate the sink connector. Existing replicated tables in the old database will not be migrated.
+          </p>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Form Actions -->
+    <div class="flex items-center justify-end gap-3 pt-5 border-t border-gray-200 dark:border-gray-700">
+      <button
+        type="button"
+        @click="$dispatch('close-sink-modal')"
+        class="px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 font-medium transition">
+        Cancel
+      </button>
+
+      <!-- For ADD mode: Test Connection button -->
+      <template x-if="!isUpdateMode">
+        <button
+          type="button"
+          @click="testConnection()"
+          :disabled="isTestingConnection || !canSave"
+          class="inline-flex items-center gap-2 px-5 py-2 text-sm text-white font-semibold bg-purple-600 hover:bg-purple-700 rounded-lg shadow transition disabled:opacity-50 disabled:cursor-not-allowed">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+          </svg>
+          Test Connection
+        </button>
+      </template>
+
+      <!-- For UPDATE mode: Test + Save -->
+      <template x-if="isUpdateMode">
+        <div class="flex gap-3">
+          <button
+            type="button"
+            @click="testConnection()"
+            :disabled="isTestingConnection || !isFormValid"
+            class="inline-flex items-center gap-2 px-4 py-2 text-sm border-2 border-purple-600 text-purple-600 dark:border-purple-500 dark:text-purple-500 bg-white dark:bg-gray-800 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/10 font-medium transition disabled:opacity-50 disabled:cursor-not-allowed">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+            </svg>
+            Test
+          </button>
+
+          <button
+            type="submit"
+            :disabled="isTestingConnection || isSaving || !canSave"
+            class="px-5 py-2 text-sm text-white font-semibold bg-purple-600 hover:bg-purple-700 rounded-lg shadow transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+            <svg x-show="isSaving" class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span x-text="isSaving ? 'Saving...' : 'Save Changes'"></span>
+          </button>
+        </div>
+      </template>
+    </div>
+  </form>
+
+  <script>
+  function sinkConnectorForm() {
+    return {
+      formData: {
+        connection_name: '{{ form.connection_name.value|default_if_none:"" }}',
+        db_type: '{{ form.db_type.value|default:"mysql" }}',
+        host: '{{ form.host.value|default_if_none:"" }}',
+        port: {{ form.port.value|default:3306 }},
+        database_name: '{{ form.database_name.value|default_if_none:"" }}',
+        username: '{{ form.username.value|default_if_none:"" }}',
+        password: '',
+      },
+      originalData: {},
+      errors: {},
+      showPassword: false,
+      isTestingConnection: false,
+      isSaving: false,
+      isUpdateMode: {{ is_update|yesno:"true,false" }},
+
+      init() {
+        if (this.isUpdateMode) {
+          this.originalData = JSON.parse(JSON.stringify(this.formData));
+        }
+      },
+
+      get isDestructiveChange() {
+        if (!this.isUpdateMode) return false;
+        return this.formData.db_type !== this.originalData.db_type ||
+               this.formData.database_name !== this.originalData.database_name;
+      },
+
+      get hasChanges() {
+        if (!this.isUpdateMode) return true;
+        const fields = ['connection_name', 'db_type', 'host', 'port', 'database_name', 'username'];
+        return fields.some(k => String(this.formData[k]) !== String(this.originalData[k])) ||
+               this.formData.password.trim() !== '';
+      },
+
+      get isFormValid() {
+        if (!this.formData.connection_name.trim()) return false;
+        if (!this.formData.host.trim()) return false;
+        if (!this.formData.port || this.formData.port < 1 || this.formData.port > 65535) return false;
+        if (!this.formData.database_name.trim()) return false;
+        if (!this.formData.username.trim()) return false;
+        if (!this.isUpdateMode && !this.formData.password.trim()) return false;
+        return !Object.values(this.errors).some(e => e !== '');
+      },
+
+      get canSave() {
+        return this.isFormValid && this.hasChanges;
+      },
+
+      updateDefaultPort() {
+        const ports = { mysql: 3306, postgresql: 5432 };
+        this.formData.port = ports[this.formData.db_type] || 3306;
+      },
+
+      validateField(field) {
+        this.errors[field] = '';
+        const value = typeof this.formData[field] === 'string' ? this.formData[field].trim() : this.formData[field];
+        if (field === 'connection_name' && (!value || value.length < 2)) this.errors[field] = 'Connection name required (min 2 chars)';
+        if (field === 'host' && !value) this.errors[field] = 'Host is required';
+        if (field === 'port' && (!value || value < 1 || value > 65535)) this.errors[field] = 'Port must be 1-65535';
+        if (field === 'database_name' && !value) this.errors[field] = 'Database name is required';
+        if (field === 'username' && !value) this.errors[field] = 'Username is required';
+        if (field === 'password' && !this.isUpdateMode && !value) this.errors[field] = 'Password is required';
+      },
+
+      async testConnection() {
+        this.isTestingConnection = true;
+        const formData = new FormData();
+        Object.keys(this.formData).forEach(key => formData.append(key, this.formData[key]));
+        formData.append('test_only', 'true');
+        formData.append('csrfmiddlewaretoken', document.querySelector('[name=csrfmiddlewaretoken]').value);
+
+        try {
+          const url = '{% if is_update %}{% url "sink_connector_update" object.pk %}{% else %}{% url "sink_connector_add" client.pk %}{% endif %}';
+          const response = await fetch(url, {
+            method: 'POST',
+            body: formData,
+            headers: { 'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value }
+          });
+          const result = await response.json();
+          this.isTestingConnection = false;
+          this.$dispatch('show-test-result', {
+            success: result.success,
+            message: result.message,
+            formData: this.formData,
+            url: url,
+            isUpdateMode: this.isUpdateMode,
+            isSink: true
+          });
+        } catch (error) {
+          this.isTestingConnection = false;
+          alert('Error testing connection: ' + error.message);
+        }
+      },
+
+      async submitForm(e) {
+        this.isSaving = true;
+        const form = e.target;
+        const formData = new FormData(form);
+        try {
+          const response = await fetch(form.action, {
+            method: 'POST',
+            body: formData,
+            headers: {
+              'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+              'HX-Request': 'true'
+            }
+          });
+          if (response.ok) {
+            const html = await response.text();
+            document.getElementById('databases-content').innerHTML = html;
+            this.$dispatch('close-sink-modal');
+            if (window.htmx) htmx.process(document.getElementById('databases-content'));
+            if (window.showToast) window.showToast('success', 'Sink connector saved successfully!');
+          } else {
+            if (window.showToast) window.showToast('error', 'Failed to save sink connector');
+          }
+        } catch (error) {
+          if (window.showToast) window.showToast('error', 'Error: ' + error.message);
+        } finally {
+          this.isSaving = false;
+        }
+      }
+    }
+  }
+  </script>
+</div>

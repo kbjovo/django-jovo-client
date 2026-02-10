@@ -20,6 +20,9 @@ from .database_views import (
     ClientDatabaseCreateView,
     ClientDatabaseUpdateView,
     ClientDatabaseDeleteView,
+    SinkConnectorCreateView,
+    SinkConnectorUpdateView,
+    SinkConnectorDeleteView,
 )
 
 from .cdc_views import (
@@ -60,6 +63,9 @@ __all__ = [
     'ClientDatabaseCreateView',
     'ClientDatabaseUpdateView',
     'ClientDatabaseDeleteView',
+    'SinkConnectorCreateView',
+    'SinkConnectorUpdateView',
+    'SinkConnectorDeleteView',
 
     # CDC views
     'cdc_discover_tables',

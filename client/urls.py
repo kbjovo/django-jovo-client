@@ -18,6 +18,11 @@ from .views import (
     ClientDatabaseUpdateView,
     ClientDatabaseDeleteView,
 
+    # Sink connector views
+    SinkConnectorCreateView,
+    SinkConnectorUpdateView,
+    SinkConnectorDeleteView,
+
     # CDC views
     cdc_discover_tables,
     cdc_configure_tables,
@@ -90,7 +95,21 @@ urlpatterns = [
     path('clients/databases/<int:pk>/delete/',
          ClientDatabaseDeleteView.as_view(),
          name='client_database_delete'),
-    
+
+    # ==========================================
+    # Sink Connector (Target Database) Management
+    # ==========================================
+    path('clients/<int:client_pk>/sink/add/',
+         SinkConnectorCreateView.as_view(),
+         name='sink_connector_add'),
+
+    path('clients/sink/<int:pk>/update/',
+         SinkConnectorUpdateView.as_view(),
+         name='sink_connector_update'),
+
+    path('clients/sink/<int:pk>/delete/',
+         SinkConnectorDeleteView.as_view(),
+         name='sink_connector_delete'),
 
 
     # ==========================================

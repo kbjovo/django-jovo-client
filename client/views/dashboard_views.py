@@ -83,7 +83,7 @@ def clients_list(request):
 
     table_config = {
         'exclude': ['country', 'updated_at', 'deleted_at'],
-        'searchable': ['name', 'email', 'phone', 'company_name', 'db_name'],
+        'searchable': ['name', 'email', 'phone', 'company_name'],
         'detail_url_name': 'client_detail',
         'per_page': 15,
         'selectable': True,
