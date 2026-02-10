@@ -16,6 +16,8 @@ s
 venv/
 env/
 ENV/
+.env
+.env.docker
 
 # Django stuff:
 *.log
