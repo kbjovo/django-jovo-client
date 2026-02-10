@@ -754,7 +754,7 @@ class ReplicationOrchestrator:
                 self.config.sink_connector_state = 'RUNNING'
                 self.config.save()
 
-                return True, 
+                return True, f"Sink connector '{sink_connector_name}' created successfully"
             else:
                 return False, f"Failed to create sink connector: {error}"
 
