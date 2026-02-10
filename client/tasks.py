@@ -56,8 +56,8 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
         if source_type in ('mysql', 'mssql', 'sqlserver'):
             # Kafka-based processor for MySQL/MSSQL
             kafka_servers = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS',
-                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+                'KAFKA_BOOTSTRAP_SERVERS',
+                'localhost:9092,localhost:9094,localhost:9096'
             )
             processor = KafkaDDLProcessor(
                 replication_config=config,
@@ -186,8 +186,8 @@ def start_continuous_ddl_consumer(self, config_id: int):
 
     target_engine = get_database_engine(target_db)
     kafka_servers = settings.DEBEZIUM_CONFIG.get(
-        'KAFKA_INTERNAL_SERVERS',
-        'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+        'KAFKA_BOOTSTRAP_SERVERS',
+        'localhost:9092,localhost:9094,localhost:9096'
     )
 
     _running_consumers[config_id] = True

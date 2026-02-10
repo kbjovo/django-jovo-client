@@ -950,8 +950,8 @@ class ReplicationOrchestrator:
         """Create Kafka topics for replication."""
         try:
             kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS',
-                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+                'KAFKA_BOOTSTRAP_SERVERS',
+                'localhost:9092,localhost:9094,localhost:9096'
             )
             topic_manager = KafkaTopicManager(bootstrap_servers=kafka_bootstrap)
             return topic_manager.create_topics_for_config(self.config)
@@ -964,8 +964,8 @@ class ReplicationOrchestrator:
         """Delete Kafka topics for replication."""
         try:
             kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS',
-                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+                'KAFKA_BOOTSTRAP_SERVERS',
+                'localhost:9092,localhost:9094,localhost:9096'
             )
             topic_manager = KafkaTopicManager(bootstrap_servers=kafka_bootstrap)
             topic_prefix = self.config.kafka_topic_prefix

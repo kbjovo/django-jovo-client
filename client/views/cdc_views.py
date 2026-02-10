@@ -1624,8 +1624,8 @@ def cdc_create_connector(request, config_pk):
                 success, message = orchestrator.start_replication()
                 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
                 from django.conf import settings
-                # Use internal Kafka servers for Docker environment
-                kafka_bootstrap = settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
+                # Use external Kafka servers (host/Gunicorn)
+                kafka_bootstrap = settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092,localhost:9094,localhost:9096')
                 kafka_topic_manager = KafkaTopicManager(bootstrap_servers=kafka_bootstrap)
                 topics_list = kafka_topic_manager.list_topics()
                 print(f'topics_list_by_kafka: {topics_list}')

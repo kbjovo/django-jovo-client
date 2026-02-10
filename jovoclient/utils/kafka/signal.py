@@ -319,8 +319,8 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
     # Kafka-based signaling (MySQL)
     else:
         kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
+            'KAFKA_BOOTSTRAP_SERVERS',
+            settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'localhost:9092,localhost:9094,localhost:9096')
         )
 
         # Signal topic format: {kafka_topic_prefix}.signals

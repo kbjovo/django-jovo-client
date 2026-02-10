@@ -38,8 +38,8 @@ class KafkaSignalSender:
         if bootstrap_servers is None:
             from django.conf import settings
             bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS',
-                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+                'KAFKA_BOOTSTRAP_SERVERS',
+                'localhost:9092,localhost:9094,localhost:9096'
             )
         self.bootstrap_servers = bootstrap_servers
         

@@ -99,10 +99,11 @@ class KafkaTopicManager:
         Args:
             bootstrap_servers: Kafka bootstrap servers (defaults to settings)
         """
-        # Use internal Kafka servers by default (for Docker network)
+        # Use external bootstrap servers by default (for host machine)
+        # Falls back to internal servers only if KAFKA_BOOTSTRAP_SERVERS is not set
         default_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092')
+            'KAFKA_BOOTSTRAP_SERVERS',
+            settings.DEBEZIUM_CONFIG.get('KAFKA_INTERNAL_SERVERS', 'localhost:9092,localhost:9094,localhost:9096')
         )
         self.bootstrap_servers = bootstrap_servers or default_servers
         self.admin_client = AdminClient({'bootstrap.servers': self.bootstrap_servers})
