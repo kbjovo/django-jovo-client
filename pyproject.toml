@@ -33,4 +33,5 @@ dependencies = [
     "python-json-logger==2.0.7",
     "redis>=7.0.1",
     "sqlalchemy==2.0.44",
+    "gunicorn>=25.0.3",
 ]
