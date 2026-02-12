@@ -191,6 +191,33 @@
   </div>
   {% endif %}
 
+  <!-- Action Buttons -->
+  <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6">
+    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+      <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Actions</h3>
+    </div>
+    <div class="p-6 flex flex-wrap gap-3">
+      <!-- RECREATE BUTTON -->
+      <button onclick="document.getElementById('recreateModal').classList.remove('hidden')"
+        class="inline-flex items-center px-4 py-2 border border-blue-500 dark:border-blue-600 rounded-lg text-sm font-medium text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition"
+        title="Delete and recreate the source connector with the same version and topics">
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+        </svg>
+        Recreate Connector
+      </button>
+
+      <!-- DELETE BUTTON -->
+      <a href="{% url 'connector_delete' replication_config.pk %}"
+        class="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition">
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+        </svg>
+        Delete Connector
+      </a>
+    </div>
+  </div>
+
   <!-- Connector Information -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
@@ -256,6 +283,68 @@
   </div>
 
 
+</div>
+
+<!-- Recreate Connector Modal -->
+<div id="recreateModal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 z-50 flex items-center justify-center">
+  <div class="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md mx-4">
+    <div class="flex items-center mb-4">
+      <svg class="h-6 w-6 text-blue-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+      </svg>
+      <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Recreate Source Connector</h3>
+    </div>
+    <p class="text-sm text-gray-600 dark:text-gray-400 mb-3">
+      This will delete and recreate the source connector while keeping everything else intact:
+    </p>
+    <ul class="text-sm text-gray-600 dark:text-gray-400 mb-4 list-disc list-inside space-y-1">
+      <li>Same version (v{{ replication_config.connector_version }})</li>
+      <li>Same Kafka topics ({{ replication_config.kafka_topic_prefix }}.*)</li>
+      <li>Sink connector untouched</li>
+      <li>Target tables untouched</li>
+    </ul>
+
+    <form method="post" action="{% url 'connector_recreate' replication_config.pk %}">
+      {% csrf_token %}
+
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Snapshot Mode</label>
+        <div class="space-y-2">
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input type="radio" name="snapshot_mode" value="when_needed" checked
+              class="mt-1 text-blue-600 focus:ring-blue-500">
+            <div>
+              <span class="text-sm font-medium text-gray-900 dark:text-white">Resume from offset</span>
+              <p class="text-xs text-gray-500 dark:text-gray-400">Continues from where it left off. No re-snapshot unless offsets are missing.</p>
+            </div>
+          </label>
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input type="radio" name="snapshot_mode" value="initial"
+              class="mt-1 text-blue-600 focus:ring-blue-500">
+            <div>
+              <span class="text-sm font-medium text-gray-900 dark:text-white">Full re-snapshot</span>
+              <p class="text-xs text-gray-500 dark:text-gray-400">Re-reads all existing data from source. Use if data is out of sync.</p>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <p class="text-sm text-blue-600 dark:text-blue-400 mb-4">
+        <strong>Use this when:</strong> The connector is FAILED or stuck, and you want a fresh connector without losing topics or target data.
+      </p>
+      <div class="flex justify-end gap-3">
+        <button type="button"
+          onclick="document.getElementById('recreateModal').classList.add('hidden')"
+          class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+          Cancel
+        </button>
+        <button type="submit"
+          class="px-4 py-2 border border-transparent rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">
+          Recreate Connector
+        </button>
+      </div>
+    </form>
+  </div>
 </div>
 
 <!-- AJAX Polling Script -->

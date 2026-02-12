@@ -119,10 +119,22 @@ class PostgreSQLTargetAdapter(BaseTargetAdapter):
     def _handle_rename_column(self, operation: 'DDLOperation') -> Tuple[bool, Optional[str]]:
         """Handle RENAME COLUMN operation."""
         details = operation.details
+        old_name = details.get('old_name')
+        new_name = details.get('new_name')
+
+        # Check if source column exists (skip if already renamed or stale DDL event)
+        existing_columns = {c['name'] for c in self.get_table_columns(operation.table_name)}
+        if old_name not in existing_columns:
+            if new_name in existing_columns:
+                logger.info(f"Column {old_name} already renamed to {new_name}, skipping")
+            else:
+                logger.info(f"Column {old_name} not found (stale DDL event), skipping")
+            return True, None
+
         sql = self.generate_rename_column(
             operation.table_name,
-            details.get('old_name'),
-            details.get('new_name'),
+            old_name,
+            new_name,
             details.get('column_type', '')  # Not needed for PostgreSQL
         )
         logger.info(f"Renaming column in {operation.table_name}")

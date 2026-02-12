@@ -976,6 +976,51 @@ def connector_delete(request, config_pk):
 
 
 # ========================================
+# Recreate Source Connector (same version, same topics)
+# ========================================
+
+def connector_recreate(request, config_pk):
+    """
+    Recreate a source connector without changing version, topics, or sink.
+
+    Use when a connector is FAILED/stuck and needs a fresh start while
+    keeping the same Kafka topics and target tables intact.
+
+    POST only. Accepts optional 'snapshot_mode' parameter:
+      - 'when_needed' (default): Resume from Kafka offset
+      - 'initial': Full re-snapshot of all data
+    """
+    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+    database = replication_config.client_database
+
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+
+    try:
+        from client.replication.orchestrator import ReplicationOrchestrator
+
+        snapshot_mode = request.POST.get('snapshot_mode', 'when_needed')
+        if snapshot_mode not in ('when_needed', 'initial'):
+            snapshot_mode = 'when_needed'
+
+        orchestrator = ReplicationOrchestrator(replication_config)
+        success, message = orchestrator.recreate_source_connector(
+            snapshot_mode=snapshot_mode
+        )
+
+        if success:
+            messages.success(request, message)
+        else:
+            messages.error(request, f"Recreate failed: {message}")
+
+    except Exception as e:
+        logger.error(f"Error recreating connector: {e}", exc_info=True)
+        messages.error(request, f"Error recreating connector: {str(e)}")
+
+    return redirect('connector_monitor', config_pk=config_pk)
+
+
+# ========================================
 # Connector Monitor (Real-time Status + Snapshot Progress)
 # ========================================
 

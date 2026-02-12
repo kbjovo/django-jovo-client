@@ -385,9 +385,16 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         logger.info(f"  Target columns ({len(target_columns)}): {target_col_names}")
         logger.info(f"  Source columns ({len(source_columns)}): {source_col_names}")
 
-        # Detect renames by comparing positions
+        # Extract explicit renames from MySQL DDL (CHANGE COLUMN / RENAME COLUMN)
+        # This is much more reliable than position-based heuristic detection
+        known_renames = self._extract_renames_from_ddl(ddl) if ddl else {}
+        if known_renames:
+            logger.info(f"Explicit renames parsed from DDL: {known_renames}")
+
+        # Detect schema changes, using known renames from DDL when available
         operations = self._detect_schema_changes_by_position(
-            target_table_name, target_columns, source_columns
+            target_table_name, target_columns, source_columns,
+            known_renames=known_renames
         )
 
         if operations:
@@ -757,13 +764,17 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         self,
         table_name: str,
         target_columns: List[Dict],
-        source_columns: List[Dict]
+        source_columns: List[Dict],
+        known_renames: Optional[Dict[str, str]] = None
     ) -> List[DDLOperation]:
         """
         Detect schema changes by comparing actual target and source columns by position.
-        Detects renames when same position has different name but similar type.
+
+        Uses known_renames (parsed from DDL) first for reliable rename detection,
+        then falls back to position-based heuristic for remaining columns.
         """
         operations = []
+        known_renames = known_renames or {}
 
         target_by_name = {c['name']: c for c in target_columns}
         source_by_name = {c['name']: c for c in source_columns}
@@ -774,9 +785,33 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         matched_target = set()
         matched_source = set()
 
-        # Detect renames by position
+        # First: handle known renames from DDL parsing (most reliable)
+        # This prevents the position-based heuristic from misdetecting renames
+        # as DROP + ADD which causes data loss
+        for old_name, new_name in known_renames.items():
+            if old_name in target_by_name and new_name in source_by_name:
+                source_col = source_by_name[new_name]
+                logger.info(f"Column rename from DDL: {old_name} -> {new_name}")
+                operations.append(DDLOperation(
+                    operation_type=DDLOperationType.RENAME_COLUMN,
+                    table_name=table_name,
+                    details={
+                        'old_name': old_name,
+                        'new_name': new_name,
+                        'column_type': source_col.get('typeName', ''),
+                        'column': source_col
+                    },
+                    is_destructive=False
+                ))
+                matched_target.add(old_name)
+                matched_source.add(new_name)
+
+        # Second: detect renames by position (fallback for MSSQL or missing DDL info)
         for pos, source_col in enumerate(source_columns):
             source_name = source_col['name']
+
+            if source_name in matched_source:
+                continue
 
             if source_name in target_by_name:
                 matched_target.add(source_name)
@@ -792,7 +827,7 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                     target_type = str(target_col.get('type', '')).upper().split('(')[0]
 
                     if self._types_are_similar(source_type, target_type):
-                        logger.info(f"Column rename detected: {target_name} -> {source_name}")
+                        logger.info(f"Column rename detected by position: {target_name} -> {source_name}")
                         operations.append(DDLOperation(
                             operation_type=DDLOperationType.RENAME_COLUMN,
                             table_name=table_name,
@@ -831,6 +866,40 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 ))
 
         return operations
+
+    def _extract_renames_from_ddl(self, ddl: str) -> Dict[str, str]:
+        """
+        Extract column renames from MySQL DDL.
+
+        MySQL CHANGE COLUMN syntax: CHANGE [COLUMN] `old_name` `new_name` column_definition
+        MySQL 8.0+ RENAME COLUMN syntax: RENAME COLUMN `old_name` TO `new_name`
+
+        Returns:
+            Dict mapping old_name -> new_name for each rename detected
+        """
+        renames = {}
+
+        # MySQL CHANGE COLUMN: CHANGE [COLUMN] `old` `new` type
+        for match in re.finditer(
+            r'CHANGE\s+(?:COLUMN\s+)?`?(\w+)`?\s+`?(\w+)`?\s+\w+',
+            ddl, re.IGNORECASE
+        ):
+            old_name = match.group(1)
+            new_name = match.group(2)
+            if old_name != new_name:
+                renames[old_name] = new_name
+
+        # MySQL 8.0+ RENAME COLUMN: RENAME COLUMN `old` TO `new`
+        for match in re.finditer(
+            r'RENAME\s+COLUMN\s+`?(\w+)`?\s+TO\s+`?(\w+)`?',
+            ddl, re.IGNORECASE
+        ):
+            old_name = match.group(1)
+            new_name = match.group(2)
+            if old_name != new_name:
+                renames[old_name] = new_name
+
+        return renames
 
     def _types_are_similar(self, source_type: str, target_type: str) -> bool:
         """Check if two column types are similar enough to consider a rename."""
