@@ -204,11 +204,15 @@ def get_mysql_connector_config(
         # Tombstones on delete
         "tombstones.on.delete": "true",
 
+        # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
+        # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
+        "snapshot.fetch.size": "2000",
+
         # Performance tuning - use values from replication_config if provided
         "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
         "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
         "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "500",
-        
+
         "key.converter": "io.confluent.connect.avro.AvroConverter",
         "key.converter.schema.registry.url": "http://schema-registry:8081",
         "key.converter.schemas.enable": "true",
@@ -363,6 +367,10 @@ def get_postgresql_connector_config(
 
         "tombstones.on.delete": "true",
 
+        # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
+        # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
+        "snapshot.fetch.size": "2000",
+
         # Performance tuning - use values from replication_config if provided
         "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
         "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
@@ -373,7 +381,7 @@ def get_postgresql_connector_config(
         "connect.backoff.initial.delay.ms": "1000",
         "connect.backoff.max.delay.ms": "10000",
     }
-    
+
     if tables_whitelist:
         # PostgreSQL table.include.list uses SCHEMA.TABLE format (e.g., 'public.busy_acc_greenera')
         # NOTE: Topic names use DATABASE.TABLE (via RegexRouter transform), but table filter uses SCHEMA
@@ -516,6 +524,10 @@ def get_sqlserver_connector_config(
 
         # Tombstones for deletes
         "tombstones.on.delete": "true",
+
+        # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
+        # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
+        "snapshot.fetch.size": "2000",
 
         # Performance tuning
         "max.queue.size": "8192",

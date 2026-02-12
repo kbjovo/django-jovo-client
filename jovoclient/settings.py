@@ -517,6 +517,9 @@ DEBEZIUM_CONFIG = {
 
     'SCHEMA_REGISTRY_URL': os.getenv('SCHEMA_REGISTRY_URL', 'http://localhost:8082'),
     'CONSUMER_GROUP_PREFIX': 'cdc_consumer',
+
+    # Max tables per source connector to prevent worker OOM during snapshots
+    'MAX_TABLES_PER_CONNECTOR': int(os.getenv('MAX_TABLES_PER_CONNECTOR', '25')),
 }
 
 # ====================================

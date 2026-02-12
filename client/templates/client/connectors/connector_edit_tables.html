@@ -255,13 +255,14 @@
                 Select tables to add. Click on a table to view columns. Adding uses incremental snapshot - no restart required.
             </p>
 
-            <div class="mb-3">
+            <div class="mb-3 flex items-center gap-4">
                 <button type="button"
                         id="toggleAddTablesBtn"
                         class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition"
                         onclick="toggleAllAddTables()">
                     Select All Tables
                 </button>
+                <span id="table-count-display" class="text-sm text-gray-600 dark:text-gray-400"></span>
             </div>
 
             <!-- Accordion for Available Tables -->
@@ -376,6 +377,8 @@
 
 <script>
 const DATABASE_ID = {{ database.pk }};
+const MAX_TABLES_PER_CONNECTOR = {{ max_tables_per_connector }};
+const CURRENT_TABLE_COUNT = {{ current_tables|length }};
 let loadedCurrentTables = new Set();
 let loadedAddTables = new Set();
 let allAddTablesSelected = false;
@@ -439,6 +442,34 @@ function toggleAddAccordion(tableName) {
     }
 }
 
+// Update table count display and disable button if over limit
+function updateTableCountDisplay() {
+    const addCount = document.querySelectorAll('.add-checkbox:checked').length;
+    const removeCount = document.querySelectorAll('.remove-checkbox:checked').length;
+    const totalAfter = CURRENT_TABLE_COUNT - removeCount + addCount;
+    const display = document.getElementById('table-count-display');
+    const submitBtn = document.getElementById('submit-btn-top');
+
+    if (addCount > 0 || removeCount > 0) {
+        display.textContent = `${totalAfter} / ${MAX_TABLES_PER_CONNECTOR} tables after changes`;
+    } else {
+        display.textContent = `${CURRENT_TABLE_COUNT} / ${MAX_TABLES_PER_CONNECTOR} tables`;
+    }
+
+    if (totalAfter > MAX_TABLES_PER_CONNECTOR) {
+        display.classList.remove('text-gray-600', 'dark:text-gray-400');
+        display.classList.add('text-red-600', 'dark:text-red-400', 'font-semibold');
+        submitBtn.disabled = true;
+        submitBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+        submitBtn.classList.add('bg-gray-400', 'cursor-not-allowed');
+        submitBtn.title = `Maximum ${MAX_TABLES_PER_CONNECTOR} tables allowed. Deselect some tables to proceed.`;
+    } else {
+        display.classList.remove('text-red-600', 'dark:text-red-400', 'font-semibold');
+        display.classList.add('text-gray-600', 'dark:text-gray-400');
+        // Don't re-enable here — let updateWarnings() handle the remaining-tables-zero case
+    }
+}
+
 // Handle add table checkbox change
 function handleAddTableCheckboxChange(tableName) {
     const escapedName = escapeTableName(tableName);
@@ -451,6 +482,7 @@ function handleAddTableCheckboxChange(tableName) {
             toggleAddAccordion(tableName);
         }
     }
+    updateTableCountDisplay();
 }
 
 // Toggle all add tables
@@ -476,6 +508,7 @@ function toggleAllAddTables() {
         btn.classList.add('bg-gray-600', 'hover:bg-gray-700');
         allAddTablesSelected = true;
     }
+    updateTableCountDisplay();
 }
 
 // Load current table schema via AJAX
@@ -633,8 +666,10 @@ function renderAddColumns(tableName, columns) {
 // Update warnings based on selections
 function updateWarnings() {
     const removeChecked = document.querySelectorAll('.remove-checkbox:checked').length;
+    const addChecked = document.querySelectorAll('.add-checkbox:checked').length;
     const totalTables = {{ current_tables|length }};
     const remainingTables = totalTables - removeChecked;
+    const totalAfter = remainingTables + addChecked;
     const warningsContainer = document.getElementById('warnings-container');
     const submitBtnTop = document.getElementById('submit-btn-top');
 
@@ -645,6 +680,17 @@ function updateWarnings() {
                     <span class="font-semibold">Error:</span> You are trying to remove all tables.
                     Connectors must have at least 1 table.
                     If you want to remove this connector entirely, use the Delete button instead.
+                </p>
+            </div>
+        `;
+        submitBtnTop.disabled = true;
+        submitBtnTop.classList.add('opacity-50', 'cursor-not-allowed');
+    } else if (totalAfter > MAX_TABLES_PER_CONNECTOR) {
+        warningsContainer.innerHTML = `
+            <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-4">
+                <p class="text-red-800 dark:text-red-200">
+                    <span class="font-semibold">Error:</span> Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector.
+                    After changes you'd have ${totalAfter} tables. Deselect some tables to proceed.
                 </p>
             </div>
         `;
@@ -667,6 +713,8 @@ function updateWarnings() {
         submitBtnTop.disabled = false;
         submitBtnTop.classList.remove('opacity-50', 'cursor-not-allowed');
     }
+
+    updateTableCountDisplay();
 }
 
 // Form validation
@@ -686,6 +734,13 @@ document.querySelector('form').addEventListener('submit', function(e) {
     if (remainingTables === 0) {
         e.preventDefault();
         alert('Cannot remove all tables. Connectors must have at least 1 table.');
+        return false;
+    }
+
+    const totalAfter = remainingTables + addChecked.length;
+    if (totalAfter > MAX_TABLES_PER_CONNECTOR) {
+        e.preventDefault();
+        alert(`Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector allowed. After changes you'd have ${totalAfter}. Reduce the selection.`);
         return false;
     }
 

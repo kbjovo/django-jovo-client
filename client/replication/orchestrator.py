@@ -879,6 +879,10 @@ class ReplicationOrchestrator:
             if not enabled_tables:
                 return False, "No tables enabled for replication"
 
+            max_tables = settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25)
+            if len(enabled_tables) > max_tables:
+                return False, f"Too many tables ({len(enabled_tables)}). Maximum {max_tables} tables per connector to prevent worker crashes."
+
             kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
                 'KAFKA_INTERNAL_SERVERS',
                 'kafka-1:29092,kafka-2:29092,kafka-3:29092'

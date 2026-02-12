@@ -286,13 +286,16 @@
                 Select tables and configure column mapping. Click on a table to expand and configure columns and target table name.
             </p>
 
-            <div class="mb-3">
+            <div class="mb-3 flex items-center gap-4">
                 <button type="button"
                         id="toggleTablesBtn"
                         class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition"
                         onclick="toggleAllTables()">
                     ☑️ Select All Tables
                 </button>
+                <span id="table-count-display" class="text-sm text-gray-600 dark:text-gray-400">
+                    0 / {{ max_tables_per_connector }} tables selected
+                </span>
             </div>
 
             <!-- Accordion for Tables -->
@@ -418,6 +421,28 @@ function escapeTableName(name) {
 }
 
 // Handle table checkbox change
+function updateTableCountDisplay() {
+    const count = document.querySelectorAll('.table-checkbox:checked').length;
+    const display = document.getElementById('table-count-display');
+    const submitBtn = document.getElementById('submit-btn-top');
+    display.textContent = `${count} / ${MAX_TABLES_PER_CONNECTOR} tables selected`;
+    if (count > MAX_TABLES_PER_CONNECTOR) {
+        display.classList.remove('text-gray-600', 'dark:text-gray-400');
+        display.classList.add('text-red-600', 'dark:text-red-400', 'font-semibold');
+        submitBtn.disabled = true;
+        submitBtn.classList.remove('bg-green-600', 'hover:bg-green-700');
+        submitBtn.classList.add('bg-gray-400', 'cursor-not-allowed');
+        submitBtn.title = `Maximum ${MAX_TABLES_PER_CONNECTOR} tables allowed. Deselect some tables to proceed.`;
+    } else {
+        display.classList.remove('text-red-600', 'dark:text-red-400', 'font-semibold');
+        display.classList.add('text-gray-600', 'dark:text-gray-400');
+        submitBtn.disabled = false;
+        submitBtn.classList.remove('bg-gray-400', 'cursor-not-allowed');
+        submitBtn.classList.add('bg-green-600', 'hover:bg-green-700');
+        submitBtn.title = '';
+    }
+}
+
 function handleTableCheckboxChange(tableName) {
     const escapedName = escapeTableName(tableName);
     const checkbox = document.querySelector(`.table-checkbox[data-table-name="${tableName}"]`);
@@ -429,6 +454,7 @@ function handleTableCheckboxChange(tableName) {
             toggleAccordion(tableName);
         }
     }
+    updateTableCountDisplay();
 }
 
 // Toggle all tables
@@ -455,6 +481,7 @@ function toggleAllTables() {
         btn.classList.add('bg-gray-600', 'hover:bg-gray-700');
         allTablesSelected = true;
     }
+    updateTableCountDisplay();
 }
 
 // Toggle accordion for a table
@@ -555,12 +582,19 @@ function renderColumns(tableName, columns) {
 }
 
 // Form validation
+const MAX_TABLES_PER_CONNECTOR = {{ max_tables_per_connector }};
 document.querySelector('form').addEventListener('submit', function(e) {
     const checkedTables = document.querySelectorAll('.table-checkbox:checked');
 
     if (checkedTables.length === 0) {
         e.preventDefault();
         alert('⚠️ Please select at least one table');
+        return false;
+    }
+
+    if (checkedTables.length > MAX_TABLES_PER_CONNECTOR) {
+        e.preventDefault();
+        alert(`⚠️ Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector allowed. You selected ${checkedTables.length}. Reduce the selection to prevent worker crashes during snapshots.`);
         return false;
     }
 

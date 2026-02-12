@@ -5,6 +5,7 @@ Supports multiple source connectors per database with shared sink connector
 
 import logging
 import json
+from django.conf import settings
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse
 from django.contrib import messages
@@ -420,6 +421,12 @@ def connector_add(request, database_pk):
                     messages.error(request, "Please select at least one table")
                     return redirect('connector_add', database_pk=database_pk)
 
+                # Validate table count limit
+                max_tables = settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25)
+                if len(selected_tables) > max_tables:
+                    messages.error(request, f"Maximum {max_tables} tables per connector allowed. You selected {len(selected_tables)}. Reduce the selection to prevent worker crashes during snapshots.")
+                    return redirect('connector_add', database_pk=database_pk)
+
                 # Validate all selected tables are unassigned
                 assigned_tables = set(unassigned_tables)
                 invalid_tables = [t for t in selected_tables if t not in assigned_tables]
@@ -573,6 +580,7 @@ def connector_add(request, database_pk):
         'snapshot_mode_choices': ReplicationConfig.SNAPSHOT_MODE_CHOICES,
         'processing_mode_choices': ReplicationConfig.PROCESSING_MODE_CHOICES,
         'batch_interval_choices': ReplicationConfig.BATCH_INTERVAL_CHOICES,
+        'max_tables_per_connector': settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25),
     }
 
     return render(request, 'client/connectors/connector_add.html', context)
@@ -855,6 +863,14 @@ def connector_edit_tables(request, config_pk):
                     messages.error(request, f"Tables already assigned: {', '.join(invalid_tables)}")
                     return redirect('connector_edit_tables', config_pk=config_pk)
 
+                # Validate table count limit (current tables minus removals plus additions)
+                max_tables = settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25)
+                current_count = len(current_tables) - len(tables_to_remove)
+                total_after = current_count + len(tables_to_add)
+                if total_after > max_tables:
+                    messages.error(request, f"Maximum {max_tables} tables per connector. After changes you'd have {total_after}. Reduce the selection.")
+                    return redirect('connector_edit_tables', config_pk=config_pk)
+
                 success, message = orchestrator.add_tables(tables_to_add)
                 if success:
                     messages.success(request, message)
@@ -875,6 +891,7 @@ def connector_edit_tables(request, config_pk):
         'client': client,
         'current_tables': current_tables,
         'unassigned_tables': unassigned_tables,
+        'max_tables_per_connector': settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25),
     }
 
     return render(request, 'client/connectors/connector_edit_tables.html', context)
