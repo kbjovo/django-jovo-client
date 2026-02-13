@@ -61,7 +61,6 @@ build/
 # Ignore Claude config folder
 .claude/
 
-theme/static/css/dist/
 node_modules/
 
 logs/
