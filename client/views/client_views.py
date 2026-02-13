@@ -160,10 +160,14 @@ class ClientDetailView(DetailView):
 
         for connector in all_connectors:
             try:
-                status = connector_manager.get_connector_status(connector.connector_name)
-                connector.debezium_status = status
-                if status.get('state') == 'RUNNING':
-                    running_count += 1
+                exists, status_data = connector_manager.get_connector_status(connector.connector_name)
+                if exists and status_data:
+                    connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                    connector.debezium_status = {'state': connector_state, 'raw': status_data}
+                    if connector_state == 'RUNNING':
+                        running_count += 1
+                else:
+                    connector.debezium_status = {'state': 'NOT_FOUND'}
             except Exception:
                 connector.debezium_status = {'state': 'UNKNOWN'}
 

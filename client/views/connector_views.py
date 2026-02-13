@@ -132,8 +132,12 @@ def connectors_list(request):
     connector_manager = DebeziumConnectorManager()
     for connector in page_obj:
         try:
-            status = connector_manager.get_connector_status(connector.connector_name)
-            connector.debezium_status = status
+            exists, status_data = connector_manager.get_connector_status(connector.connector_name)
+            if exists and status_data:
+                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                connector.debezium_status = {'state': connector_state, 'raw': status_data}
+            else:
+                connector.debezium_status = {'state': 'NOT_FOUND'}
         except Exception as e:
             logger.warning(f"Could not get status for {connector.connector_name}: {e}")
             connector.debezium_status = {'state': 'UNKNOWN'}
@@ -248,8 +252,12 @@ def client_connectors_list(request, client_pk):
     connector_manager = DebeziumConnectorManager()
     for connector in page_obj:
         try:
-            status = connector_manager.get_connector_status(connector.connector_name)
-            connector.debezium_status = status
+            exists, status_data = connector_manager.get_connector_status(connector.connector_name)
+            if exists and status_data:
+                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                connector.debezium_status = {'state': connector_state, 'raw': status_data}
+            else:
+                connector.debezium_status = {'state': 'NOT_FOUND'}
         except Exception as e:
             logger.warning(f"Could not get status for {connector.connector_name}: {e}")
             connector.debezium_status = {'state': 'UNKNOWN'}
@@ -309,8 +317,12 @@ def connector_list(request, database_pk):
     connectors_with_status = []
     for config in source_connectors:
         try:
-            status = connector_manager.get_connector_status(config.connector_name)
-            config.debezium_status = status
+            exists, status_data = connector_manager.get_connector_status(config.connector_name)
+            if exists and status_data:
+                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                config.debezium_status = {'state': connector_state, 'raw': status_data}
+            else:
+                config.debezium_status = {'state': 'NOT_FOUND'}
         except Exception as e:
             logger.warning(f"Could not get status for {config.connector_name}: {e}")
             config.debezium_status = {'state': 'UNKNOWN'}
