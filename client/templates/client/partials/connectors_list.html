@@ -50,11 +50,11 @@
         <!-- Table Header -->
         <div class="bg-gray-100 dark:bg-gray-700 px-4 py-3 border-b border-gray-200 dark:border-gray-600">
           <div class="grid grid-cols-12 gap-4 items-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-            <div class="col-span-4">Connector Name</div>
+            <div class="col-span-5">Connector Name</div>
             <div class="col-span-1 text-center">Mode</div>
             <div class="col-span-1 text-center">Tables</div>
-            <div class="col-span-3 text-center">Created</div>
-            <div class="col-span-3 text-right">Actions</div>
+            <div class="col-span-2 text-center">Created</div>
+            <div class="col-span-3 text-right pr-1">Actions</div>
           </div>
         </div>
 
@@ -65,7 +65,7 @@
           <div class="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
             <div class="grid grid-cols-12 gap-4 items-center">
               <!-- Connector Name & Status -->
-              <div class="col-span-4">
+              <div class="col-span-5">
                 <div class="flex items-center gap-3">
                   <div>
                     <div class="flex items-center gap-2">
@@ -100,7 +100,7 @@
               </div>
 
               <!-- Created Date -->
-              <div class="col-span-3 text-center text-sm text-gray-600 dark:text-gray-400">
+              <div class="col-span-2 text-center text-sm text-gray-600 dark:text-gray-400">
                 {{ config.created_at|date:"M d, Y" }}
               </div>
 
