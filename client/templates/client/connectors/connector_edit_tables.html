@@ -255,14 +255,35 @@
                 Select tables to add. Click on a table to view columns. Adding uses incremental snapshot - no restart required.
             </p>
 
-            <div class="mb-3 flex items-center gap-4">
+            <div class="mb-3 flex items-center gap-3">
+                <!-- Search Box -->
+                <div class="relative w-64">
+                    <div class="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                        <svg class="w-4 h-4 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                        </svg>
+                    </div>
+                    <input type="text"
+                           id="addTableSearchInput"
+                           class="w-full pl-10 pr-10 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                           placeholder="Search tables..."
+                           oninput="filterAddTables()">
+                    <button type="button"
+                            id="clearAddSearchBtn"
+                            class="absolute inset-y-0 right-3 flex items-center hidden"
+                            onclick="clearAddTableSearch()">
+                        <svg class="w-4 h-4 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
                 <button type="button"
                         id="toggleAddTablesBtn"
-                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition whitespace-nowrap"
                         onclick="toggleAllAddTables()">
                     Select All Tables
                 </button>
-                <span id="table-count-display" class="text-sm text-gray-600 dark:text-gray-400"></span>
+                <span id="table-count-display" class="text-sm text-gray-600 dark:text-gray-400 whitespace-nowrap"></span>
             </div>
 
             <!-- Accordion for Available Tables -->
@@ -485,29 +506,59 @@ function handleAddTableCheckboxChange(tableName) {
     updateTableCountDisplay();
 }
 
-// Toggle all add tables
-function toggleAllAddTables() {
-    const checkboxes = document.querySelectorAll('.add-checkbox');
-    const btn = document.getElementById('toggleAddTablesBtn');
+// Filter add tables by search input
+function filterAddTables() {
+    const searchInput = document.getElementById('addTableSearchInput');
+    const clearBtn = document.getElementById('clearAddSearchBtn');
+    const query = searchInput.value.toLowerCase().trim();
+    const items = document.querySelectorAll('.add-table-item');
 
-    if (allAddTablesSelected) {
-        // Deselect all
-        checkboxes.forEach(cb => cb.checked = false);
+    clearBtn.classList.toggle('hidden', query === '');
+
+    items.forEach(item => {
+        const tableName = item.getAttribute('data-table-name').toLowerCase();
+        item.style.display = tableName.includes(query) ? '' : 'none';
+    });
+}
+
+// Clear search input
+function clearAddTableSearch() {
+    const searchInput = document.getElementById('addTableSearchInput');
+    searchInput.value = '';
+    filterAddTables();
+    searchInput.focus();
+}
+
+// Get only visible (not filtered out) add checkboxes
+function getVisibleAddCheckboxes() {
+    return Array.from(document.querySelectorAll('.add-checkbox')).filter(cb => {
+        return cb.closest('.add-table-item').style.display !== 'none';
+    });
+}
+
+// Toggle all add tables (only visible ones)
+function toggleAllAddTables() {
+    const visibleCheckboxes = getVisibleAddCheckboxes();
+    const btn = document.getElementById('toggleAddTablesBtn');
+    const allVisibleChecked = visibleCheckboxes.length > 0 && visibleCheckboxes.every(cb => cb.checked);
+
+    if (allVisibleChecked) {
+        // Deselect visible
+        visibleCheckboxes.forEach(cb => cb.checked = false);
         btn.innerHTML = 'Select All Tables';
         btn.classList.remove('bg-gray-600', 'hover:bg-gray-700');
         btn.classList.add('bg-blue-600', 'hover:bg-blue-700');
-        allAddTablesSelected = false;
     } else {
-        // Select all
-        checkboxes.forEach(cb => {
+        // Select visible
+        visibleCheckboxes.forEach(cb => {
             cb.checked = true;
             handleAddTableCheckboxChange(cb.value);
         });
         btn.innerHTML = 'Deselect All Tables';
         btn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
         btn.classList.add('bg-gray-600', 'hover:bg-gray-700');
-        allAddTablesSelected = true;
     }
+    allAddTablesSelected = !allVisibleChecked;
     updateTableCountDisplay();
 }
 

@@ -224,6 +224,11 @@ def get_mysql_connector_config(
         "key.converter.enhanced.avro.schema.support": "true",
         "value.converter.enhanced.avro.schema.support": "true",
 
+        # Handle invalid/zero MySQL date values (e.g., 0000-00-00, 0000-00-00 00:00:00)
+        # Without this, BinlogFieldReader logs warnings for every row with invalid dates
+        # "warn" = log warning and use fallback value (null/epoch), "fail" = stop connector
+        "event.deserialization.failure.handling.mode": "warn",
+
         # Connection timeouts
         "connect.timeout.ms": "30000",
         "connect.max.attempts": "3",
