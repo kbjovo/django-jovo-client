@@ -41,6 +41,7 @@ Thumbs.db
 # Environment variables
 .env
 *.env
+.env.docker
 
 # Coverage / testing
 .coverage
