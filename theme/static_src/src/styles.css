@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @plugin "daisyui";
+@custom-variant dark (&:where(.dark, .dark *));
 
 /**
   * A catch-all path to Django template files, JavaScript, and Python files

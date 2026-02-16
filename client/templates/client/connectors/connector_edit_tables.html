@@ -51,10 +51,10 @@
                     </label>
                     <select name="snapshot_mode"
                             class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                        <option value="initial" selected>Initial (Recommended)</option>
-                        <option value="when_needed">When Needed</option>
-                        <option value="never">Never</option>
-                        <option value="schema_only">Schema Only</option>
+                        <option value="initial" {% if replication_config.snapshot_mode == 'initial' %}selected{% endif %}>Initial (Recommended)</option>
+                        <option value="when_needed" {% if replication_config.snapshot_mode == 'when_needed' %}selected{% endif %}>When Needed</option>
+                        <option value="never" {% if replication_config.snapshot_mode == 'never' %}selected{% endif %}>Never</option>
+                        <option value="schema_only" {% if replication_config.snapshot_mode == 'schema_only' %}selected{% endif %}>Schema Only</option>
                     </select>
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         How to handle initial data snapshot
@@ -68,7 +68,7 @@
                     </label>
                     <input type="number"
                            name="max_queue_size"
-                           value="8192"
+                           value="{{ replication_config.max_queue_size }}"
                            min="1024"
                            max="65536"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
@@ -84,7 +84,7 @@
                     </label>
                     <input type="number"
                            name="max_batch_size"
-                           value="2048"
+                           value="{{ replication_config.max_batch_size }}"
                            min="256"
                            max="16384"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
@@ -100,7 +100,7 @@
                     </label>
                     <input type="number"
                            name="poll_interval_ms"
-                           value="500"
+                           value="{{ replication_config.poll_interval_ms }}"
                            min="100"
                            max="10000"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
@@ -116,7 +116,7 @@
                     </label>
                     <input type="number"
                            name="incremental_snapshot_chunk_size"
-                           value="1024"
+                           value="{{ replication_config.incremental_snapshot_chunk_size }}"
                            min="256"
                            max="65536"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
@@ -134,6 +134,7 @@
                         <input type="checkbox"
                                name="drop_before_sync"
                                id="drop_before_sync"
+                               {% if replication_config.drop_before_sync %}checked{% endif %}
                                class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
                         <label for="drop_before_sync" class="ml-2 text-sm text-gray-900 dark:text-white">
                             Drop target tables before sync
@@ -142,6 +143,63 @@
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         Warning: This will delete existing data
                     </p>
+                </div>
+            </div>
+
+            <!-- Processing Mode & Batch Settings -->
+            <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                <h6 class="text-sm font-semibold text-gray-900 dark:text-white mb-3">Processing Mode</h6>
+                <div class="space-y-3">
+                    <label class="flex items-center p-2 border border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+                        <input type="radio"
+                               name="processing_mode"
+                               value="cdc"
+                               class="w-4 h-4 text-blue-600 focus:ring-blue-500"
+                               {% if replication_config.processing_mode == 'cdc' %}checked{% endif %}
+                               onchange="toggleBatchOptions()">
+                        <span class="ml-2 text-sm text-gray-900 dark:text-white">CDC (Real-time streaming)</span>
+                    </label>
+                    <label class="flex items-center p-2 border border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+                        <input type="radio"
+                               name="processing_mode"
+                               value="batch"
+                               class="w-4 h-4 text-blue-600 focus:ring-blue-500"
+                               {% if replication_config.processing_mode == 'batch' %}checked{% endif %}
+                               onchange="toggleBatchOptions()">
+                        <span class="ml-2 text-sm text-gray-900 dark:text-white">Batch (Scheduled sync windows)</span>
+                    </label>
+                </div>
+
+                <div id="batch-options" class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4 {% if replication_config.processing_mode != 'batch' %}hidden{% endif %}">
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                            Sync Interval
+                        </label>
+                        <select name="batch_interval"
+                                id="batch_interval"
+                                class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                            <option value="">Select interval...</option>
+                            <option value="5m" {% if replication_config.batch_interval == '5m' %}selected{% endif %}>Every 5 minutes</option>
+                            <option value="15m" {% if replication_config.batch_interval == '15m' %}selected{% endif %}>Every 15 minutes</option>
+                            <option value="30m" {% if replication_config.batch_interval == '30m' %}selected{% endif %}>Every 30 minutes</option>
+                            <option value="1h" {% if replication_config.batch_interval == '1h' %}selected{% endif %}>Every hour</option>
+                            <option value="6h" {% if replication_config.batch_interval == '6h' %}selected{% endif %}>Every 6 hours</option>
+                            <option value="12h" {% if replication_config.batch_interval == '12h' %}selected{% endif %}>Every 12 hours</option>
+                            <option value="24h" {% if replication_config.batch_interval == '24h' %}selected{% endif %}>Every 24 hours</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                            Max Sync Duration
+                        </label>
+                        <select name="batch_max_catchup_minutes"
+                                id="batch_max_catchup_minutes"
+                                class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                            <option value="5" {% if replication_config.batch_max_catchup_minutes == 5 %}selected{% endif %}>5 minutes</option>
+                            <option value="10" {% if replication_config.batch_max_catchup_minutes == 10 %}selected{% endif %}>10 minutes</option>
+                            <option value="20" {% if replication_config.batch_max_catchup_minutes == 20 %}selected{% endif %}>20 minutes</option>
+                        </select>
+                    </div>
                 </div>
             </div>
         </div>
@@ -420,6 +478,17 @@ function toggleConnectorSettings() {
     } else {
         content.classList.add('hidden');
         icon.style.transform = 'rotate(0deg)';
+    }
+}
+
+// Toggle batch options visibility based on processing mode
+function toggleBatchOptions() {
+    const processingMode = document.querySelector('input[name="processing_mode"]:checked').value;
+    const batchOptions = document.getElementById('batch-options');
+    if (processingMode === 'batch') {
+        batchOptions.classList.remove('hidden');
+    } else {
+        batchOptions.classList.add('hidden');
     }
 }
 

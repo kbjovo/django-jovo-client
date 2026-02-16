@@ -479,8 +479,9 @@ def connector_add(request, database_pk):
                     created_by=request.user if request.user.is_authenticated else None
                 )
 
-                # Generate and save connector name
-                connector_name = generate_connector_name(client, database, version=next_version)
+                # Use user-provided name or fall back to auto-generated
+                custom_name = request.POST.get('connector_name', '').strip()
+                connector_name = custom_name if custom_name else generate_connector_name(client, database, version=next_version)
                 replication_config.connector_name = connector_name
                 # Topic prefix must match connector template (includes version for JMX uniqueness)
                 replication_config.kafka_topic_prefix = f"client_{client.id}_db_{database.id}_v_{next_version}"
@@ -840,10 +841,63 @@ def connector_edit_tables(request, config_pk):
     # POST: Process changes
     if request.method == 'POST':
         try:
+            # Update connector settings
+            settings_changed = False
+            settings_fields = {
+                'snapshot_mode': request.POST.get('snapshot_mode'),
+                'max_queue_size': request.POST.get('max_queue_size'),
+                'max_batch_size': request.POST.get('max_batch_size'),
+                'poll_interval_ms': request.POST.get('poll_interval_ms'),
+                'incremental_snapshot_chunk_size': request.POST.get('incremental_snapshot_chunk_size'),
+            }
+
+            if settings_fields['snapshot_mode'] and settings_fields['snapshot_mode'] != replication_config.snapshot_mode:
+                replication_config.snapshot_mode = settings_fields['snapshot_mode']
+                settings_changed = True
+            for int_field in ['max_queue_size', 'max_batch_size', 'poll_interval_ms', 'incremental_snapshot_chunk_size']:
+                if settings_fields[int_field]:
+                    new_val = int(settings_fields[int_field])
+                    if new_val != getattr(replication_config, int_field):
+                        setattr(replication_config, int_field, new_val)
+                        settings_changed = True
+
+            drop_before_sync = 'drop_before_sync' in request.POST
+            if drop_before_sync != replication_config.drop_before_sync:
+                replication_config.drop_before_sync = drop_before_sync
+                settings_changed = True
+
+            # Processing mode & batch settings
+            processing_mode = request.POST.get('processing_mode', replication_config.processing_mode)
+            if processing_mode != replication_config.processing_mode:
+                replication_config.processing_mode = processing_mode
+                settings_changed = True
+
+            if processing_mode == 'batch':
+                batch_interval = request.POST.get('batch_interval')
+                if batch_interval and batch_interval != replication_config.batch_interval:
+                    replication_config.batch_interval = batch_interval
+                    settings_changed = True
+                batch_max_catchup = int(request.POST.get('batch_max_catchup_minutes', replication_config.batch_max_catchup_minutes))
+                if batch_max_catchup not in [5, 10, 20]:
+                    batch_max_catchup = 5
+                if batch_max_catchup != replication_config.batch_max_catchup_minutes:
+                    replication_config.batch_max_catchup_minutes = batch_max_catchup
+                    settings_changed = True
+            elif processing_mode == 'cdc' and replication_config.batch_interval:
+                replication_config.batch_interval = None
+                settings_changed = True
+
+            if settings_changed:
+                replication_config.save()
+                messages.success(request, "Connector settings updated")
+
+            # Handle table changes
             tables_to_remove = request.POST.getlist('remove_tables')
             tables_to_add = request.POST.getlist('add_tables')
 
             if not tables_to_remove and not tables_to_add:
+                if settings_changed:
+                    return redirect('connector_list', database_pk=database.id)
                 messages.warning(request, "No changes specified")
                 return redirect('connector_edit_tables', config_pk=config_pk)
 
