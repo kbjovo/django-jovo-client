@@ -1,5 +1,5 @@
 <!-- Connectors List Partial for Client Detail -->
-<div x-data="{ deleteModal: { open: false, pk: null, name: '', tables: 0, confirmed: false } }">
+<div x-data="{ deleteModal: { open: false, pk: null, name: '', tables: 0, confirmed: false, truncate: false, drop: false, loading: false } }">
   <!-- Tab Header -->
   <div class="flex justify-between items-center mb-6">
     <div>
@@ -131,7 +131,7 @@
                   </svg>
                 </a>
                 <!-- Delete -->
-                <button @click="deleteModal = { open: true, pk: {{ config.pk }}, name: '{{ config.connector_name }}', tables: {{ config.table_count }}, confirmed: false }"
+                <button @click="deleteModal = { open: true, pk: {{ config.pk }}, name: '{{ config.connector_name }}', tables: {{ config.table_count }}, confirmed: false, truncate: false, drop: false, loading: false }"
                         title="Delete"
                         class="p-1.5 text-white bg-red-600 hover:bg-red-700 rounded-lg transition">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

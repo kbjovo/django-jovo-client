@@ -213,7 +213,7 @@
         <div class="p-4">
             {% if current_tables %}
             <p class="text-gray-600 dark:text-gray-400 mb-3 text-sm">
-                Click on a table to view columns. Check tables to remove them (requires connector restart).
+                Click on a table to view columns. Check tables to remove them (target tables will be truncated).
             </p>
 
             {% if current_tables|length == 1 %}
@@ -821,7 +821,7 @@ function updateWarnings() {
             <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
                 <p class="text-yellow-800 dark:text-yellow-200">
                     <span class="font-semibold">Warning:</span> Removing ${removeChecked} table(s) will restart the connector.
-                    This will cause a brief interruption (typically 10-30 seconds).
+                    Target tables will be truncated (data cleared, structure kept).
                     ${remainingTables} table(s) will remain in this connector.
                 </p>
             </div>
@@ -842,12 +842,6 @@ document.querySelector('form').addEventListener('submit', function(e) {
     const removeChecked = document.querySelectorAll('.remove-checkbox:checked');
     const addChecked = document.querySelectorAll('.add-checkbox:checked');
 
-    if (removeChecked.length === 0 && addChecked.length === 0) {
-        e.preventDefault();
-        alert('No changes selected. Please select tables to add or remove.');
-        return false;
-    }
-
     const totalTables = {{ current_tables|length }};
     const remainingTables = totalTables - removeChecked.length;
 
@@ -866,7 +860,7 @@ document.querySelector('form').addEventListener('submit', function(e) {
 
     // Confirm removal
     if (removeChecked.length > 0) {
-        if (!confirm(`Are you sure you want to remove ${removeChecked.length} table(s)? This will restart the connector.`)) {
+        if (!confirm(`Are you sure you want to remove ${removeChecked.length} table(s)? Target tables will be truncated and the connector will restart.`)) {
             e.preventDefault();
             return false;
         }

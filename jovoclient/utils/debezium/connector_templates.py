@@ -234,8 +234,16 @@ def get_mysql_connector_config(
         "connect.max.attempts": "3",
         "connect.backoff.initial.delay.ms": "1000",
         "connect.backoff.max.delay.ms": "10000",
+
+        # JDBC driver properties - autoReconnect for MySQL
+        "driver.autoReconnect": "true",
+
+        # c3p0 connection pool validation - test connections before use
+        "driver.hibernate.c3p0.testConnectionOnCheckout": "true",
+        "driver.hibernate.c3p0.preferredTestQuery": "SELECT 1",
+        "driver.hibernate.c3p0.idle_test_period": "300",
     }
-    
+
     # Add table whitelist if specified
     if tables_whitelist:
         # Format: database.table1,database.table2
@@ -385,6 +393,14 @@ def get_postgresql_connector_config(
         "connect.max.attempts": "3",
         "connect.backoff.initial.delay.ms": "1000",
         "connect.backoff.max.delay.ms": "10000",
+
+        # JDBC driver properties - autoReconnect for connection resilience
+        "driver.autoReconnect": "true",
+
+        # c3p0 connection pool validation - test connections before use
+        "driver.hibernate.c3p0.testConnectionOnCheckout": "true",
+        "driver.hibernate.c3p0.preferredTestQuery": "SELECT 1",
+        "driver.hibernate.c3p0.idle_test_period": "300",
     }
 
     if tables_whitelist:
@@ -542,6 +558,14 @@ def get_sqlserver_connector_config(
         # Connection settings
         "database.connection.timeout.ms": "30000",
         "heartbeat.interval.ms": "10000",
+
+        # JDBC driver properties - autoReconnect for connection resilience
+        "driver.autoReconnect": "true",
+
+        # c3p0 connection pool validation - test connections before use
+        "driver.hibernate.c3p0.testConnectionOnCheckout": "true",
+        "driver.hibernate.c3p0.preferredTestQuery": "SELECT 1",
+        "driver.hibernate.c3p0.idle_test_period": "300",
     }
 
     # ✅ CRITICAL: Table whitelist format for SQL Server
@@ -737,9 +761,17 @@ def get_oracle_connector_config(
         "errors.tolerance": "none",
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
-        
+
         "provide.transaction.metadata": "false",
         "skipped.operations": "t",
+
+        # JDBC driver properties - autoReconnect for connection resilience
+        "driver.autoReconnect": "true",
+
+        # c3p0 connection pool validation - test connections before use
+        "driver.hibernate.c3p0.testConnectionOnCheckout": "true",
+        "driver.hibernate.c3p0.preferredTestQuery": "SELECT 1 FROM DUAL",
+        "driver.hibernate.c3p0.idle_test_period": "300",
     }
 
     # Table whitelist

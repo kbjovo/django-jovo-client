@@ -868,12 +868,18 @@ def connector_edit_tables(request, config_pk):
 
             # Processing mode & batch settings
             processing_mode = request.POST.get('processing_mode', replication_config.processing_mode)
-            if processing_mode != replication_config.processing_mode:
+            old_processing_mode = replication_config.processing_mode
+            mode_switched = processing_mode != old_processing_mode
+
+            if mode_switched:
                 replication_config.processing_mode = processing_mode
                 settings_changed = True
 
             if processing_mode == 'batch':
                 batch_interval = request.POST.get('batch_interval')
+                if mode_switched and not batch_interval:
+                    messages.error(request, "Please select a sync interval for batch mode")
+                    return redirect('connector_edit_tables', config_pk=config_pk)
                 if batch_interval and batch_interval != replication_config.batch_interval:
                     replication_config.batch_interval = batch_interval
                     settings_changed = True
@@ -883,13 +889,34 @@ def connector_edit_tables(request, config_pk):
                 if batch_max_catchup != replication_config.batch_max_catchup_minutes:
                     replication_config.batch_max_catchup_minutes = batch_max_catchup
                     settings_changed = True
-            elif processing_mode == 'cdc' and replication_config.batch_interval:
+            elif processing_mode == 'cdc' and mode_switched:
+                # Switching to CDC — clear batch settings (schedule cleanup happens below)
                 replication_config.batch_interval = None
                 settings_changed = True
 
             if settings_changed:
                 replication_config.save()
-                messages.success(request, "Connector settings updated")
+
+                from client.replication.orchestrator import ReplicationOrchestrator
+                orch = ReplicationOrchestrator(replication_config)
+
+                if mode_switched:
+                    if processing_mode == 'batch':
+                        # CDC → Batch: setup schedule (will pause connector on schedule)
+                        orch.setup_batch_schedule()
+                        # Pause connector immediately — batch schedule will resume it
+                        orch.pause_connector()
+                        messages.success(request, "Switched to batch mode — connector paused, batch schedule created")
+                    elif processing_mode == 'cdc':
+                        # Batch → CDC: remove schedule and resume connector for continuous streaming
+                        orch.remove_batch_schedule()
+                        orch.resume_connector()
+                        messages.success(request, "Switched to CDC mode — batch schedule removed, connector resumed")
+                else:
+                    # Same mode, just settings changed — reschedule if batch
+                    if processing_mode == 'batch' and replication_config.batch_celery_task_name:
+                        orch.setup_batch_schedule()
+                    messages.success(request, "Connector settings updated")
 
             # Handle table changes
             tables_to_remove = request.POST.getlist('remove_tables')
@@ -994,11 +1021,13 @@ def connector_delete(request, config_pk):
             # Read optional cleanup flags from modal checkboxes
             delete_topics = bool(request.POST.get('delete_topics'))
             drop_tables = bool(request.POST.get('drop_tables'))
+            truncate_tables = bool(request.POST.get('truncate_tables'))
 
             orchestrator = ReplicationOrchestrator(replication_config)
             success, message = orchestrator.delete_replication(
                 delete_topics=delete_topics,
                 drop_tables=drop_tables,
+                truncate_tables=truncate_tables,
             )
 
             if success:
@@ -1007,6 +1036,8 @@ def connector_delete(request, config_pk):
                     extras.append("topics deleted")
                 if drop_tables:
                     extras.append("target tables dropped")
+                if truncate_tables and not drop_tables:
+                    extras.append("target tables truncated")
                 suffix = f" ({', '.join(extras)})" if extras else ""
                 messages.success(
                     request,
@@ -1114,6 +1145,9 @@ def connector_monitor(request, config_pk):
         source_exists = source_state not in ('NOT_FOUND', 'ERROR')
         sink_exists = sink_state not in ('NOT_FOUND', 'ERROR', 'NOT_CONFIGURED')
 
+        source_tasks = unified_status['source_connector'].get('tasks', [])
+        sink_tasks = unified_status['sink_connector'].get('tasks', [])
+
         context = {
             'replication_config': replication_config,
             'database': database,
@@ -1123,6 +1157,8 @@ def connector_monitor(request, config_pk):
             'sink_exists': sink_exists,
             'source_state': source_state,
             'sink_state': sink_state,
+            'source_tasks': source_tasks,
+            'sink_tasks': sink_tasks,
             'snapshot': unified_status.get('snapshot'),
             'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True),
         }
@@ -1152,4 +1188,155 @@ def connector_status_api(request, config_pk):
 
     except Exception as e:
         logger.error(f'Failed to get connector status: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+# ========================================
+# Connector Action Endpoints (AJAX)
+# ========================================
+
+def connector_pause(request, config_pk):
+    """Pause a running source connector."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.pause_connector()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to pause connector: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_resume(request, config_pk):
+    """Resume a paused source connector."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.resume_connector()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to resume connector: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_restart(request, config_pk):
+    """Restart a source connector (light restart via Kafka Connect REST API)."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        connector_mgr = DebeziumConnectorManager()
+        success, error = connector_mgr.restart_connector(config.connector_name)
+        if success:
+            return JsonResponse({'success': True, 'message': 'Connector restarted successfully'})
+        return JsonResponse({'success': False, 'message': error})
+    except Exception as e:
+        logger.error(f'Failed to restart connector: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_restart_failed_tasks(request, config_pk):
+    """Restart only FAILED tasks for the source connector."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.restart_failed_tasks()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to restart failed tasks: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_restart_all_tasks(request, config_pk):
+    """Restart all tasks for the source connector."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.restart_all_tasks()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to restart tasks: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_sync_schedule(request, config_pk):
+    """Re-establish batch schedule for a connector that is out of sync."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.sync_with_schedule()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to sync schedule: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+# ========================================
+# Sink Connector Action Endpoints (AJAX)
+# ========================================
+
+def sink_restart(request, config_pk):
+    """Restart the shared sink connector."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        if not config.sink_connector_name:
+            return JsonResponse({'success': False, 'message': 'No sink connector configured'})
+        connector_mgr = DebeziumConnectorManager()
+        success, error = connector_mgr.restart_connector(config.sink_connector_name)
+        if success:
+            return JsonResponse({'success': True, 'message': 'Sink connector restarted'})
+        return JsonResponse({'success': False, 'message': error})
+    except Exception as e:
+        logger.error(f'Failed to restart sink: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def sink_restart_failed_tasks(request, config_pk):
+    """Restart only FAILED tasks for the shared sink connector."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        if not config.sink_connector_name:
+            return JsonResponse({'success': False, 'message': 'No sink connector configured'})
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.restart_failed_tasks(connector_name=config.sink_connector_name)
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to restart sink failed tasks: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def sink_restart_all_tasks(request, config_pk):
+    """Restart all tasks for the shared sink connector."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        if not config.sink_connector_name:
+            return JsonResponse({'success': False, 'message': 'No sink connector configured'})
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.restart_all_tasks(connector_name=config.sink_connector_name)
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to restart sink tasks: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)

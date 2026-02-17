@@ -4,7 +4,7 @@
 {% block title %}Monitor - {{ replication_config.connector_name }}{% endblock %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto" x-data="{ deleteModal: { open: false, pk: null, name: '', tables: 0, confirmed: false } }">
+<div class="max-w-7xl mx-auto" x-data="{ deleteModal: { open: false, pk: null, name: '', tables: 0, confirmed: false, truncate: false, drop: false, loading: false } }">
 
   <!-- Header -->
   <div class="flex justify-between items-center mb-6">
@@ -15,46 +15,186 @@
         &middot; {{ client.name }} &middot; {{ database.connection_name }}
       </p>
     </div>
-    <div class="flex gap-2">
+    <div class="flex gap-2" x-data="{ actionsOpen: false }">
+      <!-- Actions Dropdown -->
+      <div class="relative">
+        <button @click="actionsOpen = !actionsOpen" @click.outside="actionsOpen = false"
+          class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm transition">
+          Actions
+          <svg class="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+
+        <div x-show="actionsOpen" x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100" x-transition:leave="transition ease-in duration-75" x-transition:leave-start="opacity-100 scale-100" x-transition:leave-end="opacity-0 scale-95"
+          x-cloak class="absolute right-0 mt-2 w-56 min-w-max bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
+
+          <!-- Edit -->
+          <a href="{% url 'connector_edit_tables' replication_config.pk %}"
+            class="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+            <svg class="w-4 h-4 mr-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+            </svg>
+            Edit Tables & Settings
+          </a>
+
+          <div class="border-t border-gray-100 dark:border-gray-700 my-1"></div>
+
+          <!-- Recreate Connector -->
+          <button @click="document.getElementById('recreateModal').classList.remove('hidden'); actionsOpen = false"
+            class="w-full flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+            <svg class="w-4 h-4 mr-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+            Recreate Connector
+          </button>
+
+          <div class="border-t border-gray-100 dark:border-gray-700 my-1"></div>
+
+          <!-- Delete Connector -->
+          <button @click="deleteModal = { open: true, pk: {{ replication_config.pk }}, name: '{{ replication_config.connector_name }}', tables: {{ enabled_table_mappings.count }}, confirmed: false, truncate: false, drop: false, loading: false }; actionsOpen = false"
+            class="w-full flex items-center px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
+            <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+            </svg>
+            Delete Connector
+          </button>
+        </div>
+      </div>
+
       <a href="{% url 'connector_list' database.pk %}"
-         class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition text-sm">
+         class="inline-flex items-center px-4 py-2 bg-gray-600 hover:bg-gray-700 dark:bg-gray-700 dark:hover:bg-gray-600 text-white rounded-lg transition text-sm font-medium">
         &larr; Back to Connectors
       </a>
     </div>
   </div>
 
   <!-- Status Cards -->
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-    <!-- Source Connector -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
-      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Source Connector</p>
-      <p id="source-state" class="text-2xl font-semibold mt-1 {% if source_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif source_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
-        {{ source_state }}
-      </p>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+
+    <!-- Source Connector Card -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-visible" x-data="{ srcMenu: false }">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
+        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Source Connector</p>
+        <div class="flex items-center gap-2">
+          <span id="source-state" class="text-sm font-bold {% if source_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif source_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
+            {{ source_state }}
+          </span>
+          <div class="relative">
+            <button @click="srcMenu = !srcMenu" @click.outside="srcMenu = false"
+              class="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition">
+              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z"/>
+              </svg>
+            </button>
+            <div x-show="srcMenu" x-transition x-cloak
+              class="absolute right-0 mt-1 w-auto min-w-[12rem] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
+              <button id="btn-src-pause" @click="connectorAction('{% url 'connector_pause' replication_config.pk %}', 'Pausing...'); srcMenu = false"
+                class="{% if source_state != 'RUNNING' %}hidden {% endif %}w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-yellow-700 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/20">
+                Pause
+              </button>
+              <button id="btn-src-resume" @click="connectorAction('{% url 'connector_resume' replication_config.pk %}', 'Resuming...'); srcMenu = false"
+                class="{% if source_state != 'PAUSED' %}hidden {% endif %}w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-green-700 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20">
+                Resume
+              </button>
+              <button @click="connectorAction('{% url 'connector_restart' replication_config.pk %}', 'Restarting...'); srcMenu = false"
+                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Restart Connector
+              </button>
+              <button id="btn-src-restart-failed" @click="connectorAction('{% url 'connector_restart_failed_tasks' replication_config.pk %}', 'Restarting failed...'); srcMenu = false"
+                class="hidden w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
+                Restart Failed Tasks
+              </button>
+              <button @click="connectorAction('{% url 'connector_restart_all_tasks' replication_config.pk %}', 'Restarting all...'); srcMenu = false"
+                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Restart All Tasks
+              </button>
+              {% if replication_config.processing_mode == 'batch' %}
+              <div class="border-t border-gray-100 dark:border-gray-700 my-1"></div>
+              <button id="btn-sync-schedule" @click="connectorAction('{% url 'connector_sync_schedule' replication_config.pk %}', 'Syncing...'); srcMenu = false"
+                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-purple-700 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20">
+                Sync with Schedule
+              </button>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="source-tasks" class="px-4 py-2 space-y-1">
+        {% for task in source_tasks %}
+        <div class="flex items-center justify-between text-xs px-2 py-1 rounded {% if task.state == 'RUNNING' %}bg-green-50 dark:bg-green-900/10{% elif task.state == 'PAUSED' %}bg-yellow-50 dark:bg-yellow-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
+          <span class="text-gray-600 dark:text-gray-400">Task {{ task.id }}</span>
+          <span class="font-medium {% if task.state == 'RUNNING' %}text-green-700 dark:text-green-400{% elif task.state == 'PAUSED' %}text-yellow-700 dark:text-yellow-400{% else %}text-red-700 dark:text-red-400{% endif %}">{{ task.state }}</span>
+        </div>
+        {% empty %}
+        <p class="text-xs text-gray-400 dark:text-gray-500 italic">No tasks</p>
+        {% endfor %}
+      </div>
     </div>
 
-    <!-- Sink Connector -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
-      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Sink Connector</p>
-      <p id="sink-state" class="text-2xl font-semibold mt-1 {% if sink_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif sink_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
-        {{ sink_state }}
-      </p>
+    <!-- Sink Connector Card -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-visible" x-data="{ sinkMenu: false }">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
+        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Sink Connector <span class="text-[10px] font-normal normal-case">(shared)</span>
+        </p>
+        <div class="flex items-center gap-2">
+          <span id="sink-state" class="text-sm font-bold {% if sink_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif sink_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
+            {{ sink_state }}
+          </span>
+          <div class="relative">
+            <button @click="sinkMenu = !sinkMenu" @click.outside="sinkMenu = false"
+              class="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition">
+              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z"/>
+              </svg>
+            </button>
+            <div x-show="sinkMenu" x-transition x-cloak
+              class="absolute right-0 mt-1 w-auto min-w-[14rem] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
+              <button @click="connectorAction('{% url 'sink_restart' replication_config.pk %}', 'Restarting sink...'); sinkMenu = false"
+                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Restart Connector
+              </button>
+              <button id="btn-sink-restart-failed" @click="connectorAction('{% url 'sink_restart_failed_tasks' replication_config.pk %}', 'Restarting failed...'); sinkMenu = false"
+                class="hidden w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
+                Restart Failed Tasks
+              </button>
+              <button @click="connectorAction('{% url 'sink_restart_all_tasks' replication_config.pk %}', 'Restarting all...'); sinkMenu = false"
+                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Restart All Tasks
+              </button>
+              <div class="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1 px-3 pb-1">
+                <p class="text-[10px] whitespace-nowrap text-gray-400 dark:text-gray-500">Affects all connectors sharing this sink</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="sink-tasks" class="px-4 py-2 space-y-1">
+        {% for task in sink_tasks %}
+        <div class="flex items-center justify-between text-xs px-2 py-1 rounded {% if task.state == 'RUNNING' %}bg-green-50 dark:bg-green-900/10{% elif task.state == 'PAUSED' %}bg-yellow-50 dark:bg-yellow-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
+          <span class="text-gray-600 dark:text-gray-400">Task {{ task.id }}</span>
+          <span class="font-medium {% if task.state == 'RUNNING' %}text-green-700 dark:text-green-400{% elif task.state == 'PAUSED' %}text-yellow-700 dark:text-yellow-400{% else %}text-red-700 dark:text-red-400{% endif %}">{{ task.state }}</span>
+        </div>
+        {% empty %}
+        <p class="text-xs text-gray-400 dark:text-gray-500 italic">No tasks</p>
+        {% endfor %}
+      </div>
     </div>
 
-    <!-- Overall Health -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
-      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Overall Health</p>
-      <p id="overall-health" class="text-2xl font-semibold mt-1 {% if unified_status.overall == 'healthy' %}text-green-600 dark:text-green-400{% elif unified_status.overall == 'degraded' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
-        {{ unified_status.overall|title }}
-      </p>
-    </div>
+  </div>
 
-    <!-- Tables -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
-      <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Tables</p>
-      <p class="text-2xl font-semibold mt-1 text-gray-900 dark:text-white">
-        {{ enabled_table_mappings.count }}
-      </p>
+  <!-- Task Health Bar -->
+  <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-4 py-2 mb-6 flex items-center justify-between text-xs">
+    <div class="flex items-center gap-4">
+      <span class="text-gray-500 dark:text-gray-400">Task Health:</span>
+      <span id="task-health-status" class="font-bold {% if unified_status.overall == 'healthy' %}text-green-600 dark:text-green-400{% elif unified_status.overall == 'degraded' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
+        {% if unified_status.overall == 'healthy' %}All Running{% elif unified_status.overall == 'degraded' %}Degraded{% else %}Failed{% endif %}
+      </span>
+    </div>
+    <div class="flex items-center gap-3 text-gray-500 dark:text-gray-400">
+      <span>{{ enabled_table_mappings.count }} table{{ enabled_table_mappings.count|pluralize }}</span>
+      <span>{{ replication_config.get_processing_mode_display }}</span>
     </div>
   </div>
 
@@ -117,7 +257,8 @@
           </div>
         </div>
 
-        <!-- Per-table rows scanned (collapsible) -->
+        <!-- Per-table rows scanned (collapsible) - only for non-batch connectors -->
+        {% if replication_config.processing_mode != 'batch' %}
         <details id="snap-rows-detail" class="mt-4 {% if not snapshot.rows_scanned %}hidden{% endif %}">
           <summary class="text-sm text-gray-500 dark:text-gray-400 cursor-pointer hover:text-gray-700 dark:hover:text-gray-300">Rows per table</summary>
           <div id="snap-rows-table" class="mt-2 space-y-1 text-sm font-mono">
@@ -131,6 +272,7 @@
             {% endif %}
           </div>
         </details>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -138,52 +280,25 @@
   <!-- Batch Schedule Panel (only for batch connectors) -->
   {% if replication_config.processing_mode == 'batch' %}
   <div id="batch-panel" class="mb-6">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
-        <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-        </svg>
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Batch Schedule</h3>
-        <span id="batch-status-badge" class="ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400">
-          Scheduled
-        </span>
-      </div>
-      <div class="p-6">
-        <!-- Countdown / Syncing display -->
-        <div class="text-center mb-5">
-          <p id="batch-countdown-label" class="text-sm text-gray-500 dark:text-gray-400 mb-1">Next sync in</p>
-          <p id="batch-countdown" class="text-3xl font-bold text-purple-600 dark:text-purple-400 font-mono">--:--:--</p>
-        </div>
-
-        <!-- Schedule details grid -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Sync Interval</p>
-            <p id="batch-interval" class="font-semibold text-gray-900 dark:text-white">{{ replication_config.get_batch_interval_display|default:"--" }}</p>
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-6 py-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-6">
+          <div class="flex items-center gap-2">
+            <svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <span id="batch-status-badge" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400">Scheduled</span>
           </div>
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Max Duration</p>
-            <p id="batch-max-duration" class="font-semibold text-gray-900 dark:text-white">{{ replication_config.batch_max_catchup_minutes }} min</p>
+          <div class="flex items-center gap-1">
+            <span id="batch-countdown-label" class="text-sm text-gray-500 dark:text-gray-400">Next sync in</span>
+            <span id="batch-countdown" class="text-sm font-bold text-purple-600 dark:text-purple-400 font-mono">--:--:--</span>
           </div>
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Last Synced</p>
-            <p id="batch-last-run" class="font-semibold text-gray-900 dark:text-white">
-              {% if replication_config.last_batch_run %}
-                {{ replication_config.last_batch_run|timesince }} ago
-              {% else %}
-                Never
-              {% endif %}
-            </p>
-          </div>
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Next Run</p>
-            <p id="batch-next-run" class="font-semibold text-gray-900 dark:text-white">
-              {% if replication_config.next_batch_run %}
-                {{ replication_config.next_batch_run|date:"M d, g:i A" }}
-              {% else %}
-                --
-              {% endif %}
-            </p>
+          <span class="text-xs text-gray-400 dark:text-gray-500">|</span>
+          <div class="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
+            <span>Interval: <span id="batch-interval" class="font-medium text-gray-700 dark:text-gray-300">{{ replication_config.get_batch_interval_display|default:"--" }}</span></span>
+            <span>Max: <span id="batch-max-duration" class="font-medium text-gray-700 dark:text-gray-300">{{ replication_config.batch_max_catchup_minutes }}m</span></span>
+            <span>Last: <span id="batch-last-run" class="font-medium text-gray-700 dark:text-gray-300">{% if replication_config.last_batch_run %}{{ replication_config.last_batch_run|timesince }} ago{% else %}Never{% endif %}</span></span>
+            <span>Next: <span id="batch-next-run" class="font-medium text-gray-700 dark:text-gray-300">{% if replication_config.next_batch_run %}{{ replication_config.next_batch_run|date:"M d, g:i A" }}{% else %}--{% endif %}</span></span>
           </div>
         </div>
       </div>
@@ -191,32 +306,37 @@
   </div>
   {% endif %}
 
-  <!-- Action Buttons -->
-  <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-6">
-    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-      <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Actions</h3>
-    </div>
-    <div class="p-6 flex flex-wrap gap-3">
-      <!-- RECREATE BUTTON -->
-      <button onclick="document.getElementById('recreateModal').classList.remove('hidden')"
-        class="inline-flex items-center px-4 py-2 border border-blue-500 dark:border-blue-600 rounded-lg text-sm font-medium text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition"
-        title="Delete and recreate the source connector with the same version and topics">
-        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-        </svg>
-        Recreate Connector
-      </button>
+  <!-- Toast feedback -->
+  <div class="mb-6">
+    <span id="action-toast" class="hidden text-sm font-medium px-3 py-1 rounded-full transition-opacity duration-300"></span>
+  </div>
 
-      <!-- DELETE BUTTON -->
-      <button @click="deleteModal = { open: true, pk: {{ replication_config.pk }}, name: '{{ replication_config.connector_name }}', tables: {{ enabled_table_mappings.count }}, confirmed: false }"
-        class="inline-flex items-center px-4 py-2 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition">
-        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+  {% if replication_config.processing_mode == 'batch' %}
+  <!-- Rows Per Table (accordion) -->
+  <div id="batch-rows-panel" class="mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow" x-data="{ rowsOpen: false }">
+      <button @click="rowsOpen = !rowsOpen" class="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-lg transition">
+        <div class="flex items-center gap-3">
+          <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path>
+          </svg>
+          <span class="text-sm font-semibold text-gray-900 dark:text-white">Rows Per Table</span>
+          <span id="batch-rows-count" class="text-xs text-gray-500 dark:text-gray-400"></span>
+        </div>
+        <svg class="w-4 h-4 text-gray-400 transition-transform" :class="rowsOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
         </svg>
-        Delete Connector
       </button>
+      <div x-show="rowsOpen" x-collapse x-cloak>
+        <div class="px-6 pb-4">
+          <div id="batch-rows-table" class="space-y-1 text-sm font-mono">
+            <p class="text-gray-400 dark:text-gray-500 text-center py-2">Waiting for data...</p>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
+  {% endif %}
 
   <!-- Connector Information -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -352,6 +472,39 @@
 
 <!-- AJAX Polling Script -->
 <script>
+// CSRF token for POST requests
+const CSRF_TOKEN = '{{ csrf_token }}';
+
+function connectorAction(url, loadingMsg) {
+  const toast = document.getElementById('action-toast');
+  toast.textContent = loadingMsg;
+  toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
+
+  fetch(url, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': CSRF_TOKEN, 'Content-Type': 'application/json' },
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.success) {
+      toast.textContent = data.message || 'Success';
+      toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+    } else {
+      toast.textContent = data.message || data.error || 'Failed';
+      toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
+    }
+    // Trigger immediate poll to refresh status
+    setTimeout(pollNow, 500);
+  })
+  .catch(err => {
+    toast.textContent = 'Request failed';
+    toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
+  })
+  .finally(() => {
+    setTimeout(() => { toast.className = 'hidden'; }, 4000);
+  });
+}
+
 (function() {
   const STATUS_URL = '{% url "connector_status_api" replication_config.pk %}';
   const POLL_INTERVAL = 5000;
@@ -476,31 +629,107 @@
         batchNextRun.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     }
 
+    // Update schedule status badge
+    const badge = document.getElementById('batch-status-badge');
+    if (badge) {
+      if (batchSyncing) {
+        badge.textContent = 'Syncing';
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+      } else if (batch.is_on_schedule) {
+        badge.textContent = 'Scheduled';
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400';
+      } else {
+        badge.textContent = 'Off Schedule';
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400';
+      }
+    }
+
     updateBatchCountdown();
+  }
+
+  function taskBgClass(state) {
+    if (state === 'RUNNING') return 'bg-green-50 dark:bg-green-900/10';
+    if (state === 'PAUSED') return 'bg-yellow-50 dark:bg-yellow-900/10';
+    return 'bg-red-50 dark:bg-red-900/10';
+  }
+
+  function taskTextClass(state) {
+    if (state === 'RUNNING') return 'text-green-700 dark:text-green-400';
+    if (state === 'PAUSED') return 'text-yellow-700 dark:text-yellow-400';
+    return 'text-red-700 dark:text-red-400';
+  }
+
+  function renderTasks(containerId, tasks) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!tasks || tasks.length === 0) {
+      container.innerHTML = '<p class="text-xs text-gray-400 dark:text-gray-500 italic">No tasks</p>';
+      return;
+    }
+
+    container.innerHTML = tasks.map(t => {
+      const state = t.state || 'UNKNOWN';
+      const trace = t.trace ? ` title="${t.trace.substring(0, 200).replace(/"/g, '&quot;')}"` : '';
+      return `<div class="flex items-center justify-between text-xs px-2 py-1 rounded ${taskBgClass(state)}"${trace}>
+        <span class="text-gray-600 dark:text-gray-400">Task ${t.id}</span>
+        <span class="font-medium ${taskTextClass(state)}">${state}</span>
+      </div>`;
+    }).join('');
   }
 
   function updateStatus(data) {
     const s = data.status;
 
-    // Source / Sink / Health cards
+    // Source connector state + tasks
     const srcEl = document.getElementById('source-state');
     srcEl.textContent = s.source_connector.state;
-    srcEl.className = 'text-2xl font-semibold mt-1 ' + stateColor(s.source_connector.state);
+    srcEl.className = 'text-sm font-bold ' + stateColor(s.source_connector.state);
+    renderTasks('source-tasks', s.source_connector.tasks);
 
+    // Sink connector state + tasks
     const sinkEl = document.getElementById('sink-state');
     sinkEl.textContent = s.sink_connector.state;
-    sinkEl.className = 'text-2xl font-semibold mt-1 ' + stateColor(s.sink_connector.state);
+    sinkEl.className = 'text-sm font-bold ' + stateColor(s.sink_connector.state);
+    renderTasks('sink-tasks', s.sink_connector.tasks);
 
-    const healthEl = document.getElementById('overall-health');
-    healthEl.textContent = s.overall.charAt(0).toUpperCase() + s.overall.slice(1);
-    healthEl.className = 'text-2xl font-semibold mt-1 ' + healthColor(s.overall);
+    // Task health bar
+    const allTasks = [...(s.source_connector.tasks || []), ...(s.sink_connector.tasks || [])];
+    const hasFailed = allTasks.some(t => t.state === 'FAILED');
+    const allRunning = allTasks.length > 0 && allTasks.every(t => t.state === 'RUNNING');
+    const allPaused = allTasks.length > 0 && allTasks.every(t => t.state === 'PAUSED');
+
+    const healthEl = document.getElementById('task-health-status');
+    if (healthEl) {
+      if (hasFailed) {
+        healthEl.textContent = 'Failed';
+        healthEl.className = 'font-bold text-red-600 dark:text-red-400';
+      } else if (allPaused) {
+        healthEl.textContent = 'All Paused';
+        healthEl.className = 'font-bold text-yellow-600 dark:text-yellow-400';
+      } else if (allRunning) {
+        healthEl.textContent = 'All Running';
+        healthEl.className = 'font-bold text-green-600 dark:text-green-400';
+      } else {
+        healthEl.textContent = s.overall.charAt(0).toUpperCase() + s.overall.slice(1);
+        healthEl.className = 'font-bold ' + healthColor(s.overall);
+      }
+    }
 
     // Statistics
     document.getElementById('stat-rows').textContent = formatNumber(s.statistics.total_rows_synced);
 
+    // Update action button visibility
+    updateActionButtons(s);
+
     // Batch schedule update
     if (isBatch && s.batch_schedule) {
       updateBatchSchedule(s);
+    }
+
+    // Update persistent rows-per-table panel for batch connectors
+    if (isBatch && s.snapshot && s.snapshot.rows_scanned) {
+      updateBatchRowsTable(s.snapshot.rows_scanned);
     }
 
     // Snapshot panel
@@ -539,17 +768,21 @@
       document.getElementById('snap-current').title = snap.current_table || '';
       document.getElementById('snap-remain-val').textContent = snap.remaining_tables || 0;
 
-      const rowsDetail = document.getElementById('snap-rows-detail');
-      const rowsTable = document.getElementById('snap-rows-table');
-      if (snap.rows_scanned && Object.keys(snap.rows_scanned).length > 0) {
-        rowsDetail.classList.remove('hidden');
-        rowsTable.innerHTML = '';
-        for (const [table, count] of Object.entries(snap.rows_scanned)) {
-          const row = document.createElement('div');
-          row.className = 'flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded';
-          row.innerHTML = '<span class="text-gray-700 dark:text-gray-300 truncate">' + table + '</span>'
-            + '<span class="text-gray-900 dark:text-white font-semibold">' + formatNumber(count) + '</span>';
-          rowsTable.appendChild(row);
+      // Update snapshot rows detail only for non-batch connectors
+      // Batch connectors use the permanent "Rows Per Table" panel
+      if (!isBatch) {
+        const rowsDetail = document.getElementById('snap-rows-detail');
+        const rowsTable = document.getElementById('snap-rows-table');
+        if (rowsDetail && rowsTable && snap.rows_scanned && Object.keys(snap.rows_scanned).length > 0) {
+          rowsDetail.classList.remove('hidden');
+          rowsTable.innerHTML = '';
+          for (const [table, count] of Object.entries(snap.rows_scanned)) {
+            const row = document.createElement('div');
+            row.className = 'flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded';
+            row.innerHTML = '<span class="text-gray-700 dark:text-gray-300 truncate">' + table + '</span>'
+              + '<span class="text-gray-900 dark:text-white font-semibold">' + formatNumber(count) + '</span>';
+            rowsTable.appendChild(row);
+          }
         }
       }
 
@@ -561,6 +794,65 @@
       currentInterval = batchSyncing ? POLL_INTERVAL : IDLE_INTERVAL;
     }
   }
+
+  function toggleBtn(id, show) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (show) el.classList.remove('hidden');
+    else el.classList.add('hidden');
+  }
+
+  function updateActionButtons(s) {
+    const sourceState = s.source_connector.state;
+    const sourceTasks = s.source_connector.tasks || [];
+    const sinkTasks = s.sink_connector.tasks || [];
+
+    // Source: Pause when RUNNING, Resume when PAUSED
+    toggleBtn('btn-src-pause', sourceState === 'RUNNING');
+    toggleBtn('btn-src-resume', sourceState === 'PAUSED');
+
+    // Source: Restart Failed visible when any source task FAILED
+    toggleBtn('btn-src-restart-failed', sourceTasks.some(t => t.state === 'FAILED'));
+
+    // Sink: Restart Failed visible when any sink task FAILED
+    toggleBtn('btn-sink-restart-failed', sinkTasks.some(t => t.state === 'FAILED'));
+
+    // Sync with Schedule: hide when on schedule and paused
+    const btnSyncSchedule = document.getElementById('btn-sync-schedule');
+    if (btnSyncSchedule && s.batch_schedule) {
+      if (s.batch_schedule.is_on_schedule && sourceState === 'PAUSED') {
+        btnSyncSchedule.classList.add('hidden');
+      } else {
+        btnSyncSchedule.classList.remove('hidden');
+      }
+    }
+  }
+
+  function updateBatchRowsTable(rowsScanned) {
+    const container = document.getElementById('batch-rows-table');
+    const countEl = document.getElementById('batch-rows-count');
+    if (!container) return;
+
+    const entries = Object.entries(rowsScanned);
+    if (entries.length === 0) return;
+
+    if (countEl) countEl.textContent = entries.length + ' tables';
+
+    container.innerHTML = '';
+    for (const [table, count] of entries) {
+      const row = document.createElement('div');
+      row.className = 'flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded';
+      row.innerHTML = '<span class="text-gray-700 dark:text-gray-300 truncate">' + table + '</span>'
+        + '<span class="text-gray-900 dark:text-white font-semibold">' + formatNumber(count) + '</span>';
+      container.appendChild(row);
+    }
+  }
+
+  // Expose pollNow for action buttons to trigger immediate refresh
+  window.pollNow = function() {
+    if (timer) clearTimeout(timer);
+    poll();
+  };
 
   function poll() {
     fetch(STATUS_URL)

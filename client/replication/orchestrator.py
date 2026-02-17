@@ -18,7 +18,7 @@ from jovoclient.utils.debezium.jolokia_client import JolokiaClient
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager, format_topic_name
 from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
-from client.utils.table_creator import drop_tables_for_mappings
+from client.utils.table_creator import drop_tables_for_mappings, truncate_tables_for_mappings
 from .validators import ReplicationValidator
 from sqlalchemy import text
 
@@ -570,13 +570,14 @@ class ReplicationOrchestrator:
             self._update_status('error', error_msg)
             return False, error_msg
 
-    def delete_replication(self, delete_topics: bool = False, drop_tables: bool = False) -> Tuple[bool, str]:
+    def delete_replication(self, delete_topics: bool = False, drop_tables: bool = False, truncate_tables: bool = False) -> Tuple[bool, str]:
         """
         Delete replication completely.
 
         Args:
             delete_topics: If True, permanently delete Kafka topics
             drop_tables: If True, drop target database tables
+            truncate_tables: If True, truncate target database tables (data cleared, structure kept)
 
         Returns:
             (success, message)
@@ -689,6 +690,23 @@ class ReplicationOrchestrator:
                 if target_db:
                     enabled_tables = self.config.table_mappings.filter(is_enabled=True)
                     success, message = drop_tables_for_mappings(target_db, enabled_tables)
+                    if success:
+                        self._log_info(f"✓ {message}")
+                    else:
+                        self._log_warning(f"⚠️ {message}")
+                else:
+                    self._log_warning("⚠️ No target database configured")
+
+            # Optionally truncate target database tables (clear data, keep structure)
+            if truncate_tables and not drop_tables:
+                self._log_info("Truncating target database tables...")
+                from client.models.database import ClientDatabase
+                client = self.config.client_database.client
+                target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
+
+                if target_db:
+                    enabled_tables = self.config.table_mappings.filter(is_enabled=True)
+                    success, message = truncate_tables_for_mappings(target_db, enabled_tables)
                     if success:
                         self._log_info(f"✓ {message}")
                     else:
@@ -1237,7 +1255,7 @@ class ReplicationOrchestrator:
 
         This will:
         1. Delete Kafka topics for the removed tables
-        2. Drop target tables from target database
+        2. Truncate target tables in target database
         3. Disable table mappings in database
         4. Update source connector config
         5. Restart source connector
@@ -1298,21 +1316,21 @@ class ReplicationOrchestrator:
             self._log_info(f"✓ Deleted {len(deleted_topics)}/{len(topics_to_delete)} topics")
 
             # ========================================
-            # STEP 2: Drop target tables
+            # STEP 2: Truncate target tables
             # ========================================
-            self._log_info("STEP 2/5: Dropping target database tables...")
+            self._log_info("STEP 2/5: Truncating target database tables...")
 
             from client.models.database import ClientDatabase
             target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
 
             if target_db:
-                success, message = drop_tables_for_mappings(target_db, table_mappings_to_remove)
+                success, message = truncate_tables_for_mappings(target_db, table_mappings_to_remove)
                 if success:
                     self._log_info(f"✓ {message}")
                 else:
                     self._log_warning(f"⚠️ {message}")
             else:
-                self._log_warning("⚠️ No target database configured - skipping table drop")
+                self._log_warning("⚠️ No target database configured - skipping table truncate")
 
             # ========================================
             # STEP 3: Disable table mappings in database
@@ -1770,12 +1788,28 @@ class ReplicationOrchestrator:
 
     def _get_batch_schedule(self) -> Dict[str, Any]:
         """Get batch schedule info for the monitor page."""
+        schedule_active = False
+        if self.config.batch_celery_task_name:
+            try:
+                from django_celery_beat.models import PeriodicTask
+                schedule_active = PeriodicTask.objects.filter(
+                    name=self.config.batch_celery_task_name,
+                    enabled=True,
+                ).exists()
+            except (ImportError, Exception):
+                pass
+
+        is_on_schedule = schedule_active and self.config.next_batch_run is not None
+
         return {
             'next_batch_run': self.config.next_batch_run.isoformat() if self.config.next_batch_run else None,
             'last_batch_run': self.config.last_batch_run.isoformat() if self.config.last_batch_run else None,
             'batch_interval': self.config.batch_interval,
             'batch_interval_display': self.config.get_batch_interval_display() if self.config.batch_interval else None,
             'batch_max_catchup_minutes': self.config.batch_max_catchup_minutes,
+            'celery_task_name': self.config.batch_celery_task_name,
+            'schedule_active': schedule_active,
+            'is_on_schedule': is_on_schedule,
         }
 
     def _get_connector_status(self) -> Dict[str, Any]:
@@ -1960,6 +1994,157 @@ class ReplicationOrchestrator:
             self._log_error(error_msg)
             return False, error_msg
 
+    def restart_failed_tasks(self, connector_name: str = None) -> Tuple[bool, str]:
+        """
+        Restart only FAILED tasks for a connector.
+
+        Args:
+            connector_name: Connector to target. Defaults to source connector.
+
+        Returns:
+            (success, message)
+        """
+        connector_name = connector_name or self.config.connector_name
+        if not connector_name:
+            return False, "No connector configured"
+
+        try:
+            exists, status_data = self.connector_manager.get_connector_status(
+                connector_name
+            )
+            if not exists or not status_data:
+                return False, "Connector not found"
+
+            tasks = status_data.get('tasks', [])
+            failed_tasks = [t for t in tasks if t.get('state') == 'FAILED']
+
+            if not failed_tasks:
+                return True, "No failed tasks to restart"
+
+            restarted = 0
+            errors = []
+            for task in failed_tasks:
+                task_id = task.get('id', 0)
+                success, error = self.connector_manager.restart_task(
+                    connector_name, task_id
+                )
+                if success:
+                    restarted += 1
+                else:
+                    errors.append(f"Task {task_id}: {error}")
+
+            if errors:
+                return False, f"Restarted {restarted}/{len(failed_tasks)} tasks. Errors: {'; '.join(errors)}"
+
+            self._log_info(f"✓ Restarted {restarted} failed task(s) for {connector_name}")
+            return True, f"Restarted {restarted} failed task(s)"
+
+        except Exception as e:
+            error_msg = f"Error restarting failed tasks: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def restart_all_tasks(self, connector_name: str = None) -> Tuple[bool, str]:
+        """
+        Restart all tasks for a connector.
+
+        Args:
+            connector_name: Connector to target. Defaults to source connector.
+
+        Returns:
+            (success, message)
+        """
+        connector_name = connector_name or self.config.connector_name
+        if not connector_name:
+            return False, "No connector configured"
+
+        try:
+            exists, status_data = self.connector_manager.get_connector_status(
+                connector_name
+            )
+            if not exists or not status_data:
+                return False, "Connector not found"
+
+            tasks = status_data.get('tasks', [])
+            if not tasks:
+                return True, "No tasks to restart"
+
+            restarted = 0
+            errors = []
+            for task in tasks:
+                task_id = task.get('id', 0)
+                success, error = self.connector_manager.restart_task(
+                    connector_name, task_id
+                )
+                if success:
+                    restarted += 1
+                else:
+                    errors.append(f"Task {task_id}: {error}")
+
+            if errors:
+                return False, f"Restarted {restarted}/{len(tasks)} tasks. Errors: {'; '.join(errors)}"
+
+            self._log_info(f"✓ Restarted {restarted} task(s) for {connector_name}")
+            return True, f"Restarted {restarted} task(s)"
+
+        except Exception as e:
+            error_msg = f"Error restarting tasks: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def sync_with_schedule(self) -> Tuple[bool, str]:
+        """
+        Re-establish batch schedule for a connector that is out of sync.
+
+        If the connector is currently RUNNING (manually resumed), pause it first,
+        then set up the Celery Beat periodic task so it returns to its normal cycle.
+
+        Returns:
+            (success, message) - returns early if already on schedule.
+        """
+        if self.config.processing_mode != 'batch':
+            return False, "Only batch connectors can be synced with schedule"
+
+        if not self.config.batch_interval:
+            return False, "No batch interval configured"
+
+        try:
+            # Check if already on schedule
+            schedule_info = self._get_batch_schedule()
+            if schedule_info['is_on_schedule']:
+                # Also check connector is actually paused (expected state between runs)
+                exists, status_data = self.connector_manager.get_connector_status(
+                    self.config.connector_name
+                )
+                if exists and status_data:
+                    state = status_data.get('connector', {}).get('state', '')
+                    if state == 'PAUSED':
+                        return True, "Connector is already on schedule"
+
+            # If connector is running, pause it first
+            exists, status_data = self.connector_manager.get_connector_status(
+                self.config.connector_name
+            )
+            if exists and status_data:
+                state = status_data.get('connector', {}).get('state', '')
+                if state == 'RUNNING':
+                    self._log_info("Pausing connector before re-establishing schedule...")
+                    self.pause_connector()
+
+            # Re-establish the batch schedule
+            success, message = self.setup_batch_schedule()
+            if success:
+                self._log_info("✓ Connector synced back to schedule")
+                return True, "Connector synced back to schedule"
+            return False, message
+
+        except ImportError:
+            return False, "django-celery-beat is not installed"
+        except Exception as e:
+            error_msg = f"Error syncing with schedule: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
     def _get_batch_interval_seconds(self) -> int:
         """
         Convert batch interval choice to seconds.
@@ -1969,7 +2154,9 @@ class ReplicationOrchestrator:
         """
         interval_map = {
             '5m': 5 * 60,         # 5 minutes
+            '15m': 15 * 60,       # 15 minutes
             '30m': 30 * 60,       # 30 minutes
+            '1h': 60 * 60,        # 1 hour
             '2h': 2 * 60 * 60,    # 2 hours
             '6h': 6 * 60 * 60,    # 6 hours
             '12h': 12 * 60 * 60,  # 12 hours
@@ -2057,9 +2244,10 @@ class ReplicationOrchestrator:
                 name=self.config.batch_celery_task_name
             ).delete()
 
-            # Clear task name from config
+            # Clear all batch schedule fields
             self.config.batch_celery_task_name = None
             self.config.next_batch_run = None
+            self.config.last_batch_run = None
             self.config.save()
 
             if deleted_count > 0:
@@ -2086,7 +2274,7 @@ class ReplicationOrchestrator:
         Returns:
             (success, message)
         """
-        valid_intervals = ['30m', '2h', '6h', '12h', '24h']
+        valid_intervals = ['5m', '15m', '30m', '1h', '2h', '6h', '12h', '24h']
         if new_interval not in valid_intervals:
             return False, f"Invalid interval. Must be one of: {', '.join(valid_intervals)}"
 

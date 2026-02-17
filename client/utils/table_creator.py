@@ -755,6 +755,99 @@ def add_foreign_keys_after_sink(replication_config_id: int, table_names: list = 
         return False, error_msg, {}
 
 
+def truncate_tables_for_mappings(target_db, table_mappings):
+    """
+    Truncate specific target tables given table mappings.
+
+    Supports: MySQL, PostgreSQL, MS SQL, Oracle
+    Uses database-specific TRUNCATE syntax with proper error handling.
+
+    Args:
+        target_db: ClientDatabase instance for the target database
+        table_mappings: QuerySet or list of TableMapping objects
+
+    Returns:
+        Tuple[bool, str]: (success, message)
+    """
+    if not table_mappings:
+        return True, "No tables to truncate"
+
+    mappings_list = list(table_mappings)
+    logger.info(f"Truncating {len(mappings_list)} target tables...")
+
+    engine = get_database_engine(target_db)
+    db_type = target_db.db_type.lower()
+
+    truncated_tables = []
+    failed_tables = []
+
+    try:
+        with engine.connect() as conn:
+            for table_mapping in mappings_list:
+                target_table = table_mapping.target_table
+                target_schema = table_mapping.target_schema or None
+
+                try:
+                    if target_schema:
+                        full_table_name = f"{target_schema}.{target_table}"
+                    else:
+                        full_table_name = target_table
+
+                    if db_type == 'mysql':
+                        truncate_sql = f"TRUNCATE TABLE `{target_table}`"
+
+                    elif db_type == 'postgresql':
+                        if target_schema:
+                            truncate_sql = f'TRUNCATE TABLE "{target_schema}"."{target_table}" CASCADE'
+                        else:
+                            truncate_sql = f'TRUNCATE TABLE "{target_table}" CASCADE'
+
+                    elif db_type == 'mssql':
+                        if target_schema:
+                            truncate_sql = f"TRUNCATE TABLE [{target_schema}].[{target_table}]"
+                        else:
+                            truncate_sql = f"TRUNCATE TABLE [{target_table}]"
+
+                    elif db_type == 'oracle':
+                        if target_schema:
+                            truncate_sql = f'TRUNCATE TABLE "{target_schema}"."{target_table}"'
+                        else:
+                            truncate_sql = f'TRUNCATE TABLE "{target_table}"'
+
+                    else:
+                        truncate_sql = f"TRUNCATE TABLE {target_table}"
+
+                    conn.execute(text(truncate_sql))
+                    conn.commit()
+
+                    truncated_tables.append(full_table_name)
+                    logger.info(f"  Truncated table: {full_table_name}")
+
+                except Exception as e:
+                    error_str = str(e)
+                    # Table doesn't exist — skip gracefully
+                    if ('does not exist' in error_str or 'ORA-00942' in error_str
+                            or "doesn't exist" in error_str):
+                        logger.info(f"  Table not found, skipping: {full_table_name}")
+                    else:
+                        failed_tables.append(f"{full_table_name}: {error_str}")
+                        logger.warning(f"  Failed to truncate {full_table_name}: {e}")
+
+    finally:
+        engine.dispose()
+
+    if truncated_tables:
+        message = f"Truncated {len(truncated_tables)} table(s)"
+    else:
+        message = "No tables were truncated"
+
+    if failed_tables:
+        message += f" | {len(failed_tables)} failed"
+        return False, message
+
+    return True, message
+
+
 def drop_tables_for_mappings(target_db, table_mappings):
     """
     Drop specific target tables given table mappings.

@@ -506,7 +506,34 @@ class DebeziumConnectorManager:
             error_msg = f"Error restarting connector: {str(e)}"
             logger.error(error_msg)
             return False, error_msg
-    
+
+    def restart_task(self, connector_name: str, task_id: int) -> Tuple[bool, Optional[str]]:
+        """
+        Restart a specific task of a connector.
+
+        Args:
+            connector_name: Name of the connector
+            task_id: Task ID to restart
+
+        Returns:
+            Tuple[bool, Optional[str]]: (success, error_message)
+        """
+        try:
+            url = f"{self.connectors_url}/{connector_name}/tasks/{task_id}/restart"
+            success, _, error = self._make_request('POST', url)
+
+            if success:
+                logger.info(f"Successfully restarted task {task_id} for connector: {connector_name}")
+                return True, None
+            else:
+                logger.error(f"Failed to restart task {task_id} for {connector_name}: {error}")
+                return False, error
+
+        except Exception as e:
+            error_msg = f"Error restarting task {task_id}: {str(e)}"
+            logger.error(error_msg)
+            return False, error_msg
+
     def update_connector_config(
         self, 
         connector_name: str, 

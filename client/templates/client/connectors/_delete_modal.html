@@ -16,7 +16,8 @@
       <span class="text-xs text-red-100" x-text="deleteModal.tables + ' tables'"></span>
     </div>
 
-    <form :action="'/connector/' + deleteModal.pk + '/delete/'" method="POST">
+    <form :action="'/connector/' + deleteModal.pk + '/delete/'" method="POST"
+          @submit="deleteModal.loading = true">
       {% csrf_token %}
       <input type="hidden" name="next" value="database">
       <div class="px-5 py-4 space-y-3 text-xs">
@@ -49,9 +50,18 @@
             Delete Kafka topics
           </label>
           <label class="flex items-center gap-2 text-gray-700 dark:text-gray-300 cursor-pointer">
+            <input type="checkbox" name="truncate_tables" value="1"
+                   x-model="deleteModal.truncate"
+                   @change="if(deleteModal.truncate) deleteModal.drop = false"
+                   class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-yellow-600 focus:ring-yellow-500">
+            Truncate target tables <span class="text-gray-400 text-[10px]">(clear data, keep structure)</span>
+          </label>
+          <label class="flex items-center gap-2 text-gray-700 dark:text-gray-300 cursor-pointer">
             <input type="checkbox" name="drop_tables" value="1"
+                   x-model="deleteModal.drop"
+                   @change="if(deleteModal.drop) deleteModal.truncate = false"
                    class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-red-600 focus:ring-red-500">
-            Drop target tables
+            Drop target tables <span class="text-gray-400 text-[10px]">(remove completely)</span>
           </label>
         </div>
 
@@ -69,13 +79,18 @@
       <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 flex justify-end gap-2">
         <button type="button"
                 @click="deleteModal.open = false; deleteModal.confirmed = false"
-                class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+                :disabled="deleteModal.loading"
+                class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
           Cancel
         </button>
         <button type="submit"
-                :disabled="!deleteModal.confirmed"
-                class="px-3 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
-          Delete
+                :disabled="!deleteModal.confirmed || deleteModal.loading"
+                class="px-3 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+          <svg x-show="deleteModal.loading" class="animate-spin w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          <span x-text="deleteModal.loading ? 'Deleting...' : 'Delete'"></span>
         </button>
       </div>
     </form>

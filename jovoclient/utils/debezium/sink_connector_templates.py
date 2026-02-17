@@ -54,7 +54,7 @@ def get_mysql_sink_connector_config(
     connector_name = ''.join(c for c in connector_name if c.isalnum() or c == '_')
 
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
-    jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}"
+    jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}?autoReconnect=true"
 
     # Default configuration
     config = {
@@ -63,6 +63,11 @@ def get_mysql_sink_connector_config(
         "connection.url": jdbc_url,
         "connection.username": db_config.username,
         "connection.password": db_config.get_decrypted_password(),
+
+        # c3p0 connection pool validation - test connections before use
+        "hibernate.c3p0.testConnectionOnCheckout": "true",
+        "hibernate.c3p0.preferredTestQuery": "SELECT 1",
+        "hibernate.c3p0.idle_test_period": "300",
 
         # Transforms
         "transforms": "extractTableName",
@@ -77,7 +82,7 @@ def get_mysql_sink_connector_config(
         "key.converter": "io.confluent.connect.avro.AvroConverter",
         "key.converter.schema.registry.url": schema_registry_url,
         "key.converter.schemas.enable": "true",
-        
+
         "value.converter": "io.confluent.connect.avro.AvroConverter",
         "value.converter.schema.registry.url": schema_registry_url,
         "value.converter.schemas.enable": "true",
@@ -178,6 +183,11 @@ def get_postgresql_sink_connector_config(
         "connection.url": jdbc_url,
         "connection.username": db_config.username,
         "connection.password": db_config.get_decrypted_password(),
+
+        # c3p0 connection pool validation - test connections before use
+        "hibernate.c3p0.testConnectionOnCheckout": "true",
+        "hibernate.c3p0.preferredTestQuery": "SELECT 1",
+        "hibernate.c3p0.idle_test_period": "300",
 
         # Transforms
         "transforms": "extractTableName",

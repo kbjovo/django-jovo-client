@@ -55,6 +55,15 @@ from .views.connector_views import (
     connector_recreate,
     connector_monitor,
     connector_status_api,
+    connector_pause,
+    connector_resume,
+    connector_restart,
+    connector_restart_failed_tasks,
+    connector_restart_all_tasks,
+    connector_sync_schedule,
+    sink_restart,
+    sink_restart_failed_tasks,
+    sink_restart_all_tasks,
 )
 
 
@@ -207,6 +216,44 @@ urlpatterns = [
     path('connector/<int:config_pk>/status/',
          connector_status_api,
          name='connector_status_api'),
+
+    # Connector action endpoints (AJAX)
+    path('connector/<int:config_pk>/pause/',
+         connector_pause,
+         name='connector_pause'),
+
+    path('connector/<int:config_pk>/resume/',
+         connector_resume,
+         name='connector_resume'),
+
+    path('connector/<int:config_pk>/restart/',
+         connector_restart,
+         name='connector_restart'),
+
+    path('connector/<int:config_pk>/restart-failed-tasks/',
+         connector_restart_failed_tasks,
+         name='connector_restart_failed_tasks'),
+
+    path('connector/<int:config_pk>/restart-all-tasks/',
+         connector_restart_all_tasks,
+         name='connector_restart_all_tasks'),
+
+    path('connector/<int:config_pk>/sync-schedule/',
+         connector_sync_schedule,
+         name='connector_sync_schedule'),
+
+    # Sink connector action endpoints (AJAX)
+    path('connector/<int:config_pk>/sink/restart/',
+         sink_restart,
+         name='sink_restart'),
+
+    path('connector/<int:config_pk>/sink/restart-failed-tasks/',
+         sink_restart_failed_tasks,
+         name='sink_restart_failed_tasks'),
+
+    path('connector/<int:config_pk>/sink/restart-all-tasks/',
+         sink_restart_all_tasks,
+         name='sink_restart_all_tasks'),
 
     # ==========================================
     # AJAX Endpoints
