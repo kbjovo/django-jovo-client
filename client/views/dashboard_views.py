@@ -246,7 +246,6 @@ def monitoring_dashboard(request):
         'client_database', 'client_database__client'
     ).filter(
         is_active=True,
-        status='active'
     ).exclude(
         Q(connector_name__isnull=True) | Q(connector_name='')
     ).order_by('-updated_at')
