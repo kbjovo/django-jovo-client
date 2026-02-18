@@ -1,13 +1,3 @@
-"""
-Replication Orchestrator - Efficient sink connector management.
-
-Key improvements:
-- Reuses existing sink connector when possible
-- Updates sink connector config if table list changes
-- Only creates new sink connector if it doesn't exist
-- Always creates fresh source connector with incremented version
-"""
-
 import logging
 from typing import Dict, Any, Tuple, Optional, Set
 from django.utils import timezone
@@ -1827,10 +1817,12 @@ class ReplicationOrchestrator:
                     return {'state': 'NOT_FOUND', 'healthy': False}
 
             state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            tasks = status_data.get('tasks', [])
+            has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
             return {
                 'state': state,
-                'healthy': state == 'RUNNING',
-                'tasks': status_data.get('tasks', []),
+                'healthy': state in ('RUNNING', 'PAUSED') and not has_failed_task,
+                'tasks': tasks,
             }
         except Exception as e:
             return {'state': 'ERROR', 'healthy': False, 'message': str(e)}
@@ -1842,7 +1834,7 @@ class ReplicationOrchestrator:
                 return {'state': 'NOT_CONFIGURED', 'healthy': False}
 
             result = self.connector_manager.get_connector_status(self.config.sink_connector_name)
-            
+
             if isinstance(result, tuple):
                 success, status_data = result
                 if not success or not status_data:
@@ -1853,25 +1845,24 @@ class ReplicationOrchestrator:
                     return {'state': 'NOT_FOUND', 'healthy': False}
 
             state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            tasks = status_data.get('tasks', [])
+            has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
             return {
                 'state': state,
-                'healthy': state == 'RUNNING',
-                'tasks': status_data.get('tasks', []),
+                'healthy': state in ('RUNNING', 'PAUSED') and not has_failed_task,
+                'tasks': tasks,
             }
         except Exception as e:
             return {'state': 'ERROR', 'healthy': False, 'message': str(e)}
 
     def _calculate_overall_health(self, connector_status: Dict, sink_status: Dict) -> str:
-        """Calculate overall health: 'healthy', 'degraded', or 'failed'."""
+        """Calculate overall health: 'healthy' or 'unhealthy'."""
         connector_healthy = connector_status.get('healthy', False)
         sink_healthy = sink_status.get('healthy', False)
 
         if connector_healthy and sink_healthy:
             return 'healthy'
-        elif connector_healthy or sink_healthy:
-            return 'degraded'
-        else:
-            return 'failed'
+        return 'unhealthy'
 
     # ==========================================
     # Batch Connector State Helpers

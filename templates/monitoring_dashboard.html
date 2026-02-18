@@ -36,44 +36,91 @@
   </div>
 
   <!-- Scrollable Content Area -->
-  <div class="flex-1 overflow-y-auto px-6 py-6">
+  <div class="flex-1 overflow-y-auto px-6 py-6"
+       x-data="{
+         selectedClients: [],
+         open: false,
+         toggle(id) {
+           const idx = this.selectedClients.indexOf(id);
+           if (idx === -1) this.selectedClients.push(id);
+           else this.selectedClients.splice(idx, 1);
+         },
+         isVisible(clientId) {
+           return this.selectedClients.length === 0 || this.selectedClients.includes(clientId);
+         },
+         clearAll() { this.selectedClients = []; }
+       }">
+
+    <!-- Filter Bar -->
+    {% if clients %}
+    <div class="mb-6 flex items-center gap-3">
+      <!-- Multi-select dropdown -->
+      <div class="relative" @click.away="open = false">
+        <button @click="open = !open"
+                class="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition shadow-sm">
+          <svg class="w-4 h-4 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path>
+          </svg>
+          <span x-text="selectedClients.length === 0 ? 'All Clients' : selectedClients.length + ' Client' + (selectedClients.length > 1 ? 's' : '') + ' Selected'"></span>
+          <svg class="w-4 h-4 transition-transform" :class="open ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+
+        <!-- Dropdown -->
+        <div x-show="open" x-transition x-cloak
+             class="absolute z-20 mt-2 w-64 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg overflow-hidden">
+          {% for client in clients %}
+          <label @click.stop
+                 class="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer transition">
+            <input type="checkbox"
+                   :checked="selectedClients.includes({{ client.id }})"
+                   @change="toggle({{ client.id }})"
+                   class="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700 dark:text-gray-300">{{ client.name }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- Clear filter button -->
+      <button x-show="selectedClients.length > 0" x-cloak
+              @click="clearAll()"
+              class="inline-flex items-center gap-1 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+        </svg>
+        Clear
+      </button>
+    </div>
+    {% endif %}
 
     <!-- Statistics Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-      <c-stat-card
-        title="Active Connectors"
-        value="{{ total_active|default:0 }}"
-        icon="sync"
-        color="blue"
-      />
-
-      <c-stat-card
-        title="Healthy"
-        value="{{ healthy_count|default:0 }}"
-        icon="chart"
-        color="green"
-      />
-
-      <c-stat-card
-        title="Unhealthy"
-        value="{{ unhealthy_count|default:0 }}"
-        icon="alert"
-        color="{% if unhealthy_count > 0 %}red{% else %}gray{% endif %}"
-      />
-
-      <c-stat-card
-        title="Total Errors"
-        value="{{ total_errors|default:0 }}"
-        icon="alert"
-        color="{% if total_errors > 0 %}red{% else %}gray{% endif %}"
-      />
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
+        <span class="text-2xl font-bold text-gray-900 dark:text-white">{{ total_active|default:0 }}</span>
+        <span class="text-sm text-gray-600 dark:text-gray-400">Active</span>
+      </div>
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
+        <span class="text-2xl font-bold text-green-600 dark:text-green-400">{{ healthy_count|default:0 }}</span>
+        <span class="text-sm text-gray-600 dark:text-gray-400">Healthy</span>
+      </div>
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
+        <span class="text-2xl font-bold {% if unhealthy_count > 0 %}text-red-600 dark:text-red-400{% else %}text-gray-900 dark:text-white{% endif %}">{{ unhealthy_count|default:0 }}</span>
+        <span class="text-sm text-gray-600 dark:text-gray-400">Unhealthy</span>
+      </div>
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
+        <span class="text-2xl font-bold {% if total_errors > 0 %}text-red-600 dark:text-red-400{% else %}text-gray-900 dark:text-white{% endif %}">{{ total_errors|default:0 }}</span>
+        <span class="text-sm text-gray-600 dark:text-gray-400">Errors</span>
+      </div>
     </div>
 
     <!-- Monitoring Grid -->
     {% if monitoring_data %}
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {% for item in monitoring_data %}
-      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
+      <div x-show="isVisible({{ item.config.client_database.client.pk }})" x-transition
+           class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
 
         <!-- Header -->
         <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700 {% if item.is_healthy %}bg-green-50 dark:bg-green-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
@@ -107,24 +154,38 @@
               </div>
             </div>
 
-            <!-- Status Badge -->
-            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold flex-shrink-0
-              {% if item.connector_state == 'RUNNING' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
-              {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400
-              {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400
-              {% else %}bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300{% endif %}">
-              {{ item.connector_state }}
-            </span>
+            <!-- Badges -->
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              {% if item.config.processing_mode == 'batch' %}
+              <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">Batch</span>
+              {% else %}
+              <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">CDC</span>
+              {% endif %}
+              <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold
+                {% if item.connector_state == 'RUNNING' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
+                {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400
+                {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400
+                {% else %}bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300{% endif %}">
+                {{ item.connector_state }}
+              </span>
+            </div>
           </div>
         </div>
 
         <!-- Body -->
         <div class="p-5 space-y-4">
 
-          <!-- Connector Name -->
-          <div>
-            <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Connector Name</p>
-            <p class="text-sm text-gray-900 dark:text-white font-mono">{{ item.config.connector_name }}</p>
+          <!-- Connector Name & Database -->
+          <div class="flex gap-6">
+            <div class="min-w-0 flex-1">
+              <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Connector Name</p>
+              <p class="text-sm text-gray-900 dark:text-white font-mono truncate">{{ item.config.connector_name }}</p>
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Database</p>
+              <p class="text-sm text-gray-900 dark:text-white truncate">{{ item.config.client_database.db_name }}</p>
+              <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.config.client_database.db_type|upper }} @ {{ item.config.client_database.host }}:{{ item.config.client_database.port }}</p>
+            </div>
           </div>
 
           <!-- Tasks -->

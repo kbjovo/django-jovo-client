@@ -263,13 +263,12 @@ def monitoring_dashboard(request):
                 connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
                 tasks = status_data.get('tasks', [])
 
+                has_failed_task = any(task.get('state') == 'FAILED' for task in tasks)
                 monitoring_data.append({
                     'config': config,
                     'connector_state': connector_state,
                     'tasks': tasks,
-                    'is_healthy': connector_state == 'RUNNING' and all(
-                        task.get('state') == 'RUNNING' for task in tasks
-                    ),
+                    'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
                     'error_count': sum(1 for task in tasks if task.get('state') == 'FAILED'),
                 })
             else:
@@ -297,12 +296,20 @@ def monitoring_dashboard(request):
     unhealthy_count = total_active - healthy_count
     total_errors = sum(item.get('error_count', 0) for item in monitoring_data)
 
+    # Build unique client list for filter
+    clients = sorted(
+        {(item['config'].client_database.client.pk, item['config'].client_database.client.name)
+         for item in monitoring_data},
+        key=lambda c: c[1],
+    )
+
     context = {
         'monitoring_data': monitoring_data,
         'total_active': total_active,
         'healthy_count': healthy_count,
         'unhealthy_count': unhealthy_count,
         'total_errors': total_errors,
+        'clients': [{'id': c[0], 'name': c[1]} for c in clients],
     }
 
     return render(request, 'monitoring_dashboard.html', context)
