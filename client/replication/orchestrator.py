@@ -615,10 +615,10 @@ class ReplicationOrchestrator:
                 client = self.config.client_database.client
                 target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
 
-                # Get remaining active configs (excluding the one being deleted)
+                # Get remaining configs (excluding the one being deleted)
                 remaining_configs = ReplicationConfig.objects.filter(
                     client_database__client=client,
-                    status__in=['configured', 'active'],
+                    status__in=['configured', 'active', 'paused', 'error'],
                 ).exclude(pk=config_id)
 
                 if remaining_configs.exists() and target_db:
@@ -919,6 +919,7 @@ class ReplicationOrchestrator:
                 topics=None,  # Use regex instead of explicit topics
                 kafka_bootstrap_servers=kafka_bootstrap,
                 primary_key_fields=primary_key_fields,
+                delete_enabled=True,
                 custom_config=custom_config,
             )
 
@@ -979,6 +980,7 @@ class ReplicationOrchestrator:
                 topics=None,  # Use regex instead of explicit topics
                 kafka_bootstrap_servers=kafka_bootstrap,
                 primary_key_fields=primary_key_fields,
+                delete_enabled=True,
                 custom_config=custom_config,
             )
 

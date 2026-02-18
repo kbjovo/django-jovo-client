@@ -27,11 +27,11 @@
         </button>
 
         <div x-show="actionsOpen" x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100" x-transition:leave="transition ease-in duration-75" x-transition:leave-start="opacity-100 scale-100" x-transition:leave-end="opacity-0 scale-95"
-          x-cloak class="absolute right-0 mt-2 w-56 min-w-max bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
+          x-cloak style="right: 0; left: auto;" class="absolute mt-2 w-auto bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
 
           <!-- Edit -->
           <a href="{% url 'connector_edit_tables' replication_config.pk %}"
-            class="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+            class="flex items-center px-4 py-2 text-sm whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
             <svg class="w-4 h-4 mr-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
             </svg>
@@ -42,7 +42,7 @@
 
           <!-- Recreate Connector -->
           <button @click="document.getElementById('recreateModal').classList.remove('hidden'); actionsOpen = false"
-            class="w-full flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+            class="w-full flex items-center px-4 py-2 text-sm whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
             <svg class="w-4 h-4 mr-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
             </svg>
@@ -53,7 +53,7 @@
 
           <!-- Delete Connector -->
           <button @click="deleteModal = { open: true, pk: {{ replication_config.pk }}, name: '{{ replication_config.connector_name }}', tables: {{ enabled_table_mappings.count }}, confirmed: false, truncate: false, drop: false, loading: false }; actionsOpen = false"
-            class="w-full flex items-center px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
+            class="w-full flex items-center px-4 py-2 text-sm whitespace-nowrap text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
             <svg class="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
             </svg>
@@ -88,31 +88,31 @@
               </svg>
             </button>
             <div x-show="srcMenu" x-transition x-cloak
-              class="absolute right-0 mt-1 w-auto min-w-[12rem] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
+              class="absolute right-0 mt-1 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
               <button id="btn-src-pause" @click="connectorAction('{% url 'connector_pause' replication_config.pk %}', 'Pausing...'); srcMenu = false"
-                class="{% if source_state != 'RUNNING' %}hidden {% endif %}w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-yellow-700 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/20">
+                class="{% if source_state != 'RUNNING' %}hidden {% endif %}w-full text-left px-3 py-1.5 text-xs text-yellow-700 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/20">
                 Pause
               </button>
               <button id="btn-src-resume" @click="connectorAction('{% url 'connector_resume' replication_config.pk %}', 'Resuming...'); srcMenu = false"
-                class="{% if source_state != 'PAUSED' %}hidden {% endif %}w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-green-700 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20">
+                class="{% if source_state != 'PAUSED' %}hidden {% endif %}w-full text-left px-3 py-1.5 text-xs text-green-700 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20">
                 Resume
               </button>
               <button @click="connectorAction('{% url 'connector_restart' replication_config.pk %}', 'Restarting...'); srcMenu = false"
-                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                class="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Restart Connector
               </button>
               <button id="btn-src-restart-failed" @click="connectorAction('{% url 'connector_restart_failed_tasks' replication_config.pk %}', 'Restarting failed...'); srcMenu = false"
-                class="hidden w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
+                class="hidden w-full text-left px-3 py-1.5 text-xs text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
                 Restart Failed Tasks
               </button>
               <button @click="connectorAction('{% url 'connector_restart_all_tasks' replication_config.pk %}', 'Restarting all...'); srcMenu = false"
-                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                class="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Restart All Tasks
               </button>
               {% if replication_config.processing_mode == 'batch' %}
               <div class="border-t border-gray-100 dark:border-gray-700 my-1"></div>
               <button id="btn-sync-schedule" @click="connectorAction('{% url 'connector_sync_schedule' replication_config.pk %}', 'Syncing...'); srcMenu = false"
-                class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-purple-700 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20">
+                class="w-full text-left px-3 py-1.5 text-xs text-purple-700 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20">
                 Sync with Schedule
               </button>
               {% endif %}
@@ -150,7 +150,7 @@
               </svg>
             </button>
             <div x-show="sinkMenu" x-transition x-cloak
-              class="absolute right-0 mt-1 w-auto min-w-[14rem] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
+              style="right: 0; left: auto;" class="absolute mt-1 w-auto bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1">
               <button @click="connectorAction('{% url 'sink_restart' replication_config.pk %}', 'Restarting sink...'); sinkMenu = false"
                 class="w-full text-left px-3 py-1.5 text-xs whitespace-nowrap text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Restart Connector
@@ -164,7 +164,7 @@
                 Restart All Tasks
               </button>
               <div class="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1 px-3 pb-1">
-                <p class="text-[10px] whitespace-nowrap text-gray-400 dark:text-gray-500">Affects all connectors sharing this sink</p>
+                <p class="text-[10px] text-gray-400 dark:text-gray-500">Affects all connectors sharing this sink</p>
               </div>
             </div>
           </div>
@@ -306,10 +306,6 @@
   </div>
   {% endif %}
 
-  <!-- Toast feedback -->
-  <div class="mb-6">
-    <span id="action-toast" class="hidden text-sm font-medium px-3 py-1 rounded-full transition-opacity duration-300"></span>
-  </div>
 
   {% if replication_config.processing_mode == 'batch' %}
   <!-- Rows Per Table (accordion) -->
@@ -476,9 +472,7 @@
 const CSRF_TOKEN = '{{ csrf_token }}';
 
 function connectorAction(url, loadingMsg) {
-  const toast = document.getElementById('action-toast');
-  toast.textContent = loadingMsg;
-  toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
+  showToast('info', loadingMsg);
 
   fetch(url, {
     method: 'POST',
@@ -487,21 +481,14 @@ function connectorAction(url, loadingMsg) {
   .then(r => r.json())
   .then(data => {
     if (data.success) {
-      toast.textContent = data.message || 'Success';
-      toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+      showToast('success', data.message || 'Success');
     } else {
-      toast.textContent = data.message || data.error || 'Failed';
-      toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
+      showToast('error', data.message || data.error || 'Failed');
     }
-    // Trigger immediate poll to refresh status
     setTimeout(pollNow, 500);
   })
   .catch(err => {
-    toast.textContent = 'Request failed';
-    toast.className = 'text-sm font-medium px-3 py-1 rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
-  })
-  .finally(() => {
-    setTimeout(() => { toast.className = 'hidden'; }, 4000);
+    showToast('error', 'Request failed');
   });
 }
 
