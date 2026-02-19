@@ -475,6 +475,9 @@ def connector_add(request, database_pk):
                     max_batch_size=int(request.POST.get('max_batch_size', 2048)),
                     poll_interval_ms=int(request.POST.get('poll_interval_ms', 500)),
                     incremental_snapshot_chunk_size=int(request.POST.get('incremental_snapshot_chunk_size', 1024)),
+                    snapshot_fetch_size=int(request.POST.get('snapshot_fetch_size', 10000)),
+                    sink_batch_size=int(request.POST.get('sink_batch_size', 3000)),
+                    sink_max_poll_records=int(request.POST.get('sink_max_poll_records', 5000)),
 
                     created_by=request.user if request.user.is_authenticated else None
                 )
@@ -849,12 +852,16 @@ def connector_edit_tables(request, config_pk):
                 'max_batch_size': request.POST.get('max_batch_size'),
                 'poll_interval_ms': request.POST.get('poll_interval_ms'),
                 'incremental_snapshot_chunk_size': request.POST.get('incremental_snapshot_chunk_size'),
+                'snapshot_fetch_size': request.POST.get('snapshot_fetch_size'),
+                'sink_batch_size': request.POST.get('sink_batch_size'),
+                'sink_max_poll_records': request.POST.get('sink_max_poll_records'),
             }
 
             if settings_fields['snapshot_mode'] and settings_fields['snapshot_mode'] != replication_config.snapshot_mode:
                 replication_config.snapshot_mode = settings_fields['snapshot_mode']
                 settings_changed = True
-            for int_field in ['max_queue_size', 'max_batch_size', 'poll_interval_ms', 'incremental_snapshot_chunk_size']:
+            for int_field in ['max_queue_size', 'max_batch_size', 'poll_interval_ms', 'incremental_snapshot_chunk_size',
+                               'snapshot_fetch_size', 'sink_batch_size', 'sink_max_poll_records']:
                 if settings_fields[int_field]:
                     new_val = int(settings_fields[int_field])
                     if new_val != getattr(replication_config, int_field):
@@ -1148,6 +1155,13 @@ def connector_monitor(request, config_pk):
         source_tasks = unified_status['source_connector'].get('tasks', [])
         sink_tasks = unified_status['sink_connector'].get('tasks', [])
 
+        # Connector uptime — most recent active ConnectorHistory entry for this source connector
+        from client.models.replication import ConnectorHistory
+        connector_history = ConnectorHistory.objects.filter(
+            connector_name=replication_config.connector_name,
+            connector_type='source',
+        ).exclude(status='deleted').order_by('-created_at').first()
+
         context = {
             'replication_config': replication_config,
             'database': database,
@@ -1160,7 +1174,8 @@ def connector_monitor(request, config_pk):
             'source_tasks': source_tasks,
             'sink_tasks': sink_tasks,
             'snapshot': unified_status.get('snapshot'),
-            'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True),
+            'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True).order_by('source_table'),
+            'connector_history': connector_history,
         }
 
         return render(request, 'client/connectors/connector_monitor.html', context)
@@ -1439,4 +1454,115 @@ def connector_table_rows_api(request, config_pk):
 
     except Exception as e:
         logger.error(f'Failed to get table row counts: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_live_metrics_api(request, config_pk):
+    """
+    AJAX endpoint for live connector metrics, polled every ~10s by the monitor page.
+    Returns:
+      - streaming: Jolokia JMX streaming metrics (lag, throughput, queue utilisation)
+      - dlq: Dead Letter Queue message count via Kafka Admin
+      - config_diff: Live connector config vs stored model values
+    """
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        database = config.client_database
+        result = {}
+
+        # ── 1. Streaming metrics via Jolokia ───────────────────────────────
+        try:
+            from jovoclient.utils.debezium.jolokia_client import JolokiaClient
+            jolokia = JolokiaClient()
+            raw = jolokia.get_streaming_metrics(database.db_type, config.kafka_topic_prefix or '')
+            if raw:
+                lag_ms = raw.get('MilliSecondsBehindSource', 0) or 0
+                queue_total = raw.get('QueueTotalCapacity', 0) or 0
+                queue_remaining = raw.get('QueueRemainingCapacity', 0) or 0
+                queue_used = queue_total - queue_remaining
+                queue_pct = round((queue_used / queue_total) * 100) if queue_total else 0
+                ms_since_last = raw.get('MilliSecondsSinceLastEvent', 0) or 0
+                result['streaming'] = {
+                    'available': True,
+                    'lag_ms': lag_ms,
+                    'lag_display': f"{lag_ms:,} ms" if lag_ms < 60000 else f"{lag_ms // 1000:,} s",
+                    'total_events': raw.get('TotalNumberOfEventsSeen', 0),
+                    'filtered_events': raw.get('NumberOfEventsFiltered', 0),
+                    'queue_total': queue_total,
+                    'queue_used': queue_used,
+                    'queue_pct': queue_pct,
+                    'ms_since_last_event': ms_since_last,
+                    'idle_display': f"{ms_since_last // 1000}s ago" if ms_since_last < 3600000 else "over 1h ago",
+                }
+            else:
+                result['streaming'] = {'available': False}
+        except Exception as e:
+            result['streaming'] = {'available': False, 'error': str(e)}
+
+        # ── 2. DLQ message count via confluent_kafka consumer ──────────────
+        try:
+            from confluent_kafka import Consumer, TopicPartition
+            from django.conf import settings as django_settings
+            kafka_servers = django_settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_INTERNAL_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+            )
+            dlq_topic = f"client_{database.client.id}.dlq"
+            consumer = Consumer({
+                'bootstrap.servers': kafka_servers,
+                'group.id': 'jovo-dlq-inspector',
+                'auto.offset.reset': 'earliest',
+            })
+            meta = consumer.list_topics(topic=dlq_topic, timeout=5)
+            topic_meta = meta.topics.get(dlq_topic)
+            if topic_meta and not topic_meta.error:
+                total = 0
+                for partition_id in topic_meta.partitions:
+                    low, high = consumer.get_watermark_offsets(
+                        TopicPartition(dlq_topic, partition_id), timeout=3
+                    )
+                    total += max(0, high - low)
+                result['dlq'] = {'available': True, 'topic': dlq_topic, 'count': total}
+            else:
+                result['dlq'] = {'available': True, 'topic': dlq_topic, 'count': 0}
+            consumer.close()
+        except Exception as e:
+            result['dlq'] = {'available': False, 'error': str(e)}
+
+        # ── 3. Live config diff (Kafka Connect REST vs stored model) ───────
+        try:
+            from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+            manager = DebeziumConnectorManager()
+            live_config = manager.get_connector_config(config.connector_name)
+            if live_config:
+                TRACKED = {
+                    'max.queue.size': ('max_queue_size', int),
+                    'max.batch.size': ('max_batch_size', int),
+                    'poll.interval.ms': ('poll_interval_ms', int),
+                    'snapshot.fetch.size': ('snapshot_fetch_size', int),
+                }
+                diffs = []
+                for live_key, (model_attr, cast) in TRACKED.items():
+                    live_val = live_config.get(live_key)
+                    stored_val = getattr(config, model_attr, None)
+                    if live_val is not None and stored_val is not None:
+                        if cast(live_val) != stored_val:
+                            diffs.append({
+                                'key': live_key,
+                                'live': live_val,
+                                'stored': str(stored_val),
+                            })
+                result['config_diff'] = {
+                    'available': True,
+                    'diffs': diffs,
+                    'in_sync': len(diffs) == 0,
+                }
+            else:
+                result['config_diff'] = {'available': False}
+        except Exception as e:
+            result['config_diff'] = {'available': False, 'error': str(e)}
+
+        return JsonResponse({'success': True, **result})
+
+    except Exception as e:
+        logger.error(f'Failed to get live metrics: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)

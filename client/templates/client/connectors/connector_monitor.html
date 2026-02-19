@@ -198,6 +198,79 @@
     </div>
   </div>
 
+  <!-- Error Banner (if last_error_message is set) -->
+  {% if replication_config.last_error_message %}
+  <div class="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3 flex gap-3">
+    <svg class="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+    </svg>
+    <div class="min-w-0">
+      <p class="text-sm font-semibold text-red-700 dark:text-red-400">Last Error</p>
+      <p class="text-xs text-red-600 dark:text-red-300 mt-0.5 break-all font-mono">{{ replication_config.last_error_message }}</p>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Live Metrics Panel (streaming lag, DLQ, queue — polled every 10s) -->
+  <div class="mb-4 bg-white dark:bg-gray-800 rounded-lg shadow" x-data="{ metricsOpen: true }">
+    <div class="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-t-lg transition border-b border-gray-100 dark:border-gray-700"
+         @click="metricsOpen = !metricsOpen">
+      <div class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+        </svg>
+        <span class="text-sm font-semibold text-gray-900 dark:text-white">Live Metrics</span>
+        <span id="metrics-refresh-badge" class="text-xs text-gray-400 dark:text-gray-500 hidden">refreshing…</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span id="metrics-last-updated" class="text-xs text-gray-400 dark:text-gray-500"></span>
+        <svg class="w-4 h-4 text-gray-400 transition-transform" :class="metricsOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+        </svg>
+      </div>
+    </div>
+    <div x-show="metricsOpen" x-transition>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-0 divide-x divide-y divide-gray-100 dark:divide-gray-700">
+
+        <!-- Lag -->
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Source Lag</p>
+          <p id="m-lag" class="text-xl font-bold text-gray-900 dark:text-white mt-0.5">--</p>
+          <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">behind source</p>
+        </div>
+
+        <!-- Queue Utilisation -->
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Queue Utilisation</p>
+          <div class="flex items-center gap-2 mt-0.5">
+            <p id="m-queue-pct" class="text-xl font-bold text-gray-900 dark:text-white">--</p>
+          </div>
+          <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 mt-1.5">
+            <div id="m-queue-bar" class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div>
+          </div>
+        </div>
+
+        <!-- DLQ -->
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">DLQ Messages</p>
+          <p id="m-dlq" class="text-xl font-bold text-gray-900 dark:text-white mt-0.5">--</p>
+          <p id="m-dlq-topic" class="text-xs text-gray-400 dark:text-gray-500 mt-0.5 font-mono truncate"></p>
+        </div>
+
+      </div>
+
+      <!-- Config Drift Alert -->
+      <div id="config-drift-banner" class="hidden px-4 py-2 border-t border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-900/20">
+        <p class="text-xs font-semibold text-yellow-700 dark:text-yellow-400">Config drift detected — live connector differs from stored settings:</p>
+        <ul id="config-drift-list" class="mt-1 space-y-0.5 text-xs font-mono text-yellow-600 dark:text-yellow-300"></ul>
+      </div>
+
+      <div id="metrics-unavailable" class="hidden px-4 py-3 border-t border-gray-100 dark:border-gray-700">
+        <p class="text-xs text-gray-400 dark:text-gray-500 italic">Streaming metrics unavailable — connector may be in snapshot phase or Jolokia unreachable.</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Snapshot Progress Panel (shown/hidden by JS) -->
   <div id="snapshot-panel" class="{% if not snapshot %}hidden{% endif %} mb-6">
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
@@ -299,7 +372,7 @@
           <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path>
           </svg>
-          <span class="text-sm font-semibold text-gray-900 dark:text-white">Table Rows</span>
+          <span class="text-sm font-semibold text-gray-900 dark:text-white">Tables</span>
           <span id="table-rows-count" class="text-xs text-gray-500 dark:text-gray-400"></span>
         </div>
         <div class="flex items-center gap-2">
@@ -323,6 +396,61 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Active Tuning Settings -->
+  <div class="mb-6 bg-white dark:bg-gray-800 rounded-lg shadow" x-data="{ tuneOpen: false }">
+    <div class="flex items-center justify-between px-6 py-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-t-lg transition border-b border-gray-200 dark:border-gray-700"
+         @click="tuneOpen = !tuneOpen">
+      <div class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path>
+        </svg>
+        <span class="text-sm font-semibold text-gray-900 dark:text-white">Active Tuning Settings</span>
+      </div>
+      <svg class="w-4 h-4 text-gray-400 transition-transform" :class="tuneOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+      </svg>
+    </div>
+    <div x-show="tuneOpen" x-transition>
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-0 divide-x divide-y divide-gray-100 dark:divide-gray-700 text-sm">
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Snapshot Fetch Size</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.snapshot_fetch_size|default:"10000" }}</p>
+        </div>
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Max Queue Size</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.max_queue_size }}</p>
+        </div>
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Max Batch Size</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.max_batch_size }}</p>
+        </div>
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Poll Interval</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.poll_interval_ms }} ms</p>
+        </div>
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Sink Batch Size</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.sink_batch_size|default:"3000" }}</p>
+        </div>
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Sink Max Poll Records</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.sink_max_poll_records|default:"5000" }}</p>
+        </div>
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Snapshot Mode</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.snapshot_mode }}</p>
+        </div>
+        <div class="px-4 py-3">
+          <p class="text-xs text-gray-500 dark:text-gray-400">Incremental Chunk</p>
+          <p class="font-semibold text-gray-900 dark:text-white">{{ replication_config.incremental_snapshot_chunk_size }}</p>
+        </div>
+      </div>
+      <div class="px-4 py-2 border-t border-gray-100 dark:border-gray-700">
+        <a href="{% url 'connector_edit_tables' replication_config.pk %}" class="text-xs text-blue-600 dark:text-blue-400 hover:underline">Edit settings →</a>
       </div>
     </div>
   </div>
@@ -357,6 +485,20 @@
         <div class="flex justify-between">
           <span class="text-gray-500 dark:text-gray-400">Last Sync</span>
           <span class="text-gray-900 dark:text-white">{{ replication_config.last_sync_at|date:"M d, Y g:i A"|default:"Never" }}</span>
+        </div>
+        {% if connector_history %}
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Deployed At</span>
+          <span class="text-gray-900 dark:text-white" title="{{ connector_history.created_at|date:'Y-m-d H:i:s' }}">{{ connector_history.created_at|date:"M d, Y g:i A" }}</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Uptime</span>
+          <span class="text-gray-900 dark:text-white">{{ connector_history.created_at|timesince }}</span>
+        </div>
+        {% endif %}
+        <div class="flex justify-between">
+          <span class="text-gray-500 dark:text-gray-400">Config Sync</span>
+          <span id="info-config-sync" class="text-gray-400 dark:text-gray-500 italic text-xs">checking…</span>
         </div>
       </div>
     </div>
@@ -488,6 +630,82 @@ function connectorAction(url, loadingMsg) {
 // Table Rows - fetch source & target row counts
 const TABLE_ROWS_URL = '{% url "connector_table_rows_api" replication_config.pk %}';
 
+// TableMapping.last_sync_at / last_sync_status / total_rows_synced are legacy
+// fields never written in the Kafka Connect pipeline — removed from table.
+const LIVE_METRICS_URL = '{% url "connector_live_metrics_api" replication_config.pk %}';
+
+// ── Live Metrics Polling ──────────────────────────────────────────────────────
+function fmt(n) { return n !== undefined && n !== null ? Number(n).toLocaleString() : '--'; }
+
+function fetchLiveMetrics() {
+  document.getElementById('metrics-refresh-badge').classList.remove('hidden');
+  fetch(LIVE_METRICS_URL)
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('metrics-refresh-badge').classList.add('hidden');
+      document.getElementById('metrics-last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+      const unavailEl = document.getElementById('metrics-unavailable');
+
+      // ── Streaming metrics ──
+      const s = data.streaming || {};
+      if (s.available) {
+        unavailEl.classList.add('hidden');
+        const lagMs = s.lag_ms || 0;
+        const lagEl = document.getElementById('m-lag');
+        lagEl.textContent = s.lag_display || '--';
+        lagEl.className = 'text-xl font-bold mt-0.5 ' + (lagMs > 60000 ? 'text-red-600 dark:text-red-400' : lagMs > 5000 ? 'text-yellow-600 dark:text-yellow-400' : 'text-green-600 dark:text-green-400');
+
+        const qpct = s.queue_pct || 0;
+        const qEl = document.getElementById('m-queue-pct');
+        qEl.textContent = qpct + '%';
+        qEl.className = 'text-xl font-bold mt-0.5 ' + (qpct > 80 ? 'text-red-600 dark:text-red-400' : qpct > 50 ? 'text-yellow-600 dark:text-yellow-400' : 'text-gray-900 dark:text-white');
+        document.getElementById('m-queue-bar').style.width = qpct + '%';
+        document.getElementById('m-queue-bar').className = 'm-queue-bar h-1.5 rounded-full transition-all duration-500 ' + (qpct > 80 ? 'bg-red-500' : qpct > 50 ? 'bg-yellow-500' : 'bg-blue-500');
+
+      } else {
+        unavailEl.classList.remove('hidden');
+        ['m-lag','m-queue-pct'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '--'; });
+      }
+
+      // ── DLQ ──
+      const d = data.dlq || {};
+      if (d.available !== false) {
+        const dlqEl = document.getElementById('m-dlq');
+        dlqEl.textContent = fmt(d.count);
+        dlqEl.className = 'text-xl font-bold mt-0.5 ' + (d.count > 0 ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400');
+        document.getElementById('m-dlq-topic').textContent = d.topic || '';
+      }
+
+      // ── Config diff ──
+      const cd = data.config_diff || {};
+      const syncEl = document.getElementById('info-config-sync');
+      const driftBanner = document.getElementById('config-drift-banner');
+      const driftList = document.getElementById('config-drift-list');
+      if (cd.available) {
+        if (cd.in_sync) {
+          if (syncEl) { syncEl.textContent = '✓ In sync'; syncEl.className = 'text-xs text-green-600 dark:text-green-400'; }
+          driftBanner.classList.add('hidden');
+        } else {
+          if (syncEl) { syncEl.textContent = '⚠ Drift detected'; syncEl.className = 'text-xs text-yellow-600 dark:text-yellow-400 font-semibold'; }
+          driftBanner.classList.remove('hidden');
+          driftList.innerHTML = cd.diffs.map(d =>
+            `<li>${d.key}: live=<b>${d.live}</b>, stored=<b>${d.stored}</b></li>`
+          ).join('');
+        }
+      } else {
+        if (syncEl) { syncEl.textContent = 'unavailable'; syncEl.className = 'text-xs text-gray-400 dark:text-gray-500 italic'; }
+      }
+    })
+    .catch(() => {
+      document.getElementById('metrics-refresh-badge').classList.add('hidden');
+    });
+}
+
+// Initial fetch + poll every 10s
+fetchLiveMetrics();
+setInterval(fetchLiveMetrics, 10000);
+
 function fetchTableRows() {
   const body = document.getElementById('table-rows-body');
   const countEl = document.getElementById('table-rows-count');
@@ -556,10 +774,10 @@ function fetchTableRows() {
         + '</tr></thead><tbody>';
 
       tables.forEach((t, i) => {
-        html += '<tr class="border-b border-gray-100 dark:border-gray-700/50">'
+        html += '<tr style="border-bottom:1px solid rgba(107,114,128,0.2)" onmouseover="this.style.background=\'rgba(107,114,128,0.15)\'" onmouseout="this.style.background=\'\'">'
           + '<td class="py-2 pr-2 text-gray-400 dark:text-gray-500">' + (i + 1) + '</td>'
           + '<td class="py-2 pr-2 font-mono text-gray-900 dark:text-white truncate max-w-[200px]" title="' + t.source_table + '">' + t.source_table + '</td>'
-          + '<td class="py-2 pr-2 font-mono text-gray-900 dark:text-white truncate max-w-[200px]" title="' + t.target_table + '">' + t.target_table + '</td>'
+          + '<td class="py-2 pr-2 font-mono text-gray-600 dark:text-gray-400 truncate max-w-[200px]" title="' + t.target_table + '">' + t.target_table + '</td>'
           + '<td class="py-2 pl-2 text-right">' + fmtCell(t.source_rows, t.source_error) + '</td>'
           + '<td class="py-2 pl-2 text-right">' + fmtCell(t.target_rows, t.target_error) + '</td>'
           + '</tr>';

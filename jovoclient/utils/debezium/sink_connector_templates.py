@@ -25,9 +25,10 @@ def get_mysql_sink_connector_config(
     db_config: ClientDatabase,
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
-    schema_registry_url: str = None,  # Added this parameter
+    schema_registry_url: str = None,
     delete_enabled: bool = False,
     custom_config: Optional[Dict[str, Any]] = None,
+    replication_config=None,
 ) -> Dict[str, Any]:
     """
     Generate MySQL JDBC Sink Connector configuration matching Source Avro config
@@ -69,8 +70,15 @@ def get_mysql_sink_connector_config(
         "hibernate.c3p0.preferredTestQuery": "SELECT 1",
         "hibernate.c3p0.idle_test_period": "300",
 
-        # Transforms
-        "transforms": "extractTableName",
+        # --- TRANSFORMS ---
+        # 1. unwrap: flattens the Debezium envelope so the sink sees the actual data fields.
+        # 2. extractTableName: routes topics to proper table names.
+        "transforms": "unwrap,extractTableName",
+        
+        "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+        "transforms.unwrap.drop.tombstones": "true",
+        "transforms.unwrap.delete.handling.mode": "rewrite",
+
         "transforms.extractTableName.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.extractTableName.regex": ".*\\.([^.]+)\\.([^.]+)",
         "transforms.extractTableName.replacement": "$1_$2",
@@ -78,7 +86,7 @@ def get_mysql_sink_connector_config(
         "schema.evolution": "basic",
         "collection.name.format": "${topic}",
 
-        # --- UPDATED TO MATCH SOURCE (AVRO) ---
+        # --- CONVERTERS (AVRO) ---
         "key.converter": "io.confluent.connect.avro.AvroConverter",
         "key.converter.schema.registry.url": schema_registry_url,
         "key.converter.schemas.enable": "true",
@@ -86,22 +94,29 @@ def get_mysql_sink_connector_config(
         "value.converter": "io.confluent.connect.avro.AvroConverter",
         "value.converter.schema.registry.url": schema_registry_url,
         "value.converter.schemas.enable": "true",
-        # --------------------------------------
 
         "insert.mode": "upsert",
         "primary.key.mode": "record_key",
         "delete.enabled": str(delete_enabled).lower(),
-        "batch.size": "3000",
+        "batch.size": str(replication_config.sink_batch_size) if replication_config and hasattr(replication_config, 'sink_batch_size') else "3000",
         "max.retries": "10",
         "retry.backoff.ms": "3000",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
         "topic.tracking.refresh.interval.ms": "5000",
         "consumer.override.metadata.max.age.ms": "10000",
+        # Permanent: controls how many records sink pulls per poll (should be >= batch.size)
+        "consumer.override.max.poll.records": str(replication_config.sink_max_poll_records) if replication_config and hasattr(replication_config, 'sink_max_poll_records') else "5000",
+        # Permanent: generous offset flush timeout to prevent "Commit of offsets timed out" during snapshot
+        "offset.flush.timeout.ms": "60000",
+        # Permanent: 50MB fetch buffer per partition
+        "consumer.override.fetch.max.bytes": "52428800",
 
         # Error handling (configurable via settings)
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
+        "errors.deadletterqueue.topic.name": f"client_{client.id}.dlq",
+        "errors.deadletterqueue.context.headers.enable": "true",
     }
 
     # Apply DLQ settings from Django settings
@@ -147,9 +162,10 @@ def get_postgresql_sink_connector_config(
     db_config: ClientDatabase,
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
-    schema_registry_url: str = None,  # Added this parameter
+    schema_registry_url: str = None,
     delete_enabled: bool = False,
     custom_config: Optional[Dict[str, Any]] = None,
+    replication_config=None,
 ) -> Dict[str, Any]:
     """
     Generate PostgreSQL JDBC Sink Connector configuration matching Source Avro config
@@ -190,10 +206,14 @@ def get_postgresql_sink_connector_config(
         "hibernate.c3p0.idle_test_period": "300",
 
         # Transforms
-        "transforms": "extractTableName",
+        # castMicroTime: MySQL TIME columns > 24h cause a DateTimeException in the JDBC sink.
+        # Casting to string stores the raw microsecond value and avoids the crash.
+        "transforms": "extractTableName,castMicroTime",
         "transforms.extractTableName.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.extractTableName.regex": ".*\\.([^.]+)\\.([^.]+)",
         "transforms.extractTableName.replacement": "$1_$2",
+        "transforms.castMicroTime.type": "org.apache.kafka.connect.transforms.Cast$Value",
+        "transforms.castMicroTime.spec": "time_taken:string",
 
         # Let sink connector auto-create tables and add columns
         # 'basic' mode: creates tables if missing, adds new columns as NULLABLE
@@ -213,13 +233,19 @@ def get_postgresql_sink_connector_config(
         "insert.mode": "upsert",
         "primary.key.mode": "record_key",
         "delete.enabled": str(delete_enabled).lower(),
-        "batch.size": "3000",
+        "batch.size": str(replication_config.sink_batch_size) if replication_config and hasattr(replication_config, 'sink_batch_size') else "3000",
         "max.retries": "10",
         "retry.backoff.ms": "3000",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
         "topic.tracking.refresh.interval.ms": "5000",
         "consumer.override.metadata.max.age.ms": "10000",
+        # Permanent: controls how many records sink pulls per poll (should be >= batch.size)
+        "consumer.override.max.poll.records": str(replication_config.sink_max_poll_records) if replication_config and hasattr(replication_config, 'sink_max_poll_records') else "5000",
+        # Permanent: generous offset flush timeout to prevent "Commit of offsets timed out" during snapshot
+        "offset.flush.timeout.ms": "60000",
+        # Permanent: 50MB fetch buffer per partition
+        "consumer.override.fetch.max.bytes": "52428800",
 
         # Error handling (configurable via settings)
         "errors.log.enable": "true",
@@ -268,10 +294,11 @@ def get_sink_connector_config_for_database(
     db_config: ClientDatabase,
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
-    schema_registry_url: str = None,  # Added argument
+    schema_registry_url: str = None,
     delete_enabled: bool = False,
     custom_config: Optional[Dict[str, Any]] = None,
     primary_key_fields: Optional[str] = None,  # Deprecated - pass via custom_config instead
+    replication_config=None,
 ) -> Optional[Dict[str, Any]]:
     """
     Get JDBC Sink connector configuration based on target database type
@@ -316,9 +343,10 @@ def get_sink_connector_config_for_database(
         db_config=db_config,
         topics=topics,
         kafka_bootstrap_servers=kafka_bootstrap_servers,
-        schema_registry_url=schema_registry_url,  # Pass it down
+        schema_registry_url=schema_registry_url,
         delete_enabled=delete_enabled,
         custom_config=custom_config,
+        replication_config=replication_config,
     )
 
 

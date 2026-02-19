@@ -65,6 +65,7 @@ from .views.connector_views import (
     sink_restart_failed_tasks,
     sink_restart_all_tasks,
     connector_table_rows_api,
+    connector_live_metrics_api,
 )
 
 
@@ -260,6 +261,11 @@ urlpatterns = [
     path('connector/<int:config_pk>/table-rows/',
          connector_table_rows_api,
          name='connector_table_rows_api'),
+
+    # AJAX: Live metrics (streaming lag, DLQ count, config diff)
+    path('connector/<int:config_pk>/live-metrics/',
+         connector_live_metrics_api,
+         name='connector_live_metrics_api'),
 
     # ==========================================
     # AJAX Endpoints

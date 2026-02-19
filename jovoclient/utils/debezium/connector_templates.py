@@ -200,13 +200,16 @@ def get_mysql_connector_config(
 
         # Time precision
         "time.precision.mode": "adaptive_time_microseconds",
-
+        
         # Tombstones on delete
         "tombstones.on.delete": "true",
 
         # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
         # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
-        "snapshot.fetch.size": "2000",
+        "snapshot.fetch.size": str(replication_config.snapshot_fetch_size) if replication_config and hasattr(replication_config, 'snapshot_fetch_size') else "10000",
+
+        # Single-threaded snapshot (safest default, avoids OOM on large tables)
+        "snapshot.max.threads": "1",
 
         # Performance tuning - use values from replication_config if provided
         "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
@@ -382,7 +385,10 @@ def get_postgresql_connector_config(
 
         # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
         # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
-        "snapshot.fetch.size": "2000",
+        "snapshot.fetch.size": str(replication_config.snapshot_fetch_size) if replication_config and hasattr(replication_config, 'snapshot_fetch_size') else "10000",
+
+        # Single-threaded snapshot (safest default, avoids OOM on large tables)
+        "snapshot.max.threads": "1",
 
         # Performance tuning - use values from replication_config if provided
         "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
@@ -548,12 +554,15 @@ def get_sqlserver_connector_config(
 
         # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
         # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
-        "snapshot.fetch.size": "2000",
+        "snapshot.fetch.size": str(replication_config.snapshot_fetch_size) if replication_config and hasattr(replication_config, 'snapshot_fetch_size') else "10000",
 
-        # Performance tuning
-        "max.queue.size": "8192",
-        "max.batch.size": "2048",
-        "poll.interval.ms": "1000",
+        # Single-threaded snapshot (safest default, avoids OOM on large tables)
+        "snapshot.max.threads": "1",
+
+        # Performance tuning - use values from replication_config if provided
+        "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
+        "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
+        "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "1000",
 
         # Connection settings
         "database.connection.timeout.ms": "30000",
@@ -719,8 +728,11 @@ def get_oracle_connector_config(
         
         "snapshot.mode": snapshot_mode,
         "snapshot.locking.mode": "none",
-        "snapshot.fetch.size": "2000",
-        
+        "snapshot.fetch.size": str(replication_config.snapshot_fetch_size) if replication_config and hasattr(replication_config, 'snapshot_fetch_size') else "10000",
+
+        # Single-threaded snapshot (safest default, avoids OOM on large tables)
+        "snapshot.max.threads": "1",
+
         # LogMiner configuration
         "log.mining.flush.auto.create": "false",
         "log.mining.buffer.type": "memory",
@@ -749,10 +761,10 @@ def get_oracle_connector_config(
         "tombstones.on.delete": "true",
         "include.schema.changes": "true",
         
-        "max.queue.size": "8192",
-        "max.batch.size": "2048",
-        "poll.interval.ms": "1000",
-        
+        "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
+        "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
+        "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "1000",
+
         "database.connection.adapter": "logminer",
         "database.jdbc.driver": "oracle.jdbc.OracleDriver",
         

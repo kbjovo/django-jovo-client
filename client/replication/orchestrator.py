@@ -921,6 +921,7 @@ class ReplicationOrchestrator:
                 primary_key_fields=primary_key_fields,
                 delete_enabled=True,
                 custom_config=custom_config,
+                replication_config=self.config,
             )
 
             # Update connector config
@@ -982,6 +983,7 @@ class ReplicationOrchestrator:
                 primary_key_fields=primary_key_fields,
                 delete_enabled=True,
                 custom_config=custom_config,
+                replication_config=self.config,
             )
 
             # Create connector

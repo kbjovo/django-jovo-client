@@ -125,6 +125,54 @@
                     </p>
                 </div>
 
+                <!-- Snapshot Fetch Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Snapshot Fetch Size
+                    </label>
+                    <input type="number"
+                           name="snapshot_fetch_size"
+                           value="{{ replication_config.snapshot_fetch_size }}"
+                           min="1000"
+                           max="50000"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Rows fetched per JDBC call during initial snapshot
+                    </p>
+                </div>
+
+                <!-- Sink Batch Size -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Sink Batch Size
+                    </label>
+                    <input type="number"
+                           name="sink_batch_size"
+                           value="{{ replication_config.sink_batch_size }}"
+                           min="500"
+                           max="10000"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Records written to target DB per batch
+                    </p>
+                </div>
+
+                <!-- Sink Max Poll Records -->
+                <div>
+                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Sink Max Poll Records
+                    </label>
+                    <input type="number"
+                           name="sink_max_poll_records"
+                           value="{{ replication_config.sink_max_poll_records }}"
+                           min="500"
+                           max="10000"
+                           class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Records pulled from Kafka per poll (≥ Sink Batch Size)
+                    </p>
+                </div>
+
                 <!-- Drop Before Sync -->
                 <div>
                     <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">

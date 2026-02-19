@@ -392,6 +392,21 @@ class ReplicationConfig(models.Model):
         help_text="Chunk size for incremental snapshots (256-10240). Used when adding tables via signals."
     )
 
+    snapshot_fetch_size = models.IntegerField(
+        default=10000,
+        help_text="JDBC fetch size during initial snapshot (1000-50000). How many rows the source reads per fetch. Larger = faster snapshots but more memory."
+    )
+
+    sink_batch_size = models.IntegerField(
+        default=3000,
+        help_text="Sink connector batch size (500-10000). How many records to write to target DB in one batch."
+    )
+
+    sink_max_poll_records = models.IntegerField(
+        default=5000,
+        help_text="Max records the sink pulls from Kafka per poll (500-10000). Should be >= sink_batch_size."
+    )
+
     # NEW: Health monitoring and state tracking
     connector_state = models.CharField(
         max_length=50,
