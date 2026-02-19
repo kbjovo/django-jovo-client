@@ -40,6 +40,11 @@
        x-data="{
          selectedClients: [],
          open: false,
+         allItems: [
+           {% for item in monitoring_data %}
+           { clientId: {{ item.config.client_database.client.pk }}, healthy: {{ item.is_healthy|yesno:'true,false' }}, errors: {{ item.error_count|default:0 }} }{% if not forloop.last %},{% endif %}
+           {% endfor %}
+         ],
          toggle(id) {
            const idx = this.selectedClients.indexOf(id);
            if (idx === -1) this.selectedClients.push(id);
@@ -48,7 +53,15 @@
          isVisible(clientId) {
            return this.selectedClients.length === 0 || this.selectedClients.includes(clientId);
          },
-         clearAll() { this.selectedClients = []; }
+         clearAll() { this.selectedClients = []; },
+         get filtered() {
+           if (this.selectedClients.length === 0) return this.allItems;
+           return this.allItems.filter(i => this.selectedClients.includes(i.clientId));
+         },
+         get activeCount() { return this.filtered.length; },
+         get healthyCount() { return this.filtered.filter(i => i.healthy).length; },
+         get unhealthyCount() { return this.filtered.filter(i => !i.healthy).length; },
+         get errorCount() { return this.filtered.reduce((s, i) => s + i.errors, 0); },
        }">
 
     <!-- Filter Bar -->
@@ -98,19 +111,19 @@
     <!-- Statistics Cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
-        <span class="text-2xl font-bold text-gray-900 dark:text-white">{{ total_active|default:0 }}</span>
+        <span class="text-2xl font-bold text-gray-900 dark:text-white" x-text="activeCount"></span>
         <span class="text-sm text-gray-600 dark:text-gray-400">Active</span>
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
-        <span class="text-2xl font-bold text-green-600 dark:text-green-400">{{ healthy_count|default:0 }}</span>
+        <span class="text-2xl font-bold text-green-600 dark:text-green-400" x-text="healthyCount"></span>
         <span class="text-sm text-gray-600 dark:text-gray-400">Healthy</span>
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
-        <span class="text-2xl font-bold {% if unhealthy_count > 0 %}text-red-600 dark:text-red-400{% else %}text-gray-900 dark:text-white{% endif %}">{{ unhealthy_count|default:0 }}</span>
+        <span class="text-2xl font-bold" :class="unhealthyCount > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-white'" x-text="unhealthyCount"></span>
         <span class="text-sm text-gray-600 dark:text-gray-400">Unhealthy</span>
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 flex items-center gap-3">
-        <span class="text-2xl font-bold {% if total_errors > 0 %}text-red-600 dark:text-red-400{% else %}text-gray-900 dark:text-white{% endif %}">{{ total_errors|default:0 }}</span>
+        <span class="text-2xl font-bold" :class="errorCount > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-white'" x-text="errorCount"></span>
         <span class="text-sm text-gray-600 dark:text-gray-400">Errors</span>
       </div>
     </div>
@@ -183,8 +196,8 @@
             </div>
             <div class="min-w-0 flex-1">
               <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Database</p>
-              <p class="text-sm text-gray-900 dark:text-white truncate">{{ item.config.client_database.db_name }}</p>
-              <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.config.client_database.db_type|upper }} @ {{ item.config.client_database.host }}:{{ item.config.client_database.port }}</p>
+              <p class="text-sm text-gray-900 dark:text-white truncate">{{ item.config.client_database.connection_name }}</p>
+              <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.config.client_database.db_type|upper }} @ {{ item.config.client_database.host }}:{{ item.config.client_database.port }}/{{ item.config.client_database.database_name }}</p>
             </div>
           </div>
 

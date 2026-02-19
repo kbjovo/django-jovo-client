@@ -71,13 +71,21 @@
                     <div class="flex items-center gap-2">
                       <span class="font-semibold text-gray-900 dark:text-white">{{ config.connector_name }}</span>
                       {% if config.debezium_status.state == 'RUNNING' %}
-                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">RUNNING</span>
+                        <span title="Running" class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>
+                        </span>
                       {% elif config.debezium_status.state == 'FAILED' %}
-                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400">FAILED</span>
+                        <span title="Failed" class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </span>
                       {% elif config.debezium_status.state == 'PAUSED' %}
-                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400">PAUSED</span>
+                        <span title="Paused" class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400">
+                            <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14h3V5H8zm5 0v14h3V5h-3z"></path></svg>
+                        </span>
                       {% else %}
-                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-900/30 text-gray-700 dark:text-gray-400">{{ config.debezium_status.state|default:"UNKNOWN" }}</span>
+                        <span title="{{ config.debezium_status.state|default:'Unknown' }}" class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-gray-100 dark:bg-gray-900/30 text-gray-600 dark:text-gray-400">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01"></path></svg>
+                        </span>
                       {% endif %}
                     </div>
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">v{{ config.connector_version }}</p>

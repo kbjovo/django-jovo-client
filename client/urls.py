@@ -64,6 +64,7 @@ from .views.connector_views import (
     sink_restart,
     sink_restart_failed_tasks,
     sink_restart_all_tasks,
+    connector_table_rows_api,
 )
 
 
@@ -254,6 +255,11 @@ urlpatterns = [
     path('connector/<int:config_pk>/sink/restart-all-tasks/',
          sink_restart_all_tasks,
          name='sink_restart_all_tasks'),
+
+    # AJAX: Table row counts (source + target)
+    path('connector/<int:config_pk>/table-rows/',
+         connector_table_rows_api,
+         name='connector_table_rows_api'),
 
     # ==========================================
     # AJAX Endpoints

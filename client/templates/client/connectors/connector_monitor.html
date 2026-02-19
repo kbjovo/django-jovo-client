@@ -257,22 +257,6 @@
           </div>
         </div>
 
-        <!-- Per-table rows scanned (collapsible) - only for non-batch connectors -->
-        {% if replication_config.processing_mode != 'batch' %}
-        <details id="snap-rows-detail" class="mt-4 {% if not snapshot.rows_scanned %}hidden{% endif %}">
-          <summary class="text-sm text-gray-500 dark:text-gray-400 cursor-pointer hover:text-gray-700 dark:hover:text-gray-300">Rows per table</summary>
-          <div id="snap-rows-table" class="mt-2 space-y-1 text-sm font-mono">
-            {% if snapshot.rows_scanned %}
-              {% for table, count in snapshot.rows_scanned.items %}
-                <div class="flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded">
-                  <span class="text-gray-700 dark:text-gray-300 truncate">{{ table }}</span>
-                  <span class="text-gray-900 dark:text-white font-semibold">{{ count }}</span>
-                </div>
-              {% endfor %}
-            {% endif %}
-          </div>
-        </details>
-        {% endif %}
       </div>
     </div>
   </div>
@@ -307,32 +291,41 @@
   {% endif %}
 
 
-  {% if replication_config.processing_mode == 'batch' %}
-  <!-- Rows Per Table (accordion) -->
-  <div id="batch-rows-panel" class="mb-6">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow" x-data="{ rowsOpen: false }">
-      <button @click="rowsOpen = !rowsOpen" class="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-lg transition">
+  <!-- Table Rows Panel (collapsible, auto-loads) -->
+  <div class="mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow" x-data="{ rowsOpen: true }">
+      <div class="flex items-center justify-between px-6 py-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-t-lg transition" @click="rowsOpen = !rowsOpen">
         <div class="flex items-center gap-3">
           <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path>
           </svg>
-          <span class="text-sm font-semibold text-gray-900 dark:text-white">Rows Per Table</span>
-          <span id="batch-rows-count" class="text-xs text-gray-500 dark:text-gray-400"></span>
+          <span class="text-sm font-semibold text-gray-900 dark:text-white">Table Rows</span>
+          <span id="table-rows-count" class="text-xs text-gray-500 dark:text-gray-400"></span>
         </div>
-        <svg class="w-4 h-4 text-gray-400 transition-transform" :class="rowsOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-        </svg>
-      </button>
-      <div x-show="rowsOpen" x-collapse x-cloak>
+        <div class="flex items-center gap-2">
+          <button id="btn-refresh-rows" @click.stop="fetchTableRows()" title="Refresh row counts"
+            class="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition">
+            <svg id="refresh-rows-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+          </button>
+          <svg class="w-4 h-4 text-gray-400 transition-transform" :class="rowsOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </div>
+      </div>
+      <div x-show="rowsOpen" x-collapse>
         <div class="px-6 pb-4">
-          <div id="batch-rows-table" class="space-y-1 text-sm font-mono">
-            <p class="text-gray-400 dark:text-gray-500 text-center py-2">Waiting for data...</p>
+          <div id="table-rows-body">
+            <div class="flex items-center justify-center py-6 gap-2 text-sm text-gray-400 dark:text-gray-500">
+              <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+              Loading row counts...
+            </div>
           </div>
         </div>
       </div>
     </div>
   </div>
-  {% endif %}
 
   <!-- Connector Information -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -491,6 +484,99 @@ function connectorAction(url, loadingMsg) {
     showToast('error', 'Request failed');
   });
 }
+
+// Table Rows - fetch source & target row counts
+const TABLE_ROWS_URL = '{% url "connector_table_rows_api" replication_config.pk %}';
+
+function fetchTableRows() {
+  const body = document.getElementById('table-rows-body');
+  const countEl = document.getElementById('table-rows-count');
+  const refreshIcon = document.getElementById('refresh-rows-icon');
+
+  // Show spinner on refresh icon
+  if (refreshIcon) refreshIcon.classList.add('animate-spin');
+
+  // Show loading state
+  body.innerHTML = '<div class="flex items-center justify-center py-6 gap-2 text-sm text-gray-400 dark:text-gray-500">'
+    + '<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>'
+    + 'Loading row counts...</div>';
+
+  fetch(TABLE_ROWS_URL)
+    .then(r => r.json())
+    .then(data => {
+      if (refreshIcon) refreshIcon.classList.remove('animate-spin');
+      if (!data.success) {
+        body.innerHTML = '<p class="text-sm text-red-500 text-center py-4">Failed to load row counts</p>';
+        return;
+      }
+
+      const tables = data.tables;
+      if (countEl) countEl.textContent = tables.length + ' table' + (tables.length !== 1 ? 's' : '');
+
+      if (tables.length === 0) {
+        body.innerHTML = '<p class="text-sm text-gray-400 dark:text-gray-500 text-center py-4">No enabled tables</p>';
+        return;
+      }
+
+      // Render error labels for row count failures
+      function fmtCell(count, error) {
+        if (count !== null) return '<span class="font-semibold text-gray-900 dark:text-white">' + Number(count).toLocaleString() + '</span>';
+        if (error === 'db_unreachable') return '<span class="text-red-500 text-xs" title="Database is unreachable">DB offline</span>';
+        if (error === 'table_not_found') return '<span class="text-yellow-500 text-xs" title="Table does not exist">Not found</span>';
+        if (error === 'no_target_db') return '<span class="text-gray-400 text-xs" title="No target database configured">No target DB</span>';
+        if (error === 'error') return '<span class="text-red-400 text-xs" title="Query failed">Error</span>';
+        return '<span class="text-gray-400">--</span>';
+      }
+
+      // Show database connectivity warnings
+      let warnings = '';
+      if (!data.source_reachable) {
+        warnings += '<div class="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-xs">'
+          + '<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"></path></svg>'
+          + 'Source database is unreachable</div>';
+      }
+      if (data.has_target_db && !data.target_reachable) {
+        warnings += '<div class="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-xs">'
+          + '<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"></path></svg>'
+          + 'Target database is unreachable</div>';
+      }
+      if (!data.has_target_db) {
+        warnings += '<div class="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 text-xs">'
+          + '<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
+          + 'No target database configured for this client</div>';
+      }
+
+      let html = warnings + '<table class="w-full text-sm">'
+        + '<thead><tr class="text-xs text-gray-500 dark:text-gray-400 uppercase border-b border-gray-200 dark:border-gray-700">'
+        + '<th class="py-2 pr-2 text-left w-8">#</th>'
+        + '<th class="py-2 pr-2 text-left">Source Table</th>'
+        + '<th class="py-2 pr-2 text-left">Target Table</th>'
+        + '<th class="py-2 pl-2 text-right">Source Rows</th>'
+        + '<th class="py-2 pl-2 text-right">Target Rows</th>'
+        + '</tr></thead><tbody>';
+
+      tables.forEach((t, i) => {
+        html += '<tr class="border-b border-gray-100 dark:border-gray-700/50">'
+          + '<td class="py-2 pr-2 text-gray-400 dark:text-gray-500">' + (i + 1) + '</td>'
+          + '<td class="py-2 pr-2 font-mono text-gray-900 dark:text-white truncate max-w-[200px]" title="' + t.source_table + '">' + t.source_table + '</td>'
+          + '<td class="py-2 pr-2 font-mono text-gray-900 dark:text-white truncate max-w-[200px]" title="' + t.target_table + '">' + t.target_table + '</td>'
+          + '<td class="py-2 pl-2 text-right">' + fmtCell(t.source_rows, t.source_error) + '</td>'
+          + '<td class="py-2 pl-2 text-right">' + fmtCell(t.target_rows, t.target_error) + '</td>'
+          + '</tr>';
+      });
+
+      html += '</tbody></table>';
+      body.innerHTML = html;
+    })
+    .catch(err => {
+      if (refreshIcon) refreshIcon.classList.remove('animate-spin');
+      body.innerHTML = '<p class="text-sm text-red-500 text-center py-4">Failed to load row counts</p>';
+      console.warn('Table rows fetch failed:', err);
+    });
+}
+
+// Auto-load row counts on page load
+fetchTableRows();
 
 (function() {
   const STATUS_URL = '{% url "connector_status_api" replication_config.pk %}';
@@ -713,11 +799,6 @@ function connectorAction(url, loadingMsg) {
       updateBatchSchedule(s);
     }
 
-    // Update persistent rows-per-table panel for batch connectors
-    if (isBatch && s.snapshot && s.snapshot.rows_scanned) {
-      updateBatchRowsTable(s.snapshot.rows_scanned);
-    }
-
     // Snapshot panel
     const panel = document.getElementById('snapshot-panel');
     const snap = s.snapshot;
@@ -753,24 +834,6 @@ function connectorAction(url, loadingMsg) {
       document.getElementById('snap-current').textContent = snap.current_table || '--';
       document.getElementById('snap-current').title = snap.current_table || '';
       document.getElementById('snap-remain-val').textContent = snap.remaining_tables || 0;
-
-      // Update snapshot rows detail only for non-batch connectors
-      // Batch connectors use the permanent "Rows Per Table" panel
-      if (!isBatch) {
-        const rowsDetail = document.getElementById('snap-rows-detail');
-        const rowsTable = document.getElementById('snap-rows-table');
-        if (rowsDetail && rowsTable && snap.rows_scanned && Object.keys(snap.rows_scanned).length > 0) {
-          rowsDetail.classList.remove('hidden');
-          rowsTable.innerHTML = '';
-          for (const [table, count] of Object.entries(snap.rows_scanned)) {
-            const row = document.createElement('div');
-            row.className = 'flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded';
-            row.innerHTML = '<span class="text-gray-700 dark:text-gray-300 truncate">' + table + '</span>'
-              + '<span class="text-gray-900 dark:text-white font-semibold">' + formatNumber(count) + '</span>';
-            rowsTable.appendChild(row);
-          }
-        }
-      }
 
       currentInterval = snap.running ? POLL_INTERVAL : IDLE_INTERVAL;
     } else {
@@ -811,26 +874,6 @@ function connectorAction(url, loadingMsg) {
       } else {
         btnSyncSchedule.classList.remove('hidden');
       }
-    }
-  }
-
-  function updateBatchRowsTable(rowsScanned) {
-    const container = document.getElementById('batch-rows-table');
-    const countEl = document.getElementById('batch-rows-count');
-    if (!container) return;
-
-    const entries = Object.entries(rowsScanned);
-    if (entries.length === 0) return;
-
-    if (countEl) countEl.textContent = entries.length + ' tables';
-
-    container.innerHTML = '';
-    for (const [table, count] of entries) {
-      const row = document.createElement('div');
-      row.className = 'flex justify-between px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded';
-      row.innerHTML = '<span class="text-gray-700 dark:text-gray-300 truncate">' + table + '</span>'
-        + '<span class="text-gray-900 dark:text-white font-semibold">' + formatNumber(count) + '</span>';
-      container.appendChild(row);
     }
   }
 
