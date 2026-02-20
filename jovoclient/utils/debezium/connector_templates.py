@@ -12,6 +12,49 @@ from sqlalchemy.sql import text
 logger = logging.getLogger(__name__)
 
 
+def format_table_for_connector(db_config: ClientDatabase, table_name: str, schema_name: str = None) -> str:
+    """
+    Format table name for Debezium connector configuration.
+
+    Different databases require different table name formats in table.include.list:
+    - MySQL:      {database}.{table}
+    - PostgreSQL: {schema}.{table}
+    - SQL Server: {schema}.{table}
+    - Oracle:     {schema}.{table}
+    """
+    db_type = db_config.db_type.lower()
+
+    if db_type == 'mssql':
+        if '.' in table_name:
+            schema, table = table_name.rsplit('.', 1)
+        else:
+            schema = schema_name or 'dbo'
+            table = table_name
+        formatted = f"{schema}.{table}"
+    elif db_type == 'postgresql':
+        if '.' in table_name:
+            schema, table = table_name.rsplit('.', 1)
+        else:
+            schema = schema_name or 'public'
+            table = table_name
+        formatted = f"{schema}.{table}"
+    elif db_type == 'mysql':
+        table = table_name.split('.')[-1] if '.' in table_name else table_name
+        formatted = f"{db_config.database_name}.{table}"
+    elif db_type == 'oracle':
+        if '.' in table_name:
+            schema, table = table_name.rsplit('.', 1)
+        else:
+            schema = schema_name or db_config.username.upper()
+            table = table_name
+        formatted = f"{schema}.{table}"
+    else:
+        formatted = f"{db_config.database_name}.{table_name}"
+
+    logger.debug(f"Formatted table: {table_name} → {formatted} ({db_type})")
+    return formatted
+
+
 def generate_server_id(client_id: int, db_id: int, version: int = 0) -> int:
     """
     Generate a deterministic MySQL server ID based on client, database IDs, and connector version.

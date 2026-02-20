@@ -26,16 +26,6 @@
     </div>
 </div>
 
-<!-- Info Card -->
-<div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-    <p class="text-blue-900 dark:text-blue-100">
-        <span class="font-semibold">ℹ️ Creating Source Connector v{{ next_version }}</span><br>
-        This will create a new source connector for the selected tables. Tables from other connectors will not be shown.
-        {% if next_version == 1 %}
-        <br><span class="font-semibold">Note:</span> Since this is the first connector, a sink connector will also be created automatically.
-        {% endif %}
-    </p>
-</div>
 
 <form method="POST" id="connector-form">
     {% csrf_token %}
@@ -397,21 +387,8 @@
                         <!-- Table Info -->
                         <div class="flex-1">
                             <span class="font-semibold text-gray-900 dark:text-white">{{ table.name }}</span>
-                            <span class="ml-3 text-sm text-gray-500 dark:text-gray-400">
-                                {% if table.row_count is not None %}
-                                    {% if table.row_count > 1000000 %}
-                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">{{ table.row_count|floatformat:0 }} rows</span>
-                                    {% elif table.row_count > 100000 %}
-                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400">{{ table.row_count|floatformat:0 }} rows</span>
-                                    {% elif table.row_count == 0 %}
-                                        <span class="text-xs">0 rows (empty)</span>
-                                    {% else %}
-                                        {{ table.row_count|floatformat:0 }} rows
-                                    {% endif %}
-                                {% else %}
-                                    <span class="text-xs">N/A</span>
-                                {% endif %}
-                            </span>
+                            <span class="ml-3 text-xs text-gray-400 dark:text-gray-500"
+                                  id="row-count-{{ escaped_name }}">—</span>
                         </div>
 
                         <!-- Column count indicator (loaded dynamically) -->
@@ -635,6 +612,21 @@ async function loadTableSchema(tableName) {
         // Update column count indicator
         document.getElementById(`column-count-${escapedName}`).textContent =
             `${data.columns.length} columns`;
+
+        // Update row count in accordion header
+        const rowCountEl = document.getElementById(`row-count-${escapedName}`);
+        if (rowCountEl && data.row_count !== undefined) {
+            const count = data.row_count;
+            if (count > 1000000) {
+                rowCountEl.innerHTML = `<span class="px-2 py-0.5 rounded-full font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">${count.toLocaleString()} rows</span>`;
+            } else if (count > 100000) {
+                rowCountEl.innerHTML = `<span class="px-2 py-0.5 rounded-full font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400">${count.toLocaleString()} rows</span>`;
+            } else if (count === 0) {
+                rowCountEl.textContent = '0 rows (empty)';
+            } else {
+                rowCountEl.textContent = `${count.toLocaleString()} rows`;
+            }
+        }
 
     } catch (error) {
         console.error('Error loading table schema:', error);

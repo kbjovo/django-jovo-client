@@ -1445,7 +1445,7 @@ class ReplicationOrchestrator:
             # ========================================
             self._log_info("STEP 1/6: Creating table mappings...")
 
-            from client.models.replication import TableMapping, ColumnMapping
+            from client.models.replication import TableMapping
             from client.utils.database_utils import get_table_schema
 
             for table_name in table_names:
@@ -1501,7 +1501,6 @@ class ReplicationOrchestrator:
                         existing_mapping.target_table = target_table_name
                         existing_mapping.save()
                         table_mapping = existing_mapping
-                        table_mapping.column_mappings.all().delete()
                         self._log_info(f"  ✓ Re-enabled mapping: {table_name} → {target_table_name}")
                     else:
                         table_mapping = TableMapping.objects.create(
@@ -1512,19 +1511,6 @@ class ReplicationOrchestrator:
                             is_enabled=True,
                         )
                         self._log_info(f"  ✓ Created mapping: {table_name} → {target_table_name}")
-
-                    # Create column mappings (all enabled)
-                    for col in columns:
-                        ColumnMapping.objects.create(
-                            table_mapping=table_mapping,
-                            source_column=col['name'],
-                            target_column=col['name'],
-                            source_type=col.get('type', ''),
-                            target_type=col.get('type', ''),
-                            is_enabled=True,
-                            is_primary_key=col.get('primary_key', False),
-                            is_nullable=col.get('nullable', True),
-                        )
 
                     added_tables.append(table_name)
 

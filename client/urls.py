@@ -22,24 +22,6 @@ from .views import (
     SinkConnectorCreateView,
     SinkConnectorUpdateView,
     SinkConnectorDeleteView,
-
-    # CDC views
-    cdc_discover_tables,
-    cdc_configure_tables,
-    cdc_create_connector,
-    cdc_monitor_connector,
-    cdc_connector_action,
-    cdc_edit_config,
-    cdc_delete_config,
-    cdc_config_details,
-    ajax_get_table_schema,
-    ajax_get_table_schemas_batch,
-    start_replication,
-    stop_replication,
-    restart_replication_view,
-    replication_status,
-    create_topics,
-    list_topics,
 )
 
 # Import multi-connector management views
@@ -123,53 +105,6 @@ urlpatterns = [
          SinkConnectorDeleteView.as_view(),
          name='sink_connector_delete'),
 
-
-    # ==========================================
-    # CDC Configuration Workflow
-    # ==========================================
-
-    # Step 1: Discover Tables
-    path('database/<int:database_pk>/cdc/discover-tables/',
-         cdc_discover_tables,
-         name='cdc_discover_tables'),
-
-    # Step 2: Configure Tables
-    path('database/<int:database_pk>/cdc/configure-tables/',
-         cdc_configure_tables,
-         name='cdc_configure_tables'),
-
-    # Step 3: Create Connector
-    path('cdc/config/<int:config_pk>/create-connector/',
-         cdc_create_connector,
-         name='cdc_create_connector'),
-
-    # Step 4: Monitor Connector
-    path('cdc/config/<int:config_pk>/monitor/',
-         cdc_monitor_connector,
-         name='cdc_monitor_connector'),
-
-    # ==========================================
-    # CDC Replication Control
-    # ==========================================
-    path('cdc/config/<int:config_id>/start/', start_replication, name='start_replication'),
-    path('cdc/config/<int:config_id>/stop/', stop_replication, name='stop_replication'),
-    path('cdc/config/<int:config_id>/restart/', restart_replication_view, name='restart_replication'),
-    path('cdc/config/<int:config_id>/status/', replication_status, name='replication_status'),
-
-    # Topic Management
-    path('cdc/config/<int:config_id>/topics/create/', create_topics, name='create_topics'),
-    path('cdc/config/<int:config_id>/topics/list/', list_topics, name='list_topics'),
-
-    # Connector Actions
-     path('cdc/config/<int:config_pk>/action/<str:action>/',
-          cdc_connector_action,
-          name='cdc_connector_action'),
-
-    # ==========================================
-    # CDC Configuration Management
-    # ==========================================
-    path('cdc/config/<int:config_pk>/edit/', cdc_edit_config, name='cdc_edit_config'),
-    path('cdc/config/<int:config_pk>/delete/', cdc_delete_config, name='cdc_delete_config'),
 
     # ==========================================
     # Multi-Source Connector Management (NEW)
@@ -267,15 +202,6 @@ urlpatterns = [
          connector_live_metrics_api,
          name='connector_live_metrics_api'),
 
-    # ==========================================
-    # AJAX Endpoints
-    # ==========================================
-    path('database/<int:database_pk>/table/<str:table_name>/schema/',
-         ajax_get_table_schema,
-         name='ajax_get_table_schema'),
-
-    path('cdc/config/<int:config_pk>/details/', cdc_config_details, name='cdc_config_details'),
-    path('database/<int:database_pk>/table-schemas/', ajax_get_table_schemas_batch, name='ajax_get_table_schemas_batch'),
 ]
 
 

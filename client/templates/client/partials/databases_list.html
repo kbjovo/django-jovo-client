@@ -159,8 +159,9 @@
                       </a>
                       <a
                         href="{% url 'connector_add' db.pk %}"
-                        class="inline-flex items-center justify-center p-2 text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition"
-                        title="Add More Connector">
+                        class="connector-add-link inline-flex items-center justify-center p-2 text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition"
+                        title="Add More Connector"
+                        onclick="connectorLinkLoading(this)">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
                         </svg>
@@ -168,12 +169,13 @@
                     {% else %}
                       <a
                         href="{% url 'connector_add' db.pk %}"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition font-medium"
-                        title="Create your first source connector">
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        class="connector-add-link inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition font-medium"
+                        title="Create your first source connector"
+                        onclick="connectorLinkLoading(this)">
+                        <svg class="connector-add-icon w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
                         </svg>
-                        Create Connector
+                        <span class="connector-add-label">Create Connector</span>
                       </a>
                     {% endif %}
                   {% endwith %}
@@ -273,4 +275,22 @@
       </div>
     </div>
   {% endif %}
+
+<script>
+function connectorLinkLoading(el) {
+    el.classList.add('pointer-events-none', 'opacity-70');
+    const spinner = `<svg class="animate-spin w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+    </svg>`;
+    const label = el.querySelector('.connector-add-label');
+    if (label) {
+        label.textContent = 'Loading...';
+        const icon = el.querySelector('.connector-add-icon');
+        if (icon) icon.outerHTML = spinner;
+    } else {
+        el.innerHTML = spinner;
+    }
+}
+</script>
 </div>

@@ -263,7 +263,7 @@ class ClientDatabaseDeleteView(View):
     - Updating/removing shared sink connectors
     - Marking ConnectorHistory as deleted
     - Optionally deleting Kafka topics (if requested via form checkbox)
-    - Removing the ClientDatabase row (CASCADE deletes ReplicationConfig/TableMapping/ColumnMapping)
+    - Removing the ClientDatabase row (CASCADE deletes ReplicationConfig/TableMapping)
     """
 
     def post(self, request, pk):

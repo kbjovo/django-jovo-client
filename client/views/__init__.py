@@ -4,7 +4,6 @@ Client app views module.
 This module is organized into separate files for better maintainability:
 - client_views.py: Client CRUD operations
 - database_views.py: ClientDatabase CRUD and connection testing
-- cdc_views.py: CDC workflow and replication management
 - dashboard_views.py: Dashboard, replications list, and monitoring views
 """
 
@@ -23,25 +22,6 @@ from .database_views import (
     SinkConnectorCreateView,
     SinkConnectorUpdateView,
     SinkConnectorDeleteView,
-)
-
-from .cdc_views import (
-    cdc_discover_tables,
-    cdc_configure_tables,
-    cdc_create_connector,
-    cdc_monitor_connector,
-    cdc_connector_action,
-    cdc_edit_config,
-    cdc_delete_config,
-    cdc_config_details,
-    ajax_get_table_schema,
-    ajax_get_table_schemas_batch,
-    start_replication,
-    stop_replication,
-    restart_replication_view,
-    replication_status,
-    create_topics,
-    list_topics,
 )
 
 from .dashboard_views import (
@@ -66,24 +46,6 @@ __all__ = [
     'SinkConnectorCreateView',
     'SinkConnectorUpdateView',
     'SinkConnectorDeleteView',
-
-    # CDC views
-    'cdc_discover_tables',
-    'cdc_configure_tables',
-    'cdc_create_connector',
-    'cdc_monitor_connector',
-    'cdc_connector_action',
-    'cdc_edit_config',
-    'cdc_delete_config',
-    'cdc_config_details',
-    'ajax_get_table_schema',
-    'ajax_get_table_schemas_batch',
-    'start_replication',
-    'stop_replication',
-    'restart_replication_view',
-    'replication_status',
-    'create_topics',
-    'list_topics',
 
     # Dashboard views
     'dashboard',

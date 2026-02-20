@@ -265,7 +265,7 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
     """
     from django.conf import settings
     from client.utils.database_utils import get_database_engine
-    from client.views.cdc_views import format_table_for_connector
+    from jovoclient.utils.debezium.connector_templates import format_table_for_connector
 
     db_type = database.db_type.lower()
     client = database.client

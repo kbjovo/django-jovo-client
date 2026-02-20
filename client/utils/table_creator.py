@@ -132,16 +132,11 @@ def create_target_tables(replication_config, specific_tables=None):
                 # Get source schema
                 source_schema = get_table_schema(source_db, source_table)
 
-                # Get ALL column mappings (not just enabled ones)
-                # The target table needs ALL columns because Debezium sends all columns
-                # unless column.include.list is explicitly set in the source connector.
-                # The is_enabled flag controls what's in column.include.list, not the target schema.
-                column_mappings = list(table_mapping.column_mappings.all())
-                enabled_count = sum(1 for cm in column_mappings if cm.is_enabled)
-                logger.info(f"   ✓ Found {len(column_mappings)} column mappings ({enabled_count} enabled)")
-                
-                if not column_mappings:
-                    logger.warning(f"   ⚠️ No column mappings, skipping")
+                source_columns = source_schema.get('columns', [])
+                logger.info(f"   ✓ Found {len(source_columns)} columns in source schema")
+
+                if not source_columns:
+                    logger.warning(f"   ⚠️ No columns found in source schema, skipping")
                     skipped_count += 1
                     continue
                 
@@ -205,45 +200,22 @@ def create_target_tables(replication_config, specific_tables=None):
                                 logger.info(f"   ☑️ VERIFIED: Table has {col_count} columns")
                         continue
                 
-                # Create a mapping of source column names to their positions
-                source_columns = source_schema.get('columns', [])
-                column_order = {col.get('name'): idx for idx, col in enumerate(source_columns)}
-                
-                # Sort column mappings by source column order
-                column_mappings_sorted = sorted(
-                    column_mappings,
-                    key=lambda cm: column_order.get(cm.source_column, float('inf'))
-                )
-                
-                logger.info(f"   ✓ Sorted columns by source table order")
-                
-                # Build columns
+                # Build columns directly from source schema (already in source order)
+                primary_keys = source_schema.get('primary_keys', [])
                 columns = []
-                for col_mapping in column_mappings_sorted:
-                    source_col = col_mapping.source_column
-                    target_col = col_mapping.target_column
-                    col_type_str = col_mapping.source_type or col_mapping.source_data_type or 'VARCHAR(255)'
-                    
-                    # Map type
+                for col in source_columns:
+                    col_name = col.get('name')
+                    col_type_str = col.get('type', 'VARCHAR(255)')
                     col_type = map_type_to_sqlalchemy(col_type_str)
-                    
-                    # Check if PK
-                    is_pk = source_col in source_schema.get('primary_keys', [])
-                    
-                    # Check nullable
-                    source_col_info = next(
-                        (c for c in source_columns if c.get('name') == source_col),
-                        None
-                    )
-                    nullable = source_col_info.get('nullable', True) if source_col_info else True
-                    
-                    col = Column(
-                        target_col,
+                    is_pk = col_name in primary_keys
+                    nullable = col.get('nullable', True)
+                    columns.append(Column(
+                        col_name,
                         col_type,
                         primary_key=is_pk,
                         nullable=nullable and not is_pk,
-                    )
-                    columns.append(col)
+                    ))
+                logger.info(f"   ✓ Built {len(columns)} columns from source schema")
                 
                 if not columns:
                     logger.error(f"   ❌ No columns created")

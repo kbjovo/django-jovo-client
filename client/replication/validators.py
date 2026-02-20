@@ -120,17 +120,14 @@ class ReplicationValidator:
             (is_valid, error_message)
         """
         try:
+            from client.utils.database_utils import get_table_schema
+            db_config = self.config.client_database
             enabled_tables = self.config.table_mappings.filter(is_enabled=True)
             tables_without_pk = []
 
             for table_mapping in enabled_tables:
-                # Check if any column is marked as primary key
-                pk_columns = table_mapping.column_mappings.filter(
-                    is_primary_key=True,
-                    is_enabled=True
-                )
-
-                if not pk_columns.exists():
+                schema = get_table_schema(db_config, table_mapping.source_table)
+                if not schema.get('primary_keys'):
                     tables_without_pk.append(table_mapping.source_table)
 
             if tables_without_pk:

@@ -11,7 +11,7 @@ from django.http import JsonResponse
 from django.contrib import messages
 from django.db import transaction
 from client.models.database import ClientDatabase
-from client.models.replication import ReplicationConfig, TableMapping, ColumnMapping, ConnectorHistory
+from client.models.replication import ReplicationConfig, TableMapping, ConnectorHistory
 from client.utils.database_utils import get_table_list, get_table_schema, get_unassigned_tables, get_row_count
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from jovoclient.utils.debezium.connector_templates import (
@@ -393,26 +393,10 @@ def connector_add(request, database_pk):
     # Generate connector name preview
     connector_name_preview = generate_connector_name(client, database, version=next_version)
 
-    # Get unassigned tables
+    # Get unassigned tables (row counts loaded lazily via AJAX on accordion expand)
     try:
         unassigned_tables = get_unassigned_tables(database_pk)
-
-        # Get row counts for each table
-        tables_with_info = []
-        for table_name in unassigned_tables:
-            try:
-                schema = get_table_schema(database, table_name)
-                row_count = schema.get('row_count', 0)
-                tables_with_info.append({
-                    'name': table_name,
-                    'row_count': row_count,
-                })
-            except Exception as e:
-                logger.warning(f"Could not get info for table {table_name}: {e}")
-                tables_with_info.append({
-                    'name': table_name,
-                    'row_count': 0,
-                })
+        tables_with_info = [{'name': t} for t in unassigned_tables]
 
     except Exception as e:
         logger.error(f"Error getting unassigned tables: {e}")
@@ -547,22 +531,6 @@ def connector_add(request, database_pk):
                         )
 
                         logger.info(f"Created TableMapping for {table_name} -> {target_table_name}")
-
-                        # Create ColumnMappings - all columns are always enabled
-                        # Column selection feature removed for simplicity
-                        for col in columns:
-                            ColumnMapping.objects.create(
-                                table_mapping=table_mapping,
-                                source_column=col['name'],
-                                target_column=col['name'],
-                                source_type=col.get('type', ''),
-                                target_type=col.get('type', ''),
-                                is_enabled=True,  # Always enabled
-                                is_primary_key=col.get('primary_key', False),
-                                is_nullable=col.get('nullable', True),
-                            )
-
-                        logger.info(f"Created {len(columns)} ColumnMappings for {table_name} (all enabled)")
 
                     except Exception as e:
                         logger.error(f"Error creating mappings for table {table_name}: {e}")
