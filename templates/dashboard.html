@@ -165,7 +165,7 @@
                   <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">{{ replication.client_database.connection_name }}</p>
                   <p class="text-xs text-red-600 dark:text-red-400 mt-1">Replication error detected</p>
                 </div>
-                <a href="{% url 'cdc_monitor_connector' replication.pk %}" class="flex-shrink-0 text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
+                <a href="{% url 'connector_monitor' config_pk=replication.pk %}" class="flex-shrink-0 text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
                   View →
                 </a>
               </div>

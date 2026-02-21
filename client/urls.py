@@ -48,6 +48,8 @@ from .views.connector_views import (
     sink_restart_all_tasks,
     connector_table_rows_api,
     connector_live_metrics_api,
+    connector_fk_preview_api,
+    connector_fk_apply_api,
 )
 
 
@@ -201,6 +203,16 @@ urlpatterns = [
     path('connector/<int:config_pk>/live-metrics/',
          connector_live_metrics_api,
          name='connector_live_metrics_api'),
+
+    # AJAX: FK constraint preview (read-only analysis)
+    path('connector/<int:config_pk>/fk-preview/',
+         connector_fk_preview_api,
+         name='connector_fk_preview_api'),
+
+    # AJAX: FK constraint apply (POST to create constraints)
+    path('connector/<int:config_pk>/fk-apply/',
+         connector_fk_apply_api,
+         name='connector_fk_apply_api'),
 
 ]
 

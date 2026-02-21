@@ -737,19 +737,7 @@ def connector_create_debezium(request, config_pk):
             replication_config.sink_connector_name = sink_connector_name
             replication_config.save()
 
-        # Step 4: Schedule foreign key creation as background task
-        # Foreign keys are added after sink connector creates tables
-        try:
-            from client.tasks import add_foreign_keys_task
-            # Delay 30 seconds to allow sink connector to create tables from initial snapshot
-            add_foreign_keys_task.apply_async(
-                args=[replication_config.id],
-                countdown=30
-            )
-            logger.info(f"Scheduled foreign key creation for config {replication_config.id}")
-        except Exception as e:
-            logger.warning(f"Could not schedule FK task: {e}")
-
+        # FK constraints are now applied manually via the monitor page button
         return redirect('connector_monitor', config_pk=replication_config.pk)
 
     except Exception as e:
@@ -1422,6 +1410,42 @@ def connector_table_rows_api(request, config_pk):
 
     except Exception as e:
         logger.error(f'Failed to get table row counts: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_fk_preview_api(request, config_pk):
+    """
+    AJAX GET endpoint returning a preview of FK constraints for the monitor page.
+    Read-only — does not create anything.
+    """
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.utils.table_creator import preview_foreign_keys
+        data = preview_foreign_keys(config)
+        return JsonResponse({'success': True, **data})
+    except Exception as e:
+        logger.error(f'FK preview failed for config {config_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def connector_fk_apply_api(request, config_pk):
+    """
+    AJAX POST endpoint that applies FK constraints to the target database.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.utils.table_creator import add_foreign_keys_to_target
+        created, skipped, errors = add_foreign_keys_to_target(config)
+        return JsonResponse({
+            'success': True,
+            'created': created,
+            'skipped': skipped,
+            'errors': errors,
+        })
+    except Exception as e:
+        logger.error(f'FK apply failed for config {config_pk}: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 

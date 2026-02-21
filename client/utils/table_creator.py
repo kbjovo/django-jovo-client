@@ -727,6 +727,221 @@ def add_foreign_keys_after_sink(replication_config_id: int, table_names: list = 
         return False, error_msg, {}
 
 
+def preview_foreign_keys(replication_config):
+    """
+    Preview which foreign key constraints can be created, already exist, or cannot be created.
+
+    Does NOT modify anything — purely read-only analysis.
+
+    Returns a dict with:
+        has_any_fks: bool  — True if source tables have any FK definitions at all
+        summary: dict      — Aggregate counts
+        tables: list       — Per-table breakdown with per-constraint status
+    """
+    source_db = replication_config.client_database
+    client = source_db.client
+    target_db = client.get_target_database()
+
+    if not target_db:
+        raise Exception(f"No target database found for client '{client.name}'")
+
+    target_engine = get_database_engine(target_db)
+    target_db_type = target_db.db_type.lower()
+
+    table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+
+    # Build source→target name map
+    table_name_map = {m.source_table: m.target_table for m in table_mappings}
+    all_target_tables = list(table_name_map.values())
+
+    # Batch-check which target tables exist
+    existing_target_tables = set()
+    try:
+        with target_engine.connect() as conn:
+            if target_db_type == 'mysql':
+                placeholders = ', '.join([f':t{i}' for i in range(len(all_target_tables))])
+                check_sql = text(f"""
+                    SELECT TABLE_NAME FROM information_schema.TABLES
+                    WHERE TABLE_SCHEMA = :db_name AND TABLE_NAME IN ({placeholders})
+                """)
+                params = {'db_name': target_db.database_name}
+                params.update({f't{i}': t for i, t in enumerate(all_target_tables)})
+                rows = conn.execute(check_sql, params).fetchall()
+                existing_target_tables = {r[0] for r in rows}
+            elif target_db_type == 'postgresql':
+                placeholders = ', '.join([f':t{i}' for i in range(len(all_target_tables))])
+                check_sql = text(f"""
+                    SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name IN ({placeholders})
+                """)
+                params = {f't{i}': t for i, t in enumerate(all_target_tables)}
+                rows = conn.execute(check_sql, params).fetchall()
+                existing_target_tables = {r[0] for r in rows}
+    except Exception as e:
+        logger.warning(f"Could not check existing target tables: {e}")
+
+    # Collect all FK data from source
+    results = []
+    has_any_fks = False
+    summary = {
+        'tables_total': len(all_target_tables),
+        'tables_created': len(existing_target_tables),
+        'tables_missing': len(all_target_tables) - len(existing_target_tables),
+        'fk_will_create': 0,
+        'fk_already_exists': 0,
+        'fk_cannot_create': 0,
+        'fk_table_not_ready': 0,
+    }
+
+    try:
+        with target_engine.connect() as conn:
+            for mapping in table_mappings:
+                source_table = mapping.source_table
+                target_table = mapping.target_table
+                target_exists = target_table in existing_target_tables
+
+                constraints = []
+
+                try:
+                    source_schema = get_table_schema(source_db, source_table)
+                    foreign_keys = source_schema.get('foreign_keys', [])
+                except Exception as e:
+                    logger.warning(f"Could not get schema for {source_table}: {e}")
+                    foreign_keys = []
+
+                if foreign_keys:
+                    has_any_fks = True
+
+                for fk in foreign_keys:
+                    fk_name = fk.get('name', '')
+                    constrained_columns = fk.get('constrained_columns', [])
+                    referred_table = fk.get('referred_table', '')
+                    referred_columns = fk.get('referred_columns', [])
+
+                    if not constrained_columns or not referred_table or not referred_columns:
+                        constraints.append({
+                            'fk_name': '',
+                            'constrained_columns': constrained_columns,
+                            'referred_source_table': referred_table,
+                            'target_referred_table': '',
+                            'referred_columns': referred_columns,
+                            'status': 'cannot_create',
+                            'reason': 'Incomplete FK definition',
+                        })
+                        summary['fk_cannot_create'] += 1
+                        continue
+
+                    # Generate FK name (same logic as add_foreign_keys_to_target)
+                    new_fk_name = f"fk_{target_table}_{constrained_columns[0]}"[:64]
+
+                    # Resolve referred table in target
+                    if referred_table in table_name_map:
+                        target_referred_table = table_name_map[referred_table]
+                    else:
+                        target_referred_table = f"{source_db.database_name}_{referred_table}"
+
+                    if not target_exists:
+                        constraints.append({
+                            'fk_name': new_fk_name,
+                            'constrained_columns': constrained_columns,
+                            'referred_source_table': referred_table,
+                            'target_referred_table': target_referred_table,
+                            'referred_columns': referred_columns,
+                            'status': 'table_not_ready',
+                            'reason': f'Target table "{target_table}" has not been created yet',
+                        })
+                        summary['fk_table_not_ready'] += 1
+                        continue
+
+                    # Check if referred target table exists
+                    referred_exists = target_referred_table in existing_target_tables
+                    if not referred_exists:
+                        # Do a live check in case it exists outside the mapping
+                        try:
+                            if target_db_type == 'mysql':
+                                r = conn.execute(text("""
+                                    SELECT 1 FROM information_schema.TABLES
+                                    WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :t
+                                """), {'db': target_db.database_name, 't': target_referred_table})
+                            else:
+                                r = conn.execute(text("""
+                                    SELECT 1 FROM information_schema.tables
+                                    WHERE table_schema = 'public' AND table_name = :t
+                                """), {'t': target_referred_table})
+                            referred_exists = r.fetchone() is not None
+                        except Exception:
+                            referred_exists = False
+
+                    if not referred_exists:
+                        constraints.append({
+                            'fk_name': new_fk_name,
+                            'constrained_columns': constrained_columns,
+                            'referred_source_table': referred_table,
+                            'target_referred_table': target_referred_table,
+                            'referred_columns': referred_columns,
+                            'status': 'cannot_create',
+                            'reason': f'Referenced table "{target_referred_table}" does not exist in target',
+                        })
+                        summary['fk_cannot_create'] += 1
+                        continue
+
+                    # Check if FK already exists
+                    fk_exists = False
+                    try:
+                        if target_db_type == 'mysql':
+                            r = conn.execute(text("""
+                                SELECT CONSTRAINT_NAME
+                                FROM information_schema.TABLE_CONSTRAINTS
+                                WHERE TABLE_SCHEMA = :db_name
+                                AND TABLE_NAME = :table_name
+                                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+                                AND CONSTRAINT_NAME = :fk_name
+                            """), {'db_name': target_db.database_name, 'table_name': target_table, 'fk_name': new_fk_name})
+                        elif target_db_type == 'postgresql':
+                            r = conn.execute(text("""
+                                SELECT constraint_name
+                                FROM information_schema.table_constraints
+                                WHERE table_name = :table_name
+                                AND constraint_type = 'FOREIGN KEY'
+                                AND constraint_name = :fk_name
+                            """), {'table_name': target_table, 'fk_name': new_fk_name})
+                        fk_exists = r.fetchone() is not None
+                    except Exception as e:
+                        logger.warning(f"Could not check FK existence for {new_fk_name}: {e}")
+
+                    status = 'already_exists' if fk_exists else 'will_create'
+                    if status == 'already_exists':
+                        summary['fk_already_exists'] += 1
+                    else:
+                        summary['fk_will_create'] += 1
+
+                    constraints.append({
+                        'fk_name': new_fk_name,
+                        'constrained_columns': constrained_columns,
+                        'referred_source_table': referred_table,
+                        'target_referred_table': target_referred_table,
+                        'referred_columns': referred_columns,
+                        'status': status,
+                        'reason': '',
+                    })
+
+                results.append({
+                    'source_table': source_table,
+                    'target_table': target_table,
+                    'target_exists': target_exists,
+                    'constraints': constraints,
+                })
+
+    finally:
+        target_engine.dispose()
+
+    return {
+        'has_any_fks': has_any_fks,
+        'summary': summary,
+        'tables': results,
+    }
+
+
 def truncate_tables_for_mappings(target_db, table_mappings):
     """
     Truncate specific target tables given table mappings.

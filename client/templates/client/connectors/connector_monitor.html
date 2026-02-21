@@ -67,6 +67,15 @@
         </div>
       </div>
 
+      <!-- Foreign Keys Button -->
+      <button onclick="openFKModal()"
+        class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm transition">
+        <svg class="w-4 h-4 mr-2 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+        </svg>
+        Foreign Keys
+      </button>
+
       <a href="{% url 'connector_list' database.pk %}"
          class="inline-flex items-center px-4 py-2 bg-gray-600 hover:bg-gray-700 dark:bg-gray-700 dark:hover:bg-gray-600 text-white rounded-lg transition text-sm font-medium">
         &larr; Back to Connectors
@@ -606,6 +615,100 @@
   </div>
 </div>
 
+<!-- Foreign Key Constraints Modal -->
+<div id="fkModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="fixed inset-0 bg-black/50" onclick="closeFKModal()"></div>
+
+  <div class="relative w-1/2 bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden">
+
+    <!-- Coloured header -->
+    <div class="bg-blue-600 px-5 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-blue-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+        </svg>
+        <h3 class="text-sm font-semibold text-white" id="fk-modal-title">Foreign Key Constraints</h3>
+      </div>
+      <button onclick="closeFKModal()" class="text-blue-200 hover:text-white transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+        </svg>
+      </button>
+    </div>
+
+    <!-- State: Loading -->
+    <div id="fk-state-loading" class="px-5 py-8 text-center">
+      <svg class="animate-spin w-6 h-6 text-blue-500 mx-auto mb-2" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+      </svg>
+      <p class="text-xs text-gray-500 dark:text-gray-400">Checking foreign keys...</p>
+    </div>
+
+    <!-- State: Preview -->
+    <div id="fk-state-preview" class="hidden">
+      <div class="px-5 py-4 space-y-3 text-xs max-h-80 overflow-y-auto">
+
+        <!-- No FKs info -->
+        <div id="fk-no-fks" class="hidden text-gray-500 dark:text-gray-400 italic text-center py-1">
+          No foreign key constraints are defined on source tables.
+        </div>
+
+        <!-- Tables status -->
+        <div id="fk-tables-section">
+          <p class="font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1.5">Target Tables</p>
+          <div id="fk-tables-status" class="space-y-1"></div>
+        </div>
+
+        <hr class="border-gray-200 dark:border-gray-700">
+
+        <!-- FK summary -->
+        <div id="fk-constraints-section" class="hidden">
+          <p class="font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1.5">Constraints</p>
+          <div id="fk-summary-badges" class="flex flex-wrap gap-1.5 mb-2"></div>
+          <!-- Per-table details (collapsible) -->
+          <div id="fk-details-toggle" class="hidden">
+            <button onclick="toggleFKDetails()" class="text-blue-600 dark:text-blue-400 hover:underline mb-1.5 flex items-center gap-1">
+              <svg id="fk-details-chevron" class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+              </svg>
+              <span id="fk-details-label">Show details per table</span>
+            </button>
+            <div id="fk-details-body" class="hidden space-y-2"></div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Preview footer -->
+      <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 flex justify-end gap-2">
+        <button onclick="closeFKModal()"
+          class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+          Cancel
+        </button>
+        <button id="fk-apply-btn" onclick="applyFKConstraints()"
+          class="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+          Add constraints
+        </button>
+      </div>
+    </div>
+
+    <!-- State: Result -->
+    <div id="fk-state-result" class="hidden">
+      <div class="px-5 py-4 space-y-2 text-xs">
+        <div id="fk-result-body" class="space-y-1.5"></div>
+      </div>
+      <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 flex justify-end">
+        <button onclick="closeFKModal()"
+          class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+          Close
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- AJAX Polling Script -->
 <script>
 // CSRF token for POST requests
@@ -631,6 +734,199 @@ function connectorAction(url, loadingMsg) {
     showToast('error', 'Request failed');
   });
 }
+
+// ── Foreign Key Constraints ──────────────────────────────────────────────────
+const FK_PREVIEW_URL = '{% url "connector_fk_preview_api" replication_config.pk %}';
+const FK_APPLY_URL   = '{% url "connector_fk_apply_api"   replication_config.pk %}';
+
+function openFKModal() {
+  // Reset to loading state
+  document.getElementById('fkModal').classList.remove('hidden');
+  document.getElementById('fk-modal-title').textContent = 'Foreign Key Constraints';
+  document.getElementById('fk-state-loading').classList.remove('hidden');
+  document.getElementById('fk-state-preview').classList.add('hidden');
+  document.getElementById('fk-state-result').classList.add('hidden');
+
+  fetch(FK_PREVIEW_URL)
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('fk-state-loading').classList.add('hidden');
+      if (!data.success) {
+        showFKError(data.error || 'Failed to load foreign key info');
+        return;
+      }
+      renderFKPreview(data);
+      document.getElementById('fk-state-preview').classList.remove('hidden');
+    })
+    .catch(err => {
+      document.getElementById('fk-state-loading').classList.add('hidden');
+      showFKError('Request failed: ' + err);
+    });
+}
+
+function closeFKModal() {
+  document.getElementById('fkModal').classList.add('hidden');
+  // Collapse details for next open
+  const detailsBody = document.getElementById('fk-details-body');
+  if (detailsBody) detailsBody.classList.add('hidden');
+}
+
+function showFKError(msg) {
+  document.getElementById('fk-state-result').classList.remove('hidden');
+  document.getElementById('fk-modal-title').textContent = 'Foreign Key Constraints';
+  document.getElementById('fk-result-body').innerHTML =
+    `<p class="text-red-600 dark:text-red-400">${escHTML(msg)}</p>`;
+}
+
+function renderFKPreview(data) {
+  const summary = data.summary;
+  const tables  = data.tables;
+
+  // Tables status section
+  const tablesStatus = document.getElementById('fk-tables-status');
+  if (summary.tables_missing > 0) {
+    const missingNames = tables
+      .filter(t => !t.target_exists)
+      .map(t => `<span class="font-mono">${escHTML(t.target_table)}</span>`)
+      .join(', ');
+    tablesStatus.innerHTML =
+      `<p class="text-green-600 dark:text-green-400">&#10003; ${summary.tables_created} of ${summary.tables_total} tables created</p>` +
+      `<p class="text-orange-500 dark:text-orange-400 mt-1">&#9888; Missing: ${missingNames}</p>` +
+      `<p class="text-xs text-gray-400 dark:text-gray-500 mt-1">FKs for missing tables will be skipped.</p>`;
+  } else {
+    tablesStatus.innerHTML =
+      `<p class="text-green-600 dark:text-green-400">&#10003; All ${summary.tables_total} tables created</p>`;
+  }
+
+  // No FKs case
+  const noFKsEl = document.getElementById('fk-no-fks');
+  const constraintsSection = document.getElementById('fk-constraints-section');
+  const applyBtn = document.getElementById('fk-apply-btn');
+
+  if (!data.has_any_fks) {
+    noFKsEl.classList.remove('hidden');
+    constraintsSection.classList.add('hidden');
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'No constraints';
+    return;
+  }
+  noFKsEl.classList.add('hidden');
+  constraintsSection.classList.remove('hidden');
+
+  // Summary badges
+  const badgesEl = document.getElementById('fk-summary-badges');
+  badgesEl.innerHTML = '';
+  const badgeDefs = [
+    { key: 'fk_will_create',   label: 'will be created', color: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' },
+    { key: 'fk_already_exists',label: 'already exist',   color: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300' },
+    { key: 'fk_cannot_create', label: 'cannot create',   color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300' },
+    { key: 'fk_table_not_ready', label: 'table not ready', color: 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300' },
+  ];
+  badgeDefs.forEach(b => {
+    const count = summary[b.key] || 0;
+    if (count === 0) return;
+    badgesEl.innerHTML +=
+      `<span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${b.color}">
+         <strong class="mr-1">${count}</strong> ${b.label}
+       </span>`;
+  });
+
+  // Apply button
+  const willCreate = summary.fk_will_create || 0;
+  applyBtn.disabled = willCreate === 0;
+  applyBtn.textContent = willCreate > 0 ? `Add ${willCreate} constraint${willCreate !== 1 ? 's' : ''}` : 'Nothing to create';
+
+  // Per-table details
+  const detailsToggle = document.getElementById('fk-details-toggle');
+  const detailsBody   = document.getElementById('fk-details-body');
+  const tablesWithFKs = tables.filter(t => t.constraints.length > 0);
+
+  if (tablesWithFKs.length > 0) {
+    detailsToggle.classList.remove('hidden');
+    const statusIcon = { will_create: '&#10003;', already_exists: '&#8226;', cannot_create: '&#9888;', table_not_ready: '&#9203;' };
+    const statusColor = {
+      will_create:    'text-green-600 dark:text-green-400',
+      already_exists: 'text-gray-400 dark:text-gray-500',
+      cannot_create:  'text-yellow-600 dark:text-yellow-400',
+      table_not_ready:'text-orange-500 dark:text-orange-400',
+    };
+    detailsBody.innerHTML = tablesWithFKs.map(t => {
+      const rows = t.constraints.map(c =>
+        `<div class="flex items-start gap-2 ${statusColor[c.status]}">
+           <span class="shrink-0 w-4 text-center">${statusIcon[c.status]}</span>
+           <span class="font-mono text-xs">${escHTML(c.fk_name)}</span>
+           <span class="text-gray-400 dark:text-gray-500 text-xs shrink-0">&rarr; ${escHTML(c.target_referred_table)}</span>
+           ${c.reason ? `<span class="text-xs text-gray-400 dark:text-gray-500">(${escHTML(c.reason)})</span>` : ''}
+         </div>`
+      ).join('');
+      return `<div>
+        <p class="font-medium text-gray-700 dark:text-gray-300 mb-1 font-mono text-xs">${escHTML(t.target_table)}</p>
+        <div class="pl-2 space-y-1">${rows}</div>
+      </div>`;
+    }).join('');
+  } else {
+    detailsToggle.classList.add('hidden');
+  }
+}
+
+function toggleFKDetails() {
+  const body    = document.getElementById('fk-details-body');
+  const chevron = document.getElementById('fk-details-chevron');
+  const label   = document.getElementById('fk-details-label');
+  const hidden  = body.classList.toggle('hidden');
+  chevron.style.transform = hidden ? '' : 'rotate(90deg)';
+  label.textContent = hidden ? 'Show details per table' : 'Hide details';
+}
+
+function applyFKConstraints() {
+  const applyBtn = document.getElementById('fk-apply-btn');
+  applyBtn.disabled = true;
+  applyBtn.textContent = 'Applying...';
+
+  fetch(FK_APPLY_URL, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': CSRF_TOKEN, 'Content-Type': 'application/json' },
+  })
+  .then(r => r.json())
+  .then(data => {
+    document.getElementById('fk-state-preview').classList.add('hidden');
+    document.getElementById('fk-state-result').classList.remove('hidden');
+    document.getElementById('fk-modal-title').textContent = 'Foreign Key Constraints — Done';
+    renderFKResult(data);
+  })
+  .catch(err => {
+    applyBtn.disabled = false;
+    applyBtn.textContent = 'Retry';
+    showFKError('Request failed: ' + err);
+  });
+}
+
+function renderFKResult(data) {
+  const body = document.getElementById('fk-result-body');
+  if (!data.success) {
+    body.innerHTML = `<p class="text-red-600 dark:text-red-400">&#10007; ${escHTML(data.error || 'Unknown error')}</p>`;
+    return;
+  }
+  let html = '';
+  if (data.created > 0)
+    html += `<p class="text-green-600 dark:text-green-400">&#10003; ${data.created} constraint${data.created !== 1 ? 's' : ''} created</p>`;
+  if (data.skipped > 0)
+    html += `<p class="text-gray-500 dark:text-gray-400">&#8226; ${data.skipped} already existed (skipped)</p>`;
+  if (data.errors && data.errors.length > 0) {
+    html += `<p class="text-yellow-600 dark:text-yellow-400 mt-1">&#9888; ${data.errors.length} error${data.errors.length !== 1 ? 's' : ''}:</p>`;
+    html += '<ul class="mt-1 space-y-1 pl-4 list-disc">';
+    data.errors.forEach(e => { html += `<li class="text-xs text-gray-500 dark:text-gray-400">${escHTML(e)}</li>`; });
+    html += '</ul>';
+  }
+  if (!html)
+    html = `<p class="text-gray-500 dark:text-gray-400">No constraints were created.</p>`;
+  body.innerHTML = html;
+}
+
+function escHTML(str) {
+  return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// ── End Foreign Key Constraints ──────────────────────────────────────────────
 
 // Table Rows - fetch source & target row counts
 const TABLE_ROWS_URL = '{% url "connector_table_rows_api" replication_config.pk %}';
