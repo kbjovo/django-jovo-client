@@ -416,21 +416,31 @@ def connector_add(request, database_pk):
             with transaction.atomic():
                 # Get selected tables
                 selected_tables = request.POST.getlist('selected_tables')
+                is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
                 if not selected_tables:
-                    messages.error(request, "Please select at least one table")
+                    msg = "Please select at least one table"
+                    messages.error(request, msg)
+                    if is_ajax:
+                        return JsonResponse({'success': False, 'error': msg}, status=400)
                     return redirect('connector_add', database_pk=database_pk)
 
                 # Validate table count limit
                 max_tables = settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25)
                 if len(selected_tables) > max_tables:
-                    messages.error(request, f"Maximum {max_tables} tables per connector allowed. You selected {len(selected_tables)}. Reduce the selection to prevent worker crashes during snapshots.")
+                    msg = f"Maximum {max_tables} tables per connector allowed. You selected {len(selected_tables)}."
+                    messages.error(request, msg)
+                    if is_ajax:
+                        return JsonResponse({'success': False, 'error': msg}, status=400)
                     return redirect('connector_add', database_pk=database_pk)
 
                 # Validate all selected tables are unassigned
                 assigned_tables = set(unassigned_tables)
                 invalid_tables = [t for t in selected_tables if t not in assigned_tables]
                 if invalid_tables:
-                    messages.error(request, f"Tables already assigned: {', '.join(invalid_tables)}")
+                    msg = f"Tables already assigned: {', '.join(invalid_tables)}"
+                    messages.error(request, msg)
+                    if is_ajax:
+                        return JsonResponse({'success': False, 'error': msg}, status=400)
                     return redirect('connector_add', database_pk=database_pk)
 
                 # Get processing mode settings
@@ -554,12 +564,24 @@ def connector_add(request, database_pk):
 
                 messages.success(request, f"Source connector v{next_version} created successfully with {len(selected_tables)} tables")
 
-                # Redirect to connector creation (which will also create sink if first)
+                # AJAX modal flow: return JSON so the frontend can proceed to provision steps
+                if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                    return JsonResponse({
+                        'success': True,
+                        'config_pk': replication_config.id,
+                        'processing_mode': replication_config.processing_mode,
+                        'table_count': len(selected_tables),
+                        'batch_interval': replication_config.batch_interval,
+                    })
+
+                # Non-AJAX fallback: redirect through original provision view
                 return redirect('connector_create_debezium', config_pk=replication_config.id)
 
         except Exception as e:
             logger.error(f"Error creating connector: {e}", exc_info=True)
             messages.error(request, f"Error creating connector: {str(e)}")
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return JsonResponse({'success': False, 'error': str(e)}, status=400)
             return redirect('connector_add', database_pk=database_pk)
 
     # GET: Show form

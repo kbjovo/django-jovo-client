@@ -490,6 +490,8 @@
 
 </form>
 
+{% include "client/connectors/_provision_modal.html" %}
+
 <script>
 const DATABASE_ID = {{ database.pk }};
 const MAX_TABLES_PER_CONNECTOR = {{ max_tables_per_connector }};
@@ -497,6 +499,221 @@ const CURRENT_TABLE_COUNT = {{ current_tables|length }};
 let loadedCurrentTables = new Set();
 let loadedAddTables = new Set();
 let allAddTablesSelected = false;
+
+// ── Original settings snapshot for change detection ──────────────────
+const ORIGINAL_SETTINGS = {
+    snapshot_mode:                   '{{ replication_config.snapshot_mode }}',
+    max_queue_size:                  {{ replication_config.max_queue_size }},
+    max_batch_size:                  {{ replication_config.max_batch_size }},
+    poll_interval_ms:                {{ replication_config.poll_interval_ms }},
+    incremental_snapshot_chunk_size: {{ replication_config.incremental_snapshot_chunk_size }},
+    snapshot_fetch_size:             {{ replication_config.snapshot_fetch_size }},
+    sink_batch_size:                 {{ replication_config.sink_batch_size }},
+    sink_max_poll_records:           {{ replication_config.sink_max_poll_records }},
+    drop_before_sync:                {{ replication_config.drop_before_sync|lower }},
+    processing_mode:                 '{{ replication_config.processing_mode }}',
+    batch_interval:                  '{{ replication_config.batch_interval|default:"" }}',
+};
+
+function detectSettingsChanged() {
+    const form = document.getElementById('edit-connector-form');
+    const snapshotMode = form.querySelector('[name=snapshot_mode]')?.value;
+    if (snapshotMode !== ORIGINAL_SETTINGS.snapshot_mode) return true;
+
+    for (const field of [
+        'max_queue_size', 'max_batch_size', 'poll_interval_ms',
+        'incremental_snapshot_chunk_size', 'snapshot_fetch_size',
+        'sink_batch_size', 'sink_max_poll_records',
+    ]) {
+        const el = form.querySelector(`[name=${field}]`);
+        if (el && parseInt(el.value) !== ORIGINAL_SETTINGS[field]) return true;
+    }
+
+    const dropEl = form.querySelector('[name=drop_before_sync]');
+    const dropVal = dropEl ? dropEl.checked : false;
+    if (dropVal !== ORIGINAL_SETTINGS.drop_before_sync) return true;
+
+    const modeEl = form.querySelector('input[name=processing_mode]:checked');
+    const modeVal = modeEl ? modeEl.value : '';
+    if (modeVal !== ORIGINAL_SETTINGS.processing_mode) return true;
+
+    const biEl = form.querySelector('[name=batch_interval]');
+    const biVal = biEl ? biEl.value : '';
+    if (biVal !== ORIGINAL_SETTINGS.batch_interval) return true;
+
+    return false;
+}
+
+// ── Edit modal state ─────────────────────────────────────────────────
+let _editCompletedSteps = [];
+let _editAddedTables    = [];
+let _editConfigPk       = {{ replication_config.pk }};
+
+// ── Show form-level banner after cancel ──────────────────────────────
+function showEditFormBanner(message, type) {
+    const existing = document.getElementById('edit-form-banner');
+    if (existing) existing.remove();
+
+    const colors = {
+        neutral: 'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300',
+        error:   'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700 text-red-700 dark:text-red-300',
+    };
+    const banner = document.createElement('div');
+    banner.id = 'edit-form-banner';
+    banner.className = `border rounded-lg px-4 py-3 mb-4 text-sm ${colors[type] || colors.neutral}`;
+    banner.textContent = message;
+
+    const pageHeader = document.querySelector('.flex.justify-between.items-center.mb-6');
+    if (pageHeader) pageHeader.insertAdjacentElement('afterend', banner);
+}
+
+// ── AJAX edit step runner ────────────────────────────────────────────
+async function runEditProvisionSteps(steps, removeTables, addTables, targetNames, settingsFormData) {
+    const CSRF = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+    // ── Optional Step: Save settings ─────────────────────────────────
+    if (steps.includes('save_settings')) {
+        addLogEntry('step-settings', 'Saving connector settings...');
+        let res;
+        try {
+            const r = await fetch(`/connector/${_editConfigPk}/edit/save-settings/`, {
+                method: 'POST',
+                headers: { 'X-CSRFToken': CSRF },
+                body: settingsFormData,
+            });
+            res = await r.json();
+        } catch (err) {
+            markLogError('step-settings', 'Network error saving settings', err.message);
+            showModalError('Network error — check your connection');
+            return;
+        }
+
+        if (!res.success) {
+            markLogError('step-settings', 'Failed to save settings', res.error);
+            showModalError(res.error);
+            return;
+        }
+
+        _editCompletedSteps.push('save_settings');
+        markLogSuccess('step-settings', res.message);
+
+        if (_provisionCancelRequested) { await _doEditCancel(); return; }
+    }
+
+    // ── Optional Step: Remove tables ─────────────────────────────────
+    if (steps.includes('remove_tables')) {
+        addLogEntry('step-remove', `Removing ${removeTables.length} table(s) — connector will restart...`);
+
+        // Lock cancel: table removal is irreversible
+        lockProvisionCancel('Cannot cancel after table removal starts');
+
+        let res;
+        try {
+            const r = await fetch(`/connector/${_editConfigPk}/edit/remove-tables/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+                body: JSON.stringify({ tables: removeTables }),
+            });
+            res = await r.json();
+        } catch (err) {
+            markLogError('step-remove', 'Network error removing tables', err.message);
+            showModalError('Network error — check your connection');
+            return;
+        }
+
+        if (!res.success) {
+            markLogError('step-remove', 'Failed to remove tables', res.error);
+            showModalError(res.error);
+            return;
+        }
+
+        _editCompletedSteps.push('remove_tables');
+        markLogSuccess('step-remove', res.message);
+    }
+
+    // ── Optional Step: Add tables ─────────────────────────────────────
+    if (steps.includes('add_tables')) {
+        addLogEntry('step-add', `Adding ${addTables.length} table(s) via incremental snapshot...`);
+        _editAddedTables = [...addTables];
+
+        let res;
+        try {
+            const r = await fetch(`/connector/${_editConfigPk}/edit/add-tables/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+                body: JSON.stringify({ tables: addTables, target_names: targetNames }),
+            });
+            res = await r.json();
+        } catch (err) {
+            markLogError('step-add', 'Network error adding tables', err.message);
+            showModalError('Network error — check your connection');
+            return;
+        }
+
+        if (!res.success) {
+            markLogError('step-add', 'Failed to add tables', res.error);
+            showModalError(res.error);
+            return;
+        }
+
+        _editCompletedSteps.push('add_tables');
+        markLogSuccess('step-add', res.message);
+
+        if (_provisionCancelRequested) { await _doEditCancel(); return; }
+    }
+
+    // ── All done ──────────────────────────────────────────────────────
+    document.getElementById('provision-modal-title').textContent = 'Connector updated successfully!';
+    addLogNote('Changes applied — connector is processing updates.', 'info');
+    showModalSuccess(`/connector/${_editConfigPk}/monitor/`);
+}
+
+// ── Cancel handler ────────────────────────────────────────────────────
+async function handleProvisionCancel() {
+    if (_provisionCancelLocked) return;
+    _provisionCancelRequested = true;
+
+    if (_editCompletedSteps.length === 0) {
+        closeProvisionModal();
+        return;
+    }
+
+    showModalCanceling();
+    await _doEditCancel();
+}
+
+async function _doEditCancel() {
+    const CSRF = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    addLogEntry('step-cancel', 'Canceling and cleaning up...');
+
+    let res;
+    try {
+        const r = await fetch(`/connector/${_editConfigPk}/edit/cancel/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+            body: JSON.stringify({
+                completed_steps: _editCompletedSteps,
+                added_tables: _editAddedTables,
+            }),
+        });
+        res = await r.json();
+    } catch (err) {
+        markLogError('step-cancel', 'Cleanup request failed', err.message);
+        showModalError('Cleanup failed — check connector state manually');
+        return;
+    }
+
+    if (!res.success) {
+        markLogError('step-cancel', 'Partial cleanup', res.error);
+        showModalError(res.error);
+    } else {
+        markLogSuccess('step-cancel', res.message || 'Cleanup complete');
+        setTimeout(() => {
+            closeProvisionModal();
+            showEditFormBanner('Update cancelled and cleaned up.', 'neutral');
+        }, 800);
+    }
+}
 
 // Escape table names for use in IDs
 function escapeTableName(name) {
@@ -910,12 +1127,22 @@ document.addEventListener('input', function(e) {
     }
 });
 
-// Form validation
-document.querySelector('form').addEventListener('submit', function(e) {
-    const removeChecked = document.querySelectorAll('.remove-checkbox:checked');
-    const addChecked = document.querySelectorAll('.add-checkbox:checked');
+// ── Form submit intercept ─────────────────────────────────────────────
+document.getElementById('edit-connector-form').addEventListener('submit', async function(e) {
+    const removeChecked = [...document.querySelectorAll('.remove-checkbox:checked')];
+    const addChecked    = [...document.querySelectorAll('.add-checkbox:checked')];
+    const removeTables  = removeChecked.map(cb => cb.value);
+    const addTables     = addChecked.map(cb => cb.value);
+    const hasTableChanges = removeTables.length > 0 || addTables.length > 0;
 
-    // Validate target table names for tables being added
+    // ── Settings-only: let the form submit normally (no modal needed) ─
+    if (!hasTableChanges) {
+        return; // regular POST → existing connector_edit_tables view handles it
+    }
+
+    e.preventDefault();
+
+    // ── Validate target names for tables being added ──────────────────
     document.querySelectorAll('.target-name-error').forEach(el => el.remove());
     const invalidTargetInputs = [];
     addChecked.forEach(function(checkbox) {
@@ -925,12 +1152,9 @@ document.querySelector('form').addEventListener('submit', function(e) {
         const val = input.value.trim();
         input.classList.remove('border-red-500');
         input.classList.add('border-gray-300', 'dark:border-gray-600');
-        if (!val || !TABLE_NAME_PATTERN.test(val)) {
-            invalidTargetInputs.push(input);
-        }
+        if (!val || !TABLE_NAME_PATTERN.test(val)) invalidTargetInputs.push(input);
     });
     if (invalidTargetInputs.length > 0) {
-        e.preventDefault();
         invalidTargetInputs.forEach(function(input) {
             input.classList.add('border-red-500');
             input.classList.remove('border-gray-300', 'dark:border-gray-600');
@@ -938,43 +1162,55 @@ document.querySelector('form').addEventListener('submit', function(e) {
             err.className = 'target-name-error text-xs text-red-600 mt-1';
             err.textContent = 'Only letters, numbers and underscores allowed. Cannot be empty.';
             input.parentElement.appendChild(err);
-            // Open accordion if collapsed
-            const accordionContent = input.closest('.add-accordion-content');
-            if (accordionContent && accordionContent.classList.contains('hidden')) {
-                accordionContent.classList.remove('hidden');
-            }
+            const ac = input.closest('.add-accordion-content');
+            if (ac && ac.classList.contains('hidden')) ac.classList.remove('hidden');
         });
         invalidTargetInputs[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return false;
+        return;
     }
 
-    const totalTables = {{ current_tables|length }};
-    const remainingTables = totalTables - removeChecked.length;
-
+    // ── Guard: cannot remove all tables ───────────────────────────────
+    const remainingTables = CURRENT_TABLE_COUNT - removeTables.length;
     if (remainingTables === 0) {
-        e.preventDefault();
         alert('Cannot remove all tables. Connectors must have at least 1 table.');
-        return false;
+        return;
     }
 
-    const totalAfter = remainingTables + addChecked.length;
+    const totalAfter = remainingTables + addTables.length;
     if (totalAfter > MAX_TABLES_PER_CONNECTOR) {
-        e.preventDefault();
-        alert(`Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector allowed. After changes you'd have ${totalAfter}. Reduce the selection.`);
-        return false;
+        alert(`Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector. After changes you'd have ${totalAfter}.`);
+        return;
     }
 
-    // Confirm removal
-    if (removeChecked.length > 0) {
-        if (!confirm(`Are you sure you want to remove ${removeChecked.length} table(s)? Target tables will be truncated and the connector will restart.`)) {
-            e.preventDefault();
-            return false;
+    // ── Removal confirmation ───────────────────────────────────────────
+    if (removeTables.length > 0) {
+        if (!confirm(`Remove ${removeTables.length} table(s)? Target tables will be truncated and the connector will restart. This cannot be undone.`)) {
+            return;
         }
     }
 
-    // Disable submit button to prevent double submission
-    document.getElementById('submit-btn-top').disabled = true;
-    document.getElementById('submit-btn-top').innerHTML = 'Saving...';
+    // ── Collect target names for tables being added ───────────────────
+    const targetNames = {};
+    addTables.forEach(tableName => {
+        const input = document.querySelector(`input[name="target_table_${tableName}"]`);
+        if (input) targetNames[tableName] = input.value.trim();
+    });
+
+    // ── Determine which steps to run ──────────────────────────────────
+    const steps = [];
+    if (detectSettingsChanged()) steps.push('save_settings');
+    if (removeTables.length)    steps.push('remove_tables');
+    if (addTables.length)       steps.push('add_tables');
+
+    // ── Build settings FormData for save-settings step ───────────────
+    const settingsFormData = new FormData(document.getElementById('edit-connector-form'));
+
+    // ── Reset state and open modal ────────────────────────────────────
+    _editCompletedSteps = [];
+    _editAddedTables    = [];
+
+    openProvisionModal('Updating Connector...');
+    await runEditProvisionSteps(steps, removeTables, addTables, targetNames, settingsFormData);
 });
 
 // Initialize warnings on page load

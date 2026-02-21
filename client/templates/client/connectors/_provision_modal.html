@@ -1,0 +1,258 @@
+{% comment %}
+Shared provision modal partial.
+Included by connector_add.html and connector_edit_tables.html.
+All behaviour is driven by provision_modal.js globals defined in the host template.
+{% endcomment %}
+
+<!-- ── Overlay ─────────────────────────────────────────────────────── -->
+<div id="provision-overlay"
+     class="fixed inset-0 bg-black/60 z-40 hidden"
+     aria-hidden="true"></div>
+
+<!-- ── Modal card ────────────────────────────────────────────────────── -->
+<div id="provision-modal"
+     class="fixed inset-0 z-50 flex items-center justify-center hidden p-4"
+     role="dialog" aria-modal="true" aria-labelledby="provision-modal-title">
+
+    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg flex flex-col"
+         style="max-height: 80vh;">
+
+        <!-- Header -->
+        <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3 shrink-0">
+            <!-- Spinning indicator (shown while running) -->
+            <div id="modal-header-spinner" class="shrink-0">
+                <svg class="animate-spin h-5 w-5 text-blue-500" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+            </div>
+            <!-- Success icon -->
+            <div id="modal-header-success" class="shrink-0 hidden">
+                <svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                </svg>
+            </div>
+            <!-- Error icon -->
+            <div id="modal-header-error" class="shrink-0 hidden">
+                <svg class="h-5 w-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+            </div>
+            <h3 id="provision-modal-title"
+                class="text-base font-semibold text-gray-900 dark:text-white flex-1 truncate">
+                Working...
+            </h3>
+        </div>
+
+        <!-- Log area (scrollable) -->
+        <div id="provision-log"
+             class="flex-1 overflow-y-auto p-4 space-y-1.5 font-mono text-sm bg-gray-50 dark:bg-gray-900/40"
+             style="min-height: 180px;">
+            <!-- Log entries injected by JS -->
+        </div>
+
+        <!-- Footer -->
+        <div class="px-6 py-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between gap-3 shrink-0">
+
+            <!-- Left: status text (errors, cancel note) -->
+            <p id="modal-footer-note" class="text-xs text-gray-500 dark:text-gray-400 flex-1 hidden"></p>
+
+            <!-- Right: action buttons -->
+            <div class="flex gap-3 ml-auto">
+
+                <!-- Cancel button — visible during operation -->
+                <button id="modal-cancel-btn"
+                        type="button"
+                        onclick="handleProvisionCancel()"
+                        class="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition">
+                    Cancel
+                </button>
+
+                <!-- Go to Monitor button — shown on success -->
+                <a id="modal-monitor-btn"
+                   href="#"
+                   class="hidden px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition whitespace-nowrap">
+                    Go to Monitor →
+                </a>
+
+                <!-- Close button — shown on error or after cancel completes -->
+                <button id="modal-close-btn"
+                        type="button"
+                        onclick="closeProvisionModal()"
+                        class="hidden px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-sm font-medium transition">
+                    Close
+                </button>
+
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ── Shared modal JS ─────────────────────────────────────────────── -->
+<script>
+// ─── Modal state ───────────────────────────────────────────────────
+let _provisionCancelRequested = false;
+let _provisionCancelLocked    = false;  // true after table-removal starts (edit flow)
+
+// ─── Open / close ──────────────────────────────────────────────────
+function openProvisionModal(title) {
+    document.getElementById('provision-modal-title').textContent = title;
+    document.getElementById('provision-log').innerHTML = '';
+    document.getElementById('modal-header-spinner').classList.remove('hidden');
+    document.getElementById('modal-header-success').classList.add('hidden');
+    document.getElementById('modal-header-error').classList.add('hidden');
+    document.getElementById('modal-cancel-btn').classList.remove('hidden');
+    document.getElementById('modal-cancel-btn').disabled = false;
+    document.getElementById('modal-cancel-btn').textContent = 'Cancel';
+    document.getElementById('modal-monitor-btn').classList.add('hidden');
+    document.getElementById('modal-close-btn').classList.add('hidden');
+    document.getElementById('modal-footer-note').classList.add('hidden');
+    document.getElementById('provision-overlay').classList.remove('hidden');
+    document.getElementById('provision-modal').classList.remove('hidden');
+    document.body.classList.add('overflow-hidden');
+    _provisionCancelRequested = false;
+    _provisionCancelLocked    = false;
+}
+
+function closeProvisionModal() {
+    document.getElementById('provision-overlay').classList.add('hidden');
+    document.getElementById('provision-modal').classList.add('hidden');
+    document.body.classList.remove('overflow-hidden');
+}
+
+// ─── Header icon state ──────────────────────────────────────────────
+function setModalHeaderSuccess() {
+    document.getElementById('modal-header-spinner').classList.add('hidden');
+    document.getElementById('modal-header-success').classList.remove('hidden');
+}
+function setModalHeaderError() {
+    document.getElementById('modal-header-spinner').classList.add('hidden');
+    document.getElementById('modal-header-error').classList.remove('hidden');
+}
+
+// ─── Footer state helpers ───────────────────────────────────────────
+function showModalSuccess(monitorUrl) {
+    setModalHeaderSuccess();
+    document.getElementById('modal-cancel-btn').classList.add('hidden');
+    document.getElementById('modal-monitor-btn').href = monitorUrl;
+    document.getElementById('modal-monitor-btn').classList.remove('hidden');
+}
+
+function showModalError(errorText) {
+    setModalHeaderError();
+    document.getElementById('modal-cancel-btn').classList.add('hidden');
+    document.getElementById('modal-close-btn').classList.remove('hidden');
+    if (errorText) {
+        const note = document.getElementById('modal-footer-note');
+        note.textContent = errorText;
+        note.classList.remove('hidden');
+    }
+}
+
+function showModalCanceling() {
+    const btn = document.getElementById('modal-cancel-btn');
+    btn.disabled = true;
+    btn.innerHTML = `
+        <svg class="animate-spin h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>Canceling...`;
+}
+
+// Lock cancel (after destructive step starts — edit remove-tables)
+function lockProvisionCancel(reason) {
+    _provisionCancelLocked = true;
+    const btn = document.getElementById('modal-cancel-btn');
+    btn.disabled = true;
+    btn.title = reason || 'Cannot cancel at this point';
+    btn.classList.add('opacity-40', 'cursor-not-allowed');
+}
+
+// ─── Log entries ────────────────────────────────────────────────────
+function addLogEntry(stepId, message) {
+    const log = document.getElementById('provision-log');
+    const el = document.createElement('div');
+    el.id = `log-entry-${stepId}`;
+    el.className = 'flex items-start gap-2 text-gray-500 dark:text-gray-400';
+    el.innerHTML = `
+        <span class="shrink-0 mt-0.5">
+            <svg class="animate-spin h-4 w-4 text-blue-400" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+        </span>
+        <span class="log-text leading-relaxed">${_escHtml(message)}</span>`;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+}
+
+function markLogSuccess(stepId, message) {
+    const el = document.getElementById(`log-entry-${stepId}`);
+    if (!el) return;
+    el.className = 'flex items-start gap-2 text-green-600 dark:text-green-400';
+    el.innerHTML = `
+        <span class="shrink-0 mt-0.5">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+            </svg>
+        </span>
+        <span class="log-text leading-relaxed">${_escHtml(message)}</span>`;
+    document.getElementById('provision-log').scrollTop = 9999;
+}
+
+function markLogError(stepId, message, detail) {
+    const el = document.getElementById(`log-entry-${stepId}`);
+    if (!el) return;
+    el.className = 'flex items-start gap-2 text-red-600 dark:text-red-400';
+    el.innerHTML = `
+        <span class="shrink-0 mt-0.5">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+        </span>
+        <span class="leading-relaxed">
+            <span class="log-text">${_escHtml(message)}</span>
+            ${detail ? `<br><span class="text-xs opacity-80 font-sans">${_escHtml(detail)}</span>` : ''}
+        </span>`;
+    document.getElementById('provision-log').scrollTop = 9999;
+}
+
+function addLogNote(message, type) {
+    // type: 'info' | 'warn' | 'cancel'
+    const log = document.getElementById('provision-log');
+    const el = document.createElement('div');
+    const colors = {
+        info:   'text-blue-500 dark:text-blue-400',
+        warn:   'text-yellow-600 dark:text-yellow-400',
+        cancel: 'text-gray-400 dark:text-gray-500 italic',
+    };
+    el.className = `flex items-start gap-2 ${colors[type] || colors.info} text-xs font-sans`;
+    el.innerHTML = `<span class="shrink-0 mt-0.5">—</span><span>${_escHtml(message)}</span>`;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+}
+
+// ─── Utility ────────────────────────────────────────────────────────
+function _escHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+async function provisionFetch(url, options) {
+    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+    const headers = Object.assign({'X-CSRFToken': csrfToken}, options.headers || {});
+    const res = await fetch(url, Object.assign({}, options, {headers}));
+    const json = await res.json();
+    return json;
+}
+
+// Stub — overridden by each page's handleProvisionCancel implementation
+function handleProvisionCancel() {}
+</script>

@@ -456,6 +456,8 @@
 
 </form>
 
+{% include "client/connectors/_provision_modal.html" %}
+
 <script>
 const DATABASE_ID = {{ database.pk }};
 let loadedTables = new Set();
@@ -693,12 +695,19 @@ document.addEventListener('input', function(e) {
     }
 });
 
-// Form validation
+// ── Provision modal state ────────────────────────────────────────────
 const MAX_TABLES_PER_CONNECTOR = {{ max_tables_per_connector }};
-document.querySelector('form').addEventListener('submit', function(e) {
+let _createCompletedSteps = [];
+let _createSinkWasNew     = false;
+let _createConfigPk       = null;
+let _createProcessingMode = null;
+let _createBatchInterval  = null;
+
+// ── Client-side validation (shared between normal and AJAX submit) ───
+function validateCreateForm() {
     const checkedTables = document.querySelectorAll('.table-checkbox:checked');
 
-    // Validate target table names for selected tables
+    // Validate target table names
     document.querySelectorAll('.target-name-error').forEach(el => el.remove());
     const invalidTargetInputs = [];
     checkedTables.forEach(function(checkbox) {
@@ -713,7 +722,6 @@ document.querySelector('form').addEventListener('submit', function(e) {
         }
     });
     if (invalidTargetInputs.length > 0) {
-        e.preventDefault();
         invalidTargetInputs.forEach(function(input) {
             input.classList.add('border-red-500');
             input.classList.remove('border-gray-300', 'dark:border-gray-600');
@@ -721,7 +729,6 @@ document.querySelector('form').addEventListener('submit', function(e) {
             err.className = 'target-name-error text-xs text-red-600 mt-1';
             err.textContent = 'Only letters, numbers and underscores allowed. Cannot be empty.';
             input.parentElement.appendChild(err);
-            // Open accordion if collapsed
             const accordionContent = input.closest('.accordion-content');
             if (accordionContent && accordionContent.classList.contains('hidden')) {
                 accordionContent.classList.remove('hidden');
@@ -732,31 +739,230 @@ document.querySelector('form').addEventListener('submit', function(e) {
     }
 
     if (checkedTables.length === 0) {
-        e.preventDefault();
         alert('⚠️ Please select at least one table');
         return false;
     }
 
     if (checkedTables.length > MAX_TABLES_PER_CONNECTOR) {
-        e.preventDefault();
-        alert(`⚠️ Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector allowed. You selected ${checkedTables.length}. Reduce the selection to prevent worker crashes during snapshots.`);
+        alert(`⚠️ Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector allowed. You selected ${checkedTables.length}.`);
         return false;
     }
 
-    // Validate batch mode has interval selected
     const processingMode = document.querySelector('input[name="processing_mode"]:checked').value;
     if (processingMode === 'batch') {
         const batchInterval = document.getElementById('batch_interval').value;
         if (!batchInterval) {
-            e.preventDefault();
             alert('⚠️ Please select a sync interval for batch processing');
             return false;
         }
     }
 
-    // Disable submit button to prevent double submission
-    document.getElementById('submit-btn-top').disabled = true;
-    document.getElementById('submit-btn-top').innerHTML = '⏳ Creating...';
+    return true;
+}
+
+// ── Show form-level banner after cancel ──────────────────────────────
+function showCreateFormBanner(message, type) {
+    const existing = document.getElementById('create-form-banner');
+    if (existing) existing.remove();
+
+    const colors = {
+        neutral: 'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300',
+        error:   'bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700 text-red-700 dark:text-red-300',
+    };
+    const banner = document.createElement('div');
+    banner.id = 'create-form-banner';
+    banner.className = `border rounded-lg px-4 py-3 mb-4 text-sm ${colors[type] || colors.neutral}`;
+    banner.textContent = message;
+
+    const pageHeader = document.querySelector('.flex.justify-between.items-center.mb-6');
+    if (pageHeader) {
+        pageHeader.insertAdjacentElement('afterend', banner);
+    }
+}
+
+// ── AJAX provision step runner ───────────────────────────────────────
+async function runCreateProvisionSteps(formData) {
+    const CSRF = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+    // ── Step 1: Save connector config ────────────────────────────────
+    addLogEntry('step-save', 'Saving connector configuration...');
+    let res;
+    try {
+        const r = await fetch('', {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': CSRF },
+            body: formData,
+        });
+        res = await r.json();
+    } catch (err) {
+        markLogError('step-save', 'Network error saving configuration', err.message);
+        showModalError('Network error — check your connection');
+        return;
+    }
+
+    if (!res.success) {
+        markLogError('step-save', 'Failed to save connector configuration', res.error);
+        showModalError(res.error);
+        return;
+    }
+
+    _createConfigPk       = res.config_pk;
+    _createProcessingMode = res.processing_mode;
+    _createBatchInterval  = res.batch_interval;
+    _createCompletedSteps.push('db_saved');
+    markLogSuccess('step-save', `Connector configuration saved (${res.table_count} tables)`);
+
+    if (_provisionCancelRequested) { await _doCreateCancel(); return; }
+
+    // ── Step 2: Create Kafka topics ──────────────────────────────────
+    addLogEntry('step-topics', 'Creating Kafka topics...');
+    try {
+        const r = await fetch(`/connector/${_createConfigPk}/provision/topics/`, {
+            method: 'POST', headers: { 'X-CSRFToken': CSRF },
+        });
+        res = await r.json();
+    } catch (err) {
+        markLogError('step-topics', 'Network error creating topics', err.message);
+        showModalError('Network error — check your connection');
+        return;
+    }
+
+    if (!res.success) {
+        markLogError('step-topics', 'Failed to create Kafka topics', res.error);
+        showModalError(res.error);
+        return;
+    }
+
+    _createCompletedSteps.push('topics_created');
+    markLogSuccess('step-topics', res.message);
+
+    if (_provisionCancelRequested) { await _doCreateCancel(); return; }
+
+    // ── Step 3: Create source connector ─────────────────────────────
+    const isBatch = _createProcessingMode === 'batch';
+    const sourceLabel = isBatch
+        ? 'Creating source connector (batch mode, will start paused)...'
+        : 'Creating source connector...';
+    addLogEntry('step-source', sourceLabel);
+    try {
+        const r = await fetch(`/connector/${_createConfigPk}/provision/source/`, {
+            method: 'POST', headers: { 'X-CSRFToken': CSRF },
+        });
+        res = await r.json();
+    } catch (err) {
+        markLogError('step-source', 'Network error creating source connector', err.message);
+        showModalError('Network error — check your connection');
+        return;
+    }
+
+    if (!res.success) {
+        markLogError('step-source', 'Failed to create source connector', res.error);
+        showModalError(res.error);
+        return;
+    }
+
+    _createCompletedSteps.push('source_created');
+    markLogSuccess('step-source', res.message);
+
+    if (_provisionCancelRequested) { await _doCreateCancel(); return; }
+
+    // ── Step 4: Configure sink connector ────────────────────────────
+    addLogEntry('step-sink', 'Configuring sink connector (auto-creates target tables)...');
+    try {
+        const r = await fetch(`/connector/${_createConfigPk}/provision/sink/`, {
+            method: 'POST', headers: { 'X-CSRFToken': CSRF },
+        });
+        res = await r.json();
+    } catch (err) {
+        markLogError('step-sink', 'Network error configuring sink connector', err.message);
+        showModalError('Network error — check your connection');
+        return;
+    }
+
+    if (!res.success) {
+        markLogError('step-sink', 'Failed to configure sink connector', res.error);
+        showModalError(res.error);
+        return;
+    }
+
+    _createSinkWasNew = res.created_new;
+    _createCompletedSteps.push('sink_provisioned');
+    markLogSuccess('step-sink', res.message);
+
+    // ── All done ─────────────────────────────────────────────────────
+    document.getElementById('provision-modal-title').textContent = 'Connector created successfully!';
+    addLogNote('Connector is initialising — initial snapshot may take a few minutes.', 'info');
+    showModalSuccess(`/connector/${_createConfigPk}/monitor/`);
+}
+
+// ── Cancel handler (overrides modal stub) ────────────────────────────
+async function handleProvisionCancel() {
+    if (_provisionCancelLocked) return;
+    _provisionCancelRequested = true;
+
+    // If nothing was started yet, just close
+    if (_createCompletedSteps.length === 0) {
+        closeProvisionModal();
+        return;
+    }
+
+    showModalCanceling();
+    await _doCreateCancel();
+}
+
+async function _doCreateCancel() {
+    const CSRF = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    addLogEntry('step-cancel', 'Canceling and cleaning up...');
+
+    if (!_createConfigPk) {
+        markLogSuccess('step-cancel', 'Nothing to clean up');
+        setTimeout(closeProvisionModal, 800);
+        return;
+    }
+
+    let res;
+    try {
+        const r = await fetch(`/connector/${_createConfigPk}/provision/cancel/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+            body: JSON.stringify({
+                completed_steps: _createCompletedSteps,
+                sink_was_new: _createSinkWasNew,
+            }),
+        });
+        res = await r.json();
+    } catch (err) {
+        markLogError('step-cancel', 'Cleanup request failed', err.message);
+        showModalError('Cleanup failed — some resources may need manual removal');
+        return;
+    }
+
+    if (res.errors && res.errors.length) {
+        markLogError('step-cancel', 'Partial cleanup — some resources could not be removed', res.errors.join('; '));
+        showModalError('Partial cleanup — check Kafka and Debezium manually');
+    } else {
+        markLogSuccess('step-cancel', 'Cleanup complete — all resources removed');
+        setTimeout(() => {
+            closeProvisionModal();
+            showCreateFormBanner('Creation cancelled and cleaned up.', 'neutral');
+        }, 800);
+    }
+}
+
+// ── Intercept form submit ────────────────────────────────────────────
+document.getElementById('connector-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    if (!validateCreateForm()) return;
+
+    // Reset state
+    _createCompletedSteps = [];
+    _createSinkWasNew     = false;
+    _createConfigPk       = null;
+
+    openProvisionModal('Creating Source Connector v{{ next_version }}...');
+    const formData = new FormData(this);
+    await runCreateProvisionSteps(formData);
 });
 
 // Toggle batch options visibility based on processing mode

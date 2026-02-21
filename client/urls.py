@@ -51,6 +51,18 @@ from .views.connector_views import (
     connector_fk_apply_api,
 )
 
+# Import provision/edit step endpoints (modal AJAX flow)
+from .views.connector_provision_views import (
+    provision_topics,
+    provision_source,
+    provision_sink,
+    provision_cancel,
+    edit_save_settings,
+    edit_remove_tables,
+    edit_add_tables,
+    edit_cancel,
+)
+
 
 urlpatterns = [
     # ==========================================
@@ -211,6 +223,44 @@ urlpatterns = [
     path('connector/<int:config_pk>/fk-apply/',
          connector_fk_apply_api,
          name='connector_fk_apply_api'),
+
+    # ==========================================
+    # Provision Step Endpoints (AJAX — modal create flow)
+    # ==========================================
+    path('connector/<int:config_pk>/provision/topics/',
+         provision_topics,
+         name='provision_topics'),
+
+    path('connector/<int:config_pk>/provision/source/',
+         provision_source,
+         name='provision_source'),
+
+    path('connector/<int:config_pk>/provision/sink/',
+         provision_sink,
+         name='provision_sink'),
+
+    path('connector/<int:config_pk>/provision/cancel/',
+         provision_cancel,
+         name='provision_cancel'),
+
+    # ==========================================
+    # Edit Step Endpoints (AJAX — modal edit flow)
+    # ==========================================
+    path('connector/<int:config_pk>/edit/save-settings/',
+         edit_save_settings,
+         name='edit_save_settings'),
+
+    path('connector/<int:config_pk>/edit/remove-tables/',
+         edit_remove_tables,
+         name='edit_remove_tables'),
+
+    path('connector/<int:config_pk>/edit/add-tables/',
+         edit_add_tables,
+         name='edit_add_tables'),
+
+    path('connector/<int:config_pk>/edit/cancel/',
+         edit_cancel,
+         name='edit_cancel'),
 
 ]
 
