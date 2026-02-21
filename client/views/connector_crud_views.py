@@ -190,26 +190,24 @@ def connector_add(request, database_pk):
 
                 # Create TableMappings for selected tables
                 for table_name in selected_tables:
-                    # Get table schema for columns
+                    # Derive source_schema and actual_table_name without hitting the source DB.
+                    # MS SQL / Oracle tables arrive as "schema.table" (e.g. "dbo.Customers").
+                    # MySQL always belongs to database_name; PostgreSQL defaults to "public".
+                    # This avoids one expensive DB round-trip per table and prevents Gunicorn
+                    # timeouts when many tables are selected.
                     try:
-                        schema = get_table_schema(database, table_name)
-                        columns = schema.get('columns', [])
-                        primary_keys = schema.get('primary_keys', [])
-
-                        # Merge primary_keys info into columns
-                        for col in columns:
-                            col['primary_key'] = col['name'] in primary_keys
-
-                        logger.info(f"Table {table_name}: {len(columns)} columns, {len(primary_keys)} primary keys: {primary_keys}")
-
-                        # Parse schema and table name for MS SQL and Oracle
-                        # MS SQL tables come as "schema.table" (e.g., "dbo.Customers")
-                        # Oracle tables come as "SCHEMA.TABLE" (e.g., "CDC_USER.CUSTOMERS")
-                        # We need to store them separately to avoid duplicate schema in topics
                         if (database.db_type == 'mssql' or database.db_type == 'oracle') and '.' in table_name:
                             source_schema, actual_table_name = table_name.split('.', 1)
+                        elif database.db_type == 'mysql':
+                            source_schema = database.database_name
+                            actual_table_name = table_name
+                        elif database.db_type == 'postgresql' and '.' in table_name:
+                            source_schema, actual_table_name = table_name.split('.', 1)
+                        elif database.db_type == 'postgresql':
+                            source_schema = 'public'
+                            actual_table_name = table_name
                         else:
-                            source_schema = schema.get('schema', '')
+                            source_schema = ''
                             actual_table_name = table_name
 
                         # Build default target table name to match sink connector transform
@@ -610,7 +608,7 @@ def connector_edit_tables(request, config_pk):
                         messages.success(request, "Switched to CDC mode — batch schedule removed, connector resumed")
                 else:
                     # Same mode, just settings changed — reschedule if batch
-                    if processing_mode == 'batch' and replication_config.batch_celery_task_name:
+                    if processing_mode == 'batch':
                         orch.setup_batch_schedule()
                     messages.success(request, "Connector settings updated")
 

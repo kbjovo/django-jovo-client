@@ -513,6 +513,7 @@ const ORIGINAL_SETTINGS = {
     drop_before_sync:                {{ replication_config.drop_before_sync|lower }},
     processing_mode:                 '{{ replication_config.processing_mode }}',
     batch_interval:                  '{{ replication_config.batch_interval|default:"" }}',
+    batch_max_catchup_minutes:       {{ replication_config.batch_max_catchup_minutes }},
 };
 
 function detectSettingsChanged() {
@@ -540,6 +541,10 @@ function detectSettingsChanged() {
     const biEl = form.querySelector('[name=batch_interval]');
     const biVal = biEl ? biEl.value : '';
     if (biVal !== ORIGINAL_SETTINGS.batch_interval) return true;
+
+    const bmcEl = form.querySelector('[name=batch_max_catchup_minutes]');
+    const bmcVal = bmcEl ? parseInt(bmcEl.value) : 0;
+    if (bmcVal !== ORIGINAL_SETTINGS.batch_max_catchup_minutes) return true;
 
     return false;
 }

@@ -388,7 +388,7 @@ def edit_save_settings(request, config_pk):
                 orch.resume_connector()
                 return JsonResponse({'success': True, 'message': 'Settings saved — switched to CDC mode, connector resumed'})
         else:
-            if new_mode == 'batch' and replication_config.batch_celery_task_name:
+            if new_mode == 'batch':
                 orch.setup_batch_schedule()
             return JsonResponse({'success': True, 'message': 'Connector settings saved'})
 

@@ -1161,17 +1161,18 @@ class ReplicationOrchestrator:
                 snapshot_mode=snapshot_mode,
             )
 
-            # Generate versioned connector name
+            # Use the user's custom name if already set; otherwise generate the default.
+            # IMPORTANT: do NOT overwrite a custom name that was saved during connector_add.
             from jovoclient.utils.debezium.connector_templates import generate_connector_name
-            versioned_connector_name = generate_connector_name(
-                client,
-                db_config,
-                version=self.config.connector_version
-            )
+            if not self.config.connector_name:
+                self.config.connector_name = generate_connector_name(
+                    client,
+                    db_config,
+                    version=self.config.connector_version
+                )
+                self.config.save()
 
-            # Update config
-            self.config.connector_name = versioned_connector_name
-            self.config.save()
+            versioned_connector_name = self.config.connector_name
 
             # Create connector
             success, error = self.connector_manager.create_connector(

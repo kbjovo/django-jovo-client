@@ -159,10 +159,15 @@ def get_mysql_connector_config(
             'http://schema-registry:8081'
         )
 
-    # Generate connector name with version if replication_config is provided
+    # Use the saved custom name if present; fall back to auto-generated.
+    # connector_name here is only used for internal config fields (e.g. signal.kafka.groupId).
+    # The actual Debezium connector name is passed separately by the caller.
     version = replication_config.connector_version if replication_config else None
-    connector_name = generate_connector_name(client, db_config, version=version)
-    
+    if replication_config and replication_config.connector_name:
+        connector_name = replication_config.connector_name
+    else:
+        connector_name = generate_connector_name(client, db_config, version=version)
+
     # Convert localhost/127.0.0.1 to Docker internal hostname for Debezium
     db_host = db_config.host
     if use_docker_internal_host:
@@ -340,7 +345,10 @@ def get_postgresql_connector_config(
         )
 
     version = replication_config.connector_version if replication_config else None
-    connector_name = generate_connector_name(client, db_config, version=version)
+    if replication_config and replication_config.connector_name:
+        connector_name = replication_config.connector_name
+    else:
+        connector_name = generate_connector_name(client, db_config, version=version)
 
     # Include version in slot name to prevent conflicts between connector versions
     # Each connector version needs its own replication slot
@@ -525,7 +533,10 @@ def get_sqlserver_connector_config(
         )
 
     version = replication_config.connector_version if replication_config else None
-    connector_name = generate_connector_name(client, db_config, version=version)
+    if replication_config and replication_config.connector_name:
+        connector_name = replication_config.connector_name
+    else:
+        connector_name = generate_connector_name(client, db_config, version=version)
 
     db_host = db_config.host
     if use_docker_internal_host:
@@ -709,7 +720,10 @@ def get_oracle_connector_config(
         return connector_name
 
     version = getattr(replication_config, 'connector_version', None)
-    connector_name = generate_connector_name(client, db_config, version=version)
+    if replication_config and getattr(replication_config, 'connector_name', None):
+        connector_name = replication_config.connector_name
+    else:
+        connector_name = generate_connector_name(client, db_config, version=version)
 
     connection_username = db_config.username.upper()
     schema_name = connection_username[3:] if connection_username.startswith('C##') else connection_username
