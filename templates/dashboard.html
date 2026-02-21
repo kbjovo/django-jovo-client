@@ -58,37 +58,37 @@
         href="{% url 'clients_list' %}"
       />
 
-      <!-- Total Replications -->
+      <!-- Total Connectors -->
       <c-stat-card
-        title="Total Replications"
-        value="{{ total_replications }}"
+        title="Total Connectors"
+        value="{{ total_connectors }}"
         icon="sync"
         color="purple"
-        href="{% url 'replications_list' %}"
+        href="{% url 'connectors_list' %}"
       />
 
-      <!-- Active Replications -->
+      <!-- Active Connectors -->
       <c-stat-card
-        title="Active Replications"
-        value="{{ active_replications }}"
+        title="Active Connectors"
+        value="{{ active_connectors }}"
         icon="chart"
         color="green"
         href="{% url 'monitoring_dashboard' %}"
       />
 
-      <!-- Failed Replications -->
-      {% if failed_replications > 0 %}
+      <!-- Failed Connectors -->
+      {% if failed_connectors > 0 %}
       <c-stat-card
-        title="Failed Replications"
-        value="{{ failed_replications }}"
+        title="Failed Connectors"
+        value="{{ failed_connectors }}"
         icon="alert"
         color="red"
-        href="{% url 'replications_list' %}?status_filter=error"
+        href="{% url 'monitoring_dashboard' %}"
       />
       {% else %}
       <c-stat-card
-        title="Failed Replications"
-        value="{{ failed_replications }}"
+        title="Failed Connectors"
+        value="{{ failed_connectors }}"
         icon="alert"
         color="red"
       />
@@ -99,42 +99,49 @@
     <!-- Quick Links / Recent Activity Section -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-      <!-- Recent Clients -->
+      <!-- Recently Active Connectors -->
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
         <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
           <div class="flex items-center justify-between">
-            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Recent Clients</h3>
-            <a href="{% url 'clients_list' %}" class="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Recently Active Connectors</h3>
+            <a href="{% url 'monitoring_dashboard' %}" class="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium">
               View all →
             </a>
           </div>
         </div>
         <div class="p-5">
-          {% if recent_clients %}
+          {% if recent_active_connectors %}
           <ul class="space-y-3">
-            {% for client in recent_clients %}
+            {% for connector in recent_active_connectors %}
             <li>
-              <a href="{% url 'client_detail' client.pk %}" class="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition group">
+              <a href="{% url 'connector_monitor' config_pk=connector.pk %}" class="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition group">
                 <div class="flex items-center gap-3 min-w-0 flex-1">
-                  <div class="flex-shrink-0 w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
-                    <span class="text-sm font-semibold text-blue-600 dark:text-blue-400">{{ client.name|slice:":2"|upper }}</span>
+                  <div class="flex-shrink-0 w-10 h-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
+                    <svg class="w-5 h-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
                   </div>
                   <div class="min-w-0 flex-1">
-                    <p class="text-sm font-medium text-gray-900 dark:text-white truncate">{{ client.name }}</p>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ client.email }}</p>
+                    <p class="text-sm font-medium text-gray-900 dark:text-white font-mono truncate">{{ connector.connector_name }}</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ connector.client_database.client.name }} &middot; {{ connector.client_database.connection_name }}</p>
                   </div>
                 </div>
                 <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium flex-shrink-0
-                  {% if client.status == 'active' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
-                  {% else %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400{% endif %}">
-                  {{ client.status|capfirst }}
+                  {% if connector.processing_mode == 'cdc' %}bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400
+                  {% else %}bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400{% endif %}">
+                  {{ connector.processing_mode|upper }}
                 </span>
               </a>
             </li>
             {% endfor %}
           </ul>
           {% else %}
-          <p class="text-center text-gray-500 dark:text-gray-400 py-8">No clients yet</p>
+          <div class="text-center py-8">
+            <svg class="mx-auto h-12 w-12 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+            </svg>
+            <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">No active connectors</p>
+          </div>
           {% endif %}
         </div>
       </div>
@@ -144,7 +151,7 @@
         <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
           <div class="flex items-center justify-between">
             <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Recent Issues</h3>
-            <a href="{% url 'replications_list' %}?status_filter=error" class="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium">
+            <a href="{% url 'monitoring_dashboard' %}" class="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium">
               View all →
             </a>
           </div>
@@ -163,7 +170,7 @@
                 <div class="min-w-0 flex-1">
                   <p class="text-sm font-medium text-gray-900 dark:text-white">{{ replication.client_database.client.name }}</p>
                   <p class="text-xs text-gray-600 dark:text-gray-400 mt-0.5">{{ replication.client_database.connection_name }}</p>
-                  <p class="text-xs text-red-600 dark:text-red-400 mt-1">Replication error detected</p>
+                  <p class="text-xs text-red-600 dark:text-red-400 mt-1">Connector error detected</p>
                 </div>
                 <a href="{% url 'connector_monitor' config_pk=replication.pk %}" class="flex-shrink-0 text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
                   View →

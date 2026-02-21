@@ -64,6 +64,14 @@ class KafkaDDLProcessor(BaseDDLProcessor):
 
         self.schema_topic = f"schema-history.client_{client.id}_db_{db_config.id}_v_{version}"
 
+        # Cache table name prefix (stable for the processor's lifetime, avoids repeated
+        # attribute chain traversal on every _get_target_table_name() call)
+        if self.source_db_type == 'mysql':
+            self._table_prefix = f"{db_config.database_name}_"
+        else:
+            schema = getattr(db_config, 'schema', 'dbo') or 'dbo'
+            self._table_prefix = f"{schema}_"
+
         # Initialize Kafka consumer
         group_id = consumer_group or f'ddl-processor-config-{replication_config.id}'
         self.consumer = Consumer({
@@ -90,8 +98,13 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         """
         Process DDL messages from Kafka.
 
+        Uses consume() to batch-fetch all available messages in one call, then commits
+        a single offset at the end of the batch. This is far more efficient than the
+        previous approach of poll()+commit() in a tight loop, which caused N round-trips
+        to Kafka brokers for N messages.
+
         Args:
-            timeout_sec: Timeout for polling messages
+            timeout_sec: Total time budget (seconds) to wait for messages
             max_messages: Maximum messages to process per call
 
         Returns:
@@ -99,40 +112,29 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         """
         processed = 0
         errors = 0
+        last_msg = None
 
         try:
-            messages_read = 0
-            while messages_read < max_messages:
-                msg = self.consumer.poll(timeout=timeout_sec if messages_read == 0 else 1.0)
+            # Batch-fetch up to max_messages within timeout_sec in a single call.
+            # Returns immediately when the partition is at EOF.
+            messages = self.consumer.consume(num_messages=max_messages, timeout=timeout_sec)
 
-                if msg is None:
-                    # No more messages
-                    break
-
+            for msg in messages:
                 if msg.error():
                     if msg.error().code() == KafkaError._PARTITION_EOF:
-                        # End of partition
-                        break
+                        continue
                     logger.error(f"Kafka error: {msg.error()}")
                     continue
 
-                messages_read += 1
-
                 try:
                     value = msg.value()
-                    if value is None:
-                        continue
-
-                    message = json.loads(value.decode('utf-8'))
-                    success = self._process_message(message)
-
-                    if success:
-                        processed += 1
-                    else:
-                        errors += 1
-
-                    # Commit after each message
-                    self.consumer.commit(msg)
+                    if value is not None:
+                        message = json.loads(value.decode('utf-8'))
+                        success = self._process_message(message)
+                        if success:
+                            processed += 1
+                        else:
+                            errors += 1
 
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse DDL message: {e}")
@@ -141,11 +143,17 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                     logger.error(f"Error processing DDL message: {e}", exc_info=True)
                     errors += 1
 
+                last_msg = msg
+
+            # Single commit for the entire batch (replaces N per-message commits)
+            if last_msg is not None:
+                self.consumer.commit(last_msg)
+
         except KafkaException as e:
             logger.error(f"Kafka exception: {e}")
 
-        if processed > 0 or errors > 0:
-            logger.info(f"DDL processing complete: {processed} processed, {errors} errors")
+        if errors > 0:
+            logger.warning(f"DDL batch complete: {processed} processed, {errors} errors")
 
         return processed, errors
 
@@ -175,9 +183,8 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         table_changes = message.get('tableChanges', [])
         database_name = message.get('databaseName', '')
 
-        # Log incoming DDL for debugging
         if ddl:
-            logger.info(f"Processing DDL message: {ddl[:80]}...")
+            logger.debug(f"Processing DDL message: {ddl[:80]}...")
 
         # Skip non-DDL messages
         if not ddl and not table_changes:
@@ -226,19 +233,12 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 logger.debug(f"Skipping non-table DDL: {ddl[:50]}...")
                 return True
 
-        # Parse DDL type
-        if ddl_upper.startswith('CREATE TABLE'):
-            return self._handle_create_from_changes(table_changes)
-        elif ddl_upper.startswith('ALTER TABLE'):
+        # Parse DDL type — CREATE TABLE, DROP TABLE, TRUNCATE etc. are caught by
+        # skip_patterns above and never reach here.
+        if ddl_upper.startswith('ALTER TABLE'):
             return self._handle_alter_table(ddl, table_changes)
-        elif ddl_upper.startswith('DROP TABLE'):
-            return self._handle_drop_table(ddl)
         elif ddl_upper.startswith('RENAME TABLE'):
             return self._handle_rename_table(ddl)
-        elif ddl_upper.startswith('TRUNCATE'):
-            # Truncate doesn't change schema, but log it
-            logger.info(f"TRUNCATE detected (no schema change): {ddl[:50]}...")
-            return True
         else:
             logger.debug(f"Ignoring DDL: {ddl[:50]}...")
             return True
@@ -431,7 +431,15 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         return True
 
     def _handle_alter_from_ddl(self, ddl: str, source_table: str, target_table: str) -> bool:
-        """Parse ALTER TABLE DDL directly when tableChanges not available."""
+        """
+        Parse ALTER TABLE DDL directly when tableChanges not available.
+
+        Fallback path: only reached when Debezium does not include tableChanges metadata
+        (rare with MySQL). Handles only the FIRST operation found in the DDL statement.
+        Multi-operation ALTERs (e.g. ADD COLUMN x, DROP COLUMN y) will have subsequent
+        operations silently ignored. The primary path (_handle_alter_table with tableChanges)
+        handles multiple operations correctly and should be preferred.
+        """
         # Check if table exists in target database
         if not self.target_adapter.table_exists(target_table):
             logger.info(
@@ -694,72 +702,6 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         logger.warning(f"RENAME TABLE not fully supported: {ddl}")
         return True
 
-    def _detect_schema_changes(
-        self,
-        table_name: str,
-        old_schema: Dict,
-        new_schema: Dict
-    ) -> List[DDLOperation]:
-        """
-        Detect schema changes between old and new schema.
-
-        Returns list of DDL operations to apply.
-        """
-        operations = []
-
-        old_columns = {c['name']: c for c in old_schema.get('columns', [])}
-        new_columns = {c['name']: c for c in new_schema.get('columns', [])}
-
-        # Add source db type to new columns
-        for col in new_columns.values():
-            col['sourceDbType'] = self.source_db_type
-
-        # Detect added columns
-        for col_name, col_info in new_columns.items():
-            if col_name not in old_columns:
-                operations.append(DDLOperation(
-                    operation_type=DDLOperationType.ADD_COLUMN,
-                    table_name=table_name,
-                    details={'column': col_info},
-                    is_destructive=False
-                ))
-
-        # Detect dropped columns
-        for col_name in old_columns:
-            if col_name not in new_columns:
-                operations.append(DDLOperation(
-                    operation_type=DDLOperationType.DROP_COLUMN,
-                    table_name=table_name,
-                    details={'column_name': col_name},
-                    is_destructive=True
-                ))
-
-        # Detect modified columns
-        for col_name, new_col in new_columns.items():
-            if col_name in old_columns:
-                old_col = old_columns[col_name]
-                if self._column_changed(old_col, new_col):
-                    operations.append(DDLOperation(
-                        operation_type=DDLOperationType.MODIFY_COLUMN,
-                        table_name=table_name,
-                        details={
-                            'column': new_col,
-                            'old_type': old_col.get('typeName', '')
-                        },
-                        is_destructive=False
-                    ))
-
-        return operations
-
-    def _column_changed(self, old_col: Dict, new_col: Dict) -> bool:
-        """Check if column definition changed."""
-        return (
-            old_col.get('typeName') != new_col.get('typeName') or
-            old_col.get('length') != new_col.get('length') or
-            old_col.get('scale') != new_col.get('scale') or
-            old_col.get('optional') != new_col.get('optional')
-        )
-
     def _detect_schema_changes_by_position(
         self,
         table_name: str,
@@ -939,16 +881,10 @@ class KafkaDDLProcessor(BaseDDLProcessor):
 
         Uses the same naming convention as sink connector transforms.
         Format: {database}_{table} or {schema}_{table}
-        """
-        db_config = self.replication_config.client_database
 
-        if self.source_db_type == 'mysql':
-            # MySQL: database_table
-            return f"{db_config.database_name}_{source_table}"
-        else:
-            # MSSQL/PostgreSQL: schema_table (default schema is dbo/public)
-            schema = getattr(db_config, 'schema', 'dbo') or 'dbo'
-            return f"{schema}_{source_table}"
+        Prefix is cached in __init__ to avoid repeated attribute traversal.
+        """
+        return f"{self._table_prefix}{source_table}"
 
     def _extract_length(self, type_str: str) -> Optional[int]:
         """Extract length from type string like VARCHAR(255)."""

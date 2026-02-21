@@ -5,6 +5,7 @@ Supports multiple source connectors per database with shared sink connector
 
 import logging
 import json
+import re
 from django.conf import settings
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse
@@ -22,6 +23,8 @@ from jovoclient.utils.debezium.sink_connector_templates import get_sink_connecto
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
 
 logger = logging.getLogger(__name__)
+
+_VALID_TABLE_NAME_RE = re.compile(r'^[a-zA-Z0-9_]+$')
 
 
 # ========================================
@@ -519,7 +522,12 @@ def connector_add(request, database_pk):
                             default_target_table = actual_table_name
 
                         # Get target table name from form (editable field) with proper default
-                        target_table_name = request.POST.get(f'target_table_{table_name}', default_target_table)
+                        target_table_name = request.POST.get(f'target_table_{table_name}', default_target_table).strip()
+                        if not _VALID_TABLE_NAME_RE.match(target_table_name or ''):
+                            raise ValueError(
+                                f"Invalid target table name '{target_table_name}' for table '{table_name}'. "
+                                "Only letters, numbers and underscores are allowed."
+                            )
 
                         # Create TableMapping
                         table_mapping = TableMapping.objects.create(
@@ -766,32 +774,36 @@ def connector_edit_tables(request, config_pk):
     database = replication_config.client_database
     client = database.client
 
-    # Get current tables
-    current_tables = list(
+    # Current tables — include target name so the template can display it
+    current_table_mappings = list(
         replication_config.table_mappings.filter(is_enabled=True)
-        .values_list('source_table', flat=True)
+        .values('source_table', 'target_table')
+        .order_by('source_table')
     )
+    current_tables = [m['source_table'] for m in current_table_mappings]
 
-    # Get available tables to add with row counts
+    # Available tables — no schema calls at load time; row counts and columns are
+    # fetched lazily via AJAX when the user expands the accordion (same as connector_add).
     try:
         unassigned_table_names = get_unassigned_tables(database.id)
 
-        # Get row counts for each table (same as connector_add)
+        # Compute the default target table name for each unassigned table without
+        # hitting the database (uses the same formula as the sink connector transform).
+        db_type = database.db_type.lower()
         unassigned_tables = []
         for table_name in unassigned_table_names:
-            try:
-                schema = get_table_schema(database, table_name)
-                row_count = schema.get('row_count', 0)
-                unassigned_tables.append({
-                    'name': table_name,
-                    'row_count': row_count,
-                })
-            except Exception as e:
-                logger.warning(f"Could not get info for table {table_name}: {e}")
-                unassigned_tables.append({
-                    'name': table_name,
-                    'row_count': None,
-                })
+            if db_type == 'mysql':
+                default_target = f"{database.database_name}_{table_name}"
+            elif db_type == 'postgresql':
+                default_target = f"public_{table_name}"
+            elif db_type in ('mssql', 'sqlserver'):
+                default_target = f"dbo_{table_name}"
+            elif db_type == 'oracle':
+                default_target = f"{database.username.upper()}_{table_name}"
+            else:
+                default_target = table_name
+            unassigned_tables.append({'name': table_name, 'default_target': default_target})
+
     except Exception as e:
         logger.error(f"Error getting unassigned tables: {e}")
         unassigned_tables = []
@@ -927,7 +939,24 @@ def connector_edit_tables(request, config_pk):
                     messages.error(request, f"Maximum {max_tables} tables per connector. After changes you'd have {total_after}. Reduce the selection.")
                     return redirect('connector_edit_tables', config_pk=config_pk)
 
-                success, message = orchestrator.add_tables(tables_to_add)
+                # Collect any custom target table names the user entered in the form
+                custom_target_names = {}
+                for table_name in tables_to_add:
+                    custom = request.POST.get(f'target_table_{table_name}', '').strip()
+                    if custom:
+                        if not _VALID_TABLE_NAME_RE.match(custom):
+                            messages.error(
+                                request,
+                                f"Invalid target table name '{custom}' for table '{table_name}'. "
+                                "Only letters, numbers and underscores are allowed."
+                            )
+                            return redirect('connector_edit_tables', config_pk=config_pk)
+                        custom_target_names[table_name] = custom
+
+                success, message = orchestrator.add_tables(
+                    tables_to_add,
+                    target_table_names=custom_target_names or None,
+                )
                 if success:
                     messages.success(request, message)
                 else:
@@ -946,6 +975,7 @@ def connector_edit_tables(request, config_pk):
         'database': database,
         'client': client,
         'current_tables': current_tables,
+        'current_table_mappings': current_table_mappings,
         'unassigned_tables': unassigned_tables,
         'max_tables_per_connector': settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25),
     }

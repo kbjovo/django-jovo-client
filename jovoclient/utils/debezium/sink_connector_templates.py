@@ -13,11 +13,102 @@ Key Features:
 """
 
 import logging
+import re as _re
 from typing import Dict, List, Optional, Any
 from client.models.client import Client
 from client.models.database import ClientDatabase
 
 logger = logging.getLogger(__name__)
+
+
+def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
+    """
+    Build per-table RegexRouter transforms for tables whose target_table name
+    differs from the default sink connector naming ({schema}_{table}).
+
+    These transforms are injected BEFORE the generic extractTableName transform
+    so that topics for custom-named tables are routed to the correct table, while
+    remaining topics fall through to the generic $1_$2 replacement.
+
+    The generated transforms are added directly into the ``config`` dict as a
+    side-effect; the returned list contains only the transform names.
+
+    Args:
+        client: Client instance (used to query all table mappings)
+        config: Sink connector config dict to update in-place
+
+    Returns:
+        List of transform names (in insertion order, duplicates removed)
+    """
+    try:
+        from client.models.replication import TableMapping
+
+        all_mappings = TableMapping.objects.filter(
+            replication_config__client_database__client=client,
+            is_enabled=True,
+        ).select_related('replication_config__client_database')
+
+        custom_transform_names: List[str] = []
+        seen_names: set = set()
+
+        for mapping in all_mappings:
+            source_db = mapping.replication_config.client_database
+            source_table = mapping.source_table
+            source_schema = mapping.source_schema or ''
+            target_table = mapping.target_table
+
+            db_type = source_db.db_type.lower()
+            if db_type == 'mysql':
+                schema_in_topic = source_db.database_name
+            elif db_type == 'postgresql':
+                schema_in_topic = source_schema or 'public'
+            elif db_type in ('mssql', 'sqlserver'):
+                schema_in_topic = source_schema or 'dbo'
+            elif db_type == 'oracle':
+                schema_in_topic = source_schema or getattr(source_db, 'username', 'public').upper()
+            else:
+                schema_in_topic = source_schema or getattr(source_db, 'database_name', '')
+
+            default_target = f"{schema_in_topic}_{source_table}"
+
+            if target_table == default_target:
+                continue  # Default name — no custom transform needed
+
+            db_id = source_db.id
+            safe_schema = _re.sub(r'[^a-zA-Z0-9]', '_', schema_in_topic)
+            safe_table = _re.sub(r'[^a-zA-Z0-9]', '_', source_table)
+            transform_name = f"rename_db{db_id}_{safe_schema}_{safe_table}"
+
+            if transform_name in seen_names:
+                continue  # Already added (same source db/schema/table)
+            seen_names.add(transform_name)
+
+            # Match the specific topic for this source db / schema / table across
+            # any connector version: client_{cid}_db_{db_id}_v_\d+.{schema}.{table}
+            # Use single backslash escaping: Python \\d+ -> string \d+ -> Java regex digit+
+            topic_regex = (
+                f"client_{client.id}_db_{db_id}_v_\\d+"
+                f"\\.{_re.escape(schema_in_topic)}"
+                f"\\.{_re.escape(source_table)}"
+            )
+
+            config[f"transforms.{transform_name}.type"] = (
+                "org.apache.kafka.connect.transforms.RegexRouter"
+            )
+            config[f"transforms.{transform_name}.regex"] = topic_regex
+            config[f"transforms.{transform_name}.replacement"] = target_table
+
+            custom_transform_names.append(transform_name)
+            logger.info(
+                f"Custom table rename transform: "
+                f"{schema_in_topic}.{source_table} -> {target_table}"
+            )
+
+        return custom_transform_names
+
+    except Exception as e:
+        logger.warning(f"Could not build custom table transforms: {e}")
+        return []
 
 
 def get_mysql_sink_connector_config(
@@ -72,9 +163,9 @@ def get_mysql_sink_connector_config(
 
         # --- TRANSFORMS ---
         # 1. unwrap: flattens the Debezium envelope so the sink sees the actual data fields.
-        # 2. extractTableName: routes topics to proper table names.
-        "transforms": "unwrap,extractTableName",
-        
+        # 2. (optional) custom per-table renames: route specific topics to custom table names.
+        # 3. extractTableName: routes remaining topics using the $1_$2 pattern.
+        # Custom rename transforms are injected below after querying table mappings.
         "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
         "transforms.unwrap.drop.tombstones": "true",
         "transforms.unwrap.delete.handling.mode": "rewrite",
@@ -150,6 +241,16 @@ def get_mysql_sink_connector_config(
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
+    # Build custom per-table rename transforms and assemble the full transforms chain.
+    # Custom transforms are prepended so they run before the generic extractTableName.
+    # Topics that match a custom rename get routed to the custom table name;
+    # the generic $1_$2 extractTableName handles all remaining topics.
+    custom_transforms = _get_custom_table_transforms(client, config)
+    if custom_transforms:
+        config["transforms"] = "unwrap," + ",".join(custom_transforms) + ",extractTableName"
+    else:
+        config["transforms"] = "unwrap,extractTableName"
+
     if custom_config:
         config.update(custom_config)
 
@@ -208,7 +309,7 @@ def get_postgresql_sink_connector_config(
         # Transforms
         # castMicroTime: MySQL TIME columns > 24h cause a DateTimeException in the JDBC sink.
         # Casting to string stores the raw microsecond value and avoids the crash.
-        "transforms": "extractTableName,castMicroTime",
+        # Custom per-table rename transforms are injected below after querying table mappings.
         "transforms.extractTableName.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.extractTableName.regex": ".*\\.([^.]+)\\.([^.]+)",
         "transforms.extractTableName.replacement": "$1_$2",
@@ -282,6 +383,14 @@ def get_postgresql_sink_connector_config(
     topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
+
+    # Build custom per-table rename transforms and assemble the full transforms chain.
+    # Custom transforms are prepended so they run before the generic extractTableName.
+    custom_transforms = _get_custom_table_transforms(client, config)
+    if custom_transforms:
+        config["transforms"] = ",".join(custom_transforms) + ",extractTableName,castMicroTime"
+    else:
+        config["transforms"] = "extractTableName,castMicroTime"
 
     if custom_config:
         config.update(custom_config)

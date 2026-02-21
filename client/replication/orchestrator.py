@@ -1412,7 +1412,7 @@ class ReplicationOrchestrator:
                 self._re_pause_if_batch_mode(was_paused)
             return False, error_msg
 
-    def add_tables(self, table_names: list) -> Tuple[bool, str]:
+    def add_tables(self, table_names: list, target_table_names: dict = None) -> Tuple[bool, str]:
         """
         Add tables to a connector with incremental snapshot.
 
@@ -1464,23 +1464,21 @@ class ReplicationOrchestrator:
                         source_schema = schema.get('schema', '')
                         actual_table_name = table_name
 
-                    # Build target table name to match sink connector transform
-                    # Sink connector uses: transforms.extractTableName.replacement = "$1_$2"
-                    # Where $1 is schema/database and $2 is table name
-                    # Result format: {schema}_{table} (e.g., kbe_tally_item_mapping)
-                    if db_config.db_type == 'mysql':
-                        # MySQL: database name is used as schema in topic
+                    # Build target table name — use custom name from caller if provided,
+                    # otherwise compute the default to match sink connector transform
+                    # ($1_$2: {schema}_{table}).
+                    custom_name = (target_table_names or {}).get(table_name, '')
+                    if custom_name:
+                        target_table_name = custom_name
+                    elif db_config.db_type == 'mysql':
                         target_table_name = f"{db_config.database_name}_{actual_table_name}"
                     elif db_config.db_type == 'postgresql':
-                        # PostgreSQL: schema defaults to 'public'
                         pg_schema = source_schema or 'public'
                         target_table_name = f"{pg_schema}_{actual_table_name}"
                     elif db_config.db_type == 'mssql':
-                        # MSSQL: schema defaults to 'dbo'
                         mssql_schema = source_schema or 'dbo'
                         target_table_name = f"{mssql_schema}_{actual_table_name}"
                     elif db_config.db_type == 'oracle':
-                        # Oracle: schema is typically the user
                         oracle_schema = source_schema or db_config.username.upper()
                         target_table_name = f"{oracle_schema}_{actual_table_name}"
                     else:
@@ -1618,10 +1616,20 @@ class ReplicationOrchestrator:
             self._log_info("STEP 5/6: Restarting sink connector...")
 
             if self.config.sink_connector_name:
-                # Sink uses topics.regex so it auto-subscribes to new topics
-                # Just restart to ensure it picks up the new topics
-                self.connector_manager.restart_connector(self.config.sink_connector_name)
-                self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
+                # Update sink connector config so any new custom table rename transforms
+                # (for tables with non-default target names) are applied, then restart
+                # to pick up the new topics via topics.regex auto-subscription.
+                target_db = client.get_target_database()
+                if target_db:
+                    self._update_sink_connector(
+                        self.config.sink_connector_name,
+                        set(),  # topics unused — sink uses topics.regex
+                        target_db
+                    )
+                    self._log_info("✓ Sink connector config updated with new table transforms")
+                else:
+                    self.connector_manager.restart_connector(self.config.sink_connector_name)
+                    self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
 
             # ========================================
             # STEP 5.5: Add foreign keys to new target tables

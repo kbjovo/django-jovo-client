@@ -117,8 +117,15 @@ def schedule_ddl_processing_all():
 
     Called periodically by Celery Beat (every 1 minute).
     Processes DDL for MySQL, MSSQL, and PostgreSQL sources.
+
+    MySQL/MSSQL configs are skipped when a continuous DDL consumer is already running
+    for them — both share the same Kafka consumer group, so running both simultaneously
+    causes unnecessary rebalances with no benefit. The batch task only fires for configs
+    whose continuous consumer has stopped (acts as a fallback).
     """
     supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+    # Kafka-based sources that have a continuous consumer (see start_continuous_ddl_consumer)
+    continuous_consumer_types = ('mysql', 'mssql', 'sqlserver')
 
     active_configs = ReplicationConfig.objects.filter(
         status='active',
@@ -131,7 +138,11 @@ def schedule_ddl_processing_all():
         if source_type not in supported_types:
             continue
 
-        # Schedule DDL processing task
+        # Skip if a continuous consumer is already handling this config.
+        # Avoids competing on the same Kafka consumer group and causing rebalances.
+        if source_type in continuous_consumer_types and _running_consumers.get(config.id, False):
+            continue
+
         process_ddl_changes.delay(config.id)
         scheduled += 1
 
@@ -218,8 +229,8 @@ def start_continuous_ddl_consumer(self, config_id: int):
                 # Process with short timeout for responsiveness
                 processed, errors = processor.process(timeout_sec=5, max_messages=10)
 
-                if processed > 0 or errors > 0:
-                    logger.info(f"[Continuous] Config {config_id}: {processed} processed, {errors} errors")
+                if errors > 0:
+                    logger.warning(f"[Continuous] Config {config_id}: {processed} processed, {errors} errors")
 
                 # Small sleep to prevent tight loop when no messages
                 time.sleep(0.1)

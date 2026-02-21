@@ -103,20 +103,20 @@ class MySQLTargetAdapter(BaseTargetAdapter):
         details = operation.details
         old_name = details.get('old_name')
         new_name = details.get('new_name')
-        column_type = details.get('column_type', 'VARCHAR(255)')
 
-        # Check if source column exists (skip if already renamed or doesn't exist)
-        actual_type = self._get_column_type_from_db(operation.table_name, old_name)
-        if not actual_type:
+        # Single query checks both old and new column names (avoids two round-trips)
+        column_types = self._get_column_types_from_db(operation.table_name, [old_name, new_name])
+
+        if old_name not in column_types:
             # Source column doesn't exist - either already renamed or stale DDL event
-            if self._get_column_type_from_db(operation.table_name, new_name):
+            if new_name in column_types:
                 logger.info(f"Column {old_name} already renamed to {new_name}, skipping")
             else:
                 logger.info(f"Column {old_name} not found (stale DDL event), skipping")
             return True, None  # Skip gracefully, don't fail
 
         # Use actual type from DB (handles ENUM/SET with values)
-        column_type = actual_type
+        column_type = column_types[old_name]
 
         sql = self.generate_rename_column(
             operation.table_name,
@@ -127,25 +127,34 @@ class MySQLTargetAdapter(BaseTargetAdapter):
         logger.info(f"Renaming column in {operation.table_name}")
         return self.execute_sql(sql)
 
-    def _get_column_type_from_db(self, table_name: str, column_name: str) -> Optional[str]:
-        """Query actual column type from database (needed for ENUM/SET with values)."""
+    def _get_column_types_from_db(self, table_name: str, column_names: List[str]) -> Dict[str, str]:
+        """
+        Query actual column types for multiple columns in a single DB round-trip.
+
+        Returns a dict of {column_name: COLUMN_TYPE} for whichever names exist.
+        Needed for ENUM/SET columns whose full type definition (including values)
+        must come from INFORMATION_SCHEMA rather than Debezium metadata.
+        """
+        if not column_names:
+            return {}
         try:
             from sqlalchemy import text
-            sql = text("""
-                SELECT COLUMN_TYPE
+            placeholders = ', '.join(f':col_{i}' for i in range(len(column_names)))
+            params: Dict = {f'col_{i}': name for i, name in enumerate(column_names)}
+            params['table_name'] = table_name
+            sql = text(f"""
+                SELECT COLUMN_NAME, COLUMN_TYPE
                 FROM INFORMATION_SCHEMA.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :table_name
-                AND COLUMN_NAME = :column_name
+                AND COLUMN_NAME IN ({placeholders})
             """)
             with self.engine.connect() as conn:
-                result = conn.execute(sql, {'table_name': table_name, 'column_name': column_name})
-                row = result.fetchone()
-                if row:
-                    return row[0]
+                result = conn.execute(sql, params)
+                return {row[0]: row[1] for row in result}
         except Exception as e:
-            logger.warning(f"Could not get column type from DB: {e}")
-        return None
+            logger.warning(f"Could not get column types from DB: {e}")
+        return {}
 
     def _handle_add_index(self, operation: 'DDLOperation') -> Tuple[bool, Optional[str]]:
         """Handle ADD INDEX operation."""

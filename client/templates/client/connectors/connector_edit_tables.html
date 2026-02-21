@@ -274,8 +274,8 @@
 
             <!-- Accordion for Current Tables -->
             <div id="current-tables-accordion" class="space-y-2">
-                {% for table in current_tables %}
-                {% with escaped_name=table|cut:'.' %}
+                {% for mapping in current_table_mappings %}
+                {% with table=mapping.source_table target=mapping.target_table escaped_name=mapping.source_table|cut:'.' %}
                 <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden current-table-item"
                      data-table-name="{{ table }}">
 
@@ -306,13 +306,15 @@
                         </svg>
 
                         <!-- Table Info -->
-                        <div class="flex-1">
+                        <div class="flex-1 min-w-0">
                             <span class="font-semibold text-gray-900 dark:text-white">{{ table }}</span>
+                            <span class="mx-2 text-gray-400 dark:text-gray-500 text-sm">→</span>
+                            <span class="text-sm text-gray-600 dark:text-gray-300 font-mono">{{ target }}</span>
                             <span class="ml-2 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">Active</span>
                         </div>
 
                         <!-- Column count indicator -->
-                        <span class="text-xs text-gray-500 dark:text-gray-400" id="current-column-count-{{ escaped_name }}"></span>
+                        <span class="text-xs text-gray-500 dark:text-gray-400 ml-2 shrink-0" id="current-column-count-{{ escaped_name }}"></span>
                     </div>
 
                     <!-- Accordion Content -->
@@ -420,23 +422,9 @@
                         </svg>
 
                         <!-- Table Info -->
-                        <div class="flex-1">
+                        <div class="flex-1 min-w-0">
                             <span class="font-semibold text-gray-900 dark:text-white">{{ table.name }}</span>
-                            <span class="ml-3 text-sm text-gray-500 dark:text-gray-400">
-                                {% if table.row_count is not None %}
-                                    {% if table.row_count > 1000000 %}
-                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">{{ table.row_count|floatformat:0 }} rows</span>
-                                    {% elif table.row_count > 100000 %}
-                                        <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400">{{ table.row_count|floatformat:0 }} rows</span>
-                                    {% elif table.row_count == 0 %}
-                                        <span class="text-xs">0 rows (empty)</span>
-                                    {% else %}
-                                        {{ table.row_count|floatformat:0 }} rows
-                                    {% endif %}
-                                {% else %}
-                                    <span class="text-xs">N/A</span>
-                                {% endif %}
-                            </span>
+                            <span class="ml-2 text-xs text-gray-500 dark:text-gray-400" id="add-row-count-{{ escaped_name }}"></span>
                         </div>
 
                         <!-- Column count indicator -->
@@ -457,10 +445,10 @@
                                 </label>
                                 <input type="text"
                                        name="target_table_{{ table.name }}"
-                                       value="{{ database.database_name }}_{{ table.name }}"
+                                       value="{{ table.default_target }}"
                                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
                                        placeholder="Target table name">
-                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Default: {database}_{table}</p>
+                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Default: {{ table.default_target }}</p>
                             </div>
                         </div>
 
@@ -755,6 +743,21 @@ async function loadAddTableSchema(tableName) {
         document.getElementById(`add-column-count-${escapedName}`).textContent =
             `${data.columns.length} columns`;
 
+        // Update row count badge (loaded lazily alongside columns)
+        const rowCountEl = document.getElementById(`add-row-count-${escapedName}`);
+        if (rowCountEl && data.row_count !== undefined) {
+            const rc = data.row_count;
+            if (rc > 1000000) {
+                rowCountEl.innerHTML = `<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">${rc.toLocaleString()} rows</span>`;
+            } else if (rc > 100000) {
+                rowCountEl.innerHTML = `<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400">${rc.toLocaleString()} rows</span>`;
+            } else if (rc === 0) {
+                rowCountEl.textContent = '0 rows (empty)';
+            } else {
+                rowCountEl.textContent = `${rc.toLocaleString()} rows`;
+            }
+        }
+
     } catch (error) {
         console.error('Error loading table schema:', error);
         loadingEl.innerHTML = `
@@ -885,10 +888,65 @@ function updateWarnings() {
     updateTableCountDisplay();
 }
 
+// Real-time target table name validation
+const TABLE_NAME_PATTERN = /^[a-zA-Z0-9_]+$/;
+document.addEventListener('input', function(e) {
+    if (!e.target.name || !e.target.name.startsWith('target_table_')) return;
+    const val = e.target.value;
+    const existingError = e.target.parentElement.querySelector('.target-name-error');
+    if (!val || TABLE_NAME_PATTERN.test(val)) {
+        e.target.classList.remove('border-red-500');
+        e.target.classList.add('border-gray-300', 'dark:border-gray-600');
+        if (existingError) existingError.remove();
+    } else {
+        e.target.classList.add('border-red-500');
+        e.target.classList.remove('border-gray-300', 'dark:border-gray-600');
+        if (!existingError) {
+            const err = document.createElement('p');
+            err.className = 'target-name-error text-xs text-red-600 mt-1';
+            err.textContent = 'Only letters, numbers and underscores allowed.';
+            e.target.parentElement.appendChild(err);
+        }
+    }
+});
+
 // Form validation
 document.querySelector('form').addEventListener('submit', function(e) {
     const removeChecked = document.querySelectorAll('.remove-checkbox:checked');
     const addChecked = document.querySelectorAll('.add-checkbox:checked');
+
+    // Validate target table names for tables being added
+    document.querySelectorAll('.target-name-error').forEach(el => el.remove());
+    const invalidTargetInputs = [];
+    addChecked.forEach(function(checkbox) {
+        const tableName = checkbox.dataset.tableName;
+        const input = document.querySelector(`input[name="target_table_${tableName}"]`);
+        if (!input) return;
+        const val = input.value.trim();
+        input.classList.remove('border-red-500');
+        input.classList.add('border-gray-300', 'dark:border-gray-600');
+        if (!val || !TABLE_NAME_PATTERN.test(val)) {
+            invalidTargetInputs.push(input);
+        }
+    });
+    if (invalidTargetInputs.length > 0) {
+        e.preventDefault();
+        invalidTargetInputs.forEach(function(input) {
+            input.classList.add('border-red-500');
+            input.classList.remove('border-gray-300', 'dark:border-gray-600');
+            const err = document.createElement('p');
+            err.className = 'target-name-error text-xs text-red-600 mt-1';
+            err.textContent = 'Only letters, numbers and underscores allowed. Cannot be empty.';
+            input.parentElement.appendChild(err);
+            // Open accordion if collapsed
+            const accordionContent = input.closest('.add-accordion-content');
+            if (accordionContent && accordionContent.classList.contains('hidden')) {
+                accordionContent.classList.remove('hidden');
+            }
+        });
+        invalidTargetInputs[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return false;
+    }
 
     const totalTables = {{ current_tables|length }};
     const remainingTables = totalTables - removeChecked.length;

@@ -27,7 +27,6 @@ from .database_views import (
 from .dashboard_views import (
     dashboard,
     clients_list,
-    replications_list,
     monitoring_dashboard,
 )
 
@@ -50,6 +49,5 @@ __all__ = [
     # Dashboard views
     'dashboard',
     'clients_list',
-    'replications_list',
     'monitoring_dashboard',
 ]

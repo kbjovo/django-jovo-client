@@ -1,15 +1,14 @@
 """
-Dashboard, clients list, replications list, and monitoring views.
+Dashboard, clients list, and monitoring views.
 
 This module provides:
 - Main dashboard with stats and overview
 - Clients list page
-- Global replications list page
 - Real-time monitoring dashboard
 """
 
 from django.shortcuts import render
-from django.db.models import Q, Count
+from django.db.models import Q
 from django.views.decorators.http import require_http_methods
 import logging
 
@@ -35,22 +34,22 @@ def dashboard(request):
     total_clients = Client.objects.filter(status__in=["active", "inactive"]).count()
     active_clients = Client.objects.filter(status="active").count()
 
-    all_replications = ReplicationConfig.objects.select_related(
+    all_connectors = ReplicationConfig.objects.select_related(
         'client_database', 'client_database__client'
     ).exclude(
         Q(connector_name__isnull=True) | Q(connector_name='')
     )
 
-    total_replications = all_replications.count()
-    active_replications = all_replications.filter(status='active').count()
-    failed_replications = all_replications.filter(status='error').count()
+    total_connectors = all_connectors.count()
+    active_connectors = all_connectors.filter(status='active').count()
+    failed_connectors = all_connectors.filter(status='error').count()
 
-    # Get recent clients
-    recent_clients = Client.objects.filter(
-        status__in=["active", "inactive"]
-    ).order_by('-created_at')[:5]
+    # Recently active connectors (ordered by last updated)
+    recent_active_connectors = all_connectors.filter(
+        status='active'
+    ).order_by('-updated_at')[:5]
 
-    # Get recent replications with issues
+    # Recent connectors with issues
     recent_failed = ReplicationConfig.objects.select_related(
         'client_database', 'client_database__client'
     ).filter(status='error').order_by('-updated_at')[:5]
@@ -58,10 +57,10 @@ def dashboard(request):
     context = {
         'total_clients': total_clients,
         'active_clients': active_clients,
-        'total_replications': total_replications,
-        'active_replications': active_replications,
-        'failed_replications': failed_replications,
-        'recent_clients': recent_clients,
+        'total_connectors': total_connectors,
+        'active_connectors': active_connectors,
+        'failed_connectors': failed_connectors,
+        'recent_active_connectors': recent_active_connectors,
         'recent_failed': recent_failed,
     }
 
@@ -112,119 +111,6 @@ def clients_list(request):
 
     return render(request, 'clients_list.html', table_data)
 
-
-@require_http_methods(["GET"])
-def replications_list(request):
-    """
-    Global replications list page.
-
-    Shows all replication configurations across all clients with:
-    - Filterable by client, status
-    - Searchable by client name, database name, connector name
-    - Quick actions (edit, start/stop, monitor, delete)
-    - Status indicators
-    """
-    # Get all replications (including incomplete setups)
-    all_replications = ReplicationConfig.objects.select_related(
-        'client_database', 'client_database__client'
-    ).prefetch_related('table_mappings').order_by('-created_at')
-
-    # Apply filters
-    search_query = request.GET.get('search', '').strip()
-    status_filter = request.GET.get('status_filter', '')
-    client_filter = request.GET.get('client_filter', '')
-
-    if search_query:
-        all_replications = all_replications.filter(
-            Q(client_database__client__name__icontains=search_query) |
-            Q(client_database__connection_name__icontains=search_query) |
-            Q(connector_name__icontains=search_query)
-        )
-
-    if status_filter:
-        if status_filter == 'incomplete':
-            all_replications = all_replications.filter(
-                Q(connector_name__isnull=True) | Q(connector_name='')
-            )
-        else:
-            all_replications = all_replications.filter(status=status_filter).exclude(
-                Q(connector_name__isnull=True) | Q(connector_name='')
-            )
-
-    if client_filter:
-        all_replications = all_replications.filter(client_database__client_id=client_filter)
-
-    # Calculate statistics
-    total_replications = all_replications.count()
-    active_count = all_replications.filter(status='active').exclude(
-        Q(connector_name__isnull=True) | Q(connector_name='')
-    ).count()
-    configured_count = all_replications.filter(status='configured').exclude(
-        Q(connector_name__isnull=True) | Q(connector_name='')
-    ).count()
-    paused_count = all_replications.filter(status='paused').count()
-    error_count = all_replications.filter(status='error').count()
-    incomplete_count = all_replications.filter(
-        Q(connector_name__isnull=True) | Q(connector_name='')
-    ).count()
-
-    # Build replication rows for table display - grouped by status
-    replication_rows_by_status = {
-        'active': [],
-        'error': [],
-        'paused': [],
-        'configured': [],
-        'incomplete': [],
-    }
-
-    for config in all_replications:
-        # Detect incomplete status (no connector created)
-        is_incomplete = not config.connector_name or config.connector_name == ''
-        effective_status = 'incomplete' if is_incomplete else config.status
-
-        # Determine if tables are configured
-        has_tables = config.table_mappings.filter(is_enabled=True).exists()
-
-        row_data = {
-            'id': config.id,
-            'client_name': config.client_database.client.name,
-            'client_id': config.client_database.client.id,
-            'database_id': config.client_database.id,
-            'database_name': config.client_database.connection_name,
-            'database_type': config.client_database.get_db_type_display(),
-            'status': effective_status,
-            'status_display': 'Incomplete Setup' if is_incomplete else config.get_status_display(),
-            'connector_name': config.connector_name if not is_incomplete else None,
-            'tables_count': config.table_mappings.filter(is_enabled=True).count(),
-            'last_sync': config.last_sync_at,
-            'created_at': config.created_at,
-            'sync_type': config.get_sync_type_display(),
-            'is_incomplete': is_incomplete,
-            'has_tables': has_tables,
-        }
-
-        # Add to appropriate status group
-        if effective_status in replication_rows_by_status:
-            replication_rows_by_status[effective_status].append(row_data)
-
-    # Get all clients for filter dropdown
-    all_clients = Client.objects.filter(status__in=["active", "inactive"]).order_by('name')
-
-    context = {
-        'replication_rows_by_status': replication_rows_by_status,
-        'total_replications': total_replications,
-        'active_count': active_count,
-        'configured_count': configured_count,
-        'paused_count': paused_count,
-        'error_count': error_count,
-        'incomplete_count': incomplete_count,
-        'all_clients': all_clients,
-        'search_query': search_query,
-        'status_filter': status_filter,
-        'client_filter': client_filter,
-    }
-
-    return render(request, 'replications_list.html', context)
 
 
 @require_http_methods(["GET"])

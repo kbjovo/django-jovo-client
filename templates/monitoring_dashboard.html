@@ -158,11 +158,11 @@
 
               <!-- Client Info -->
               <div class="min-w-0 flex-1">
-                <h3 class="text-base font-semibold text-gray-900 dark:text-white truncate">
-                  {{ item.config.client_database.client.name }}
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white font-mono truncate">
+                  {{ item.config.connector_name }}
                 </h3>
                 <p class="text-xs text-gray-600 dark:text-gray-400 truncate">
-                  {{ item.config.client_database.connection_name }}
+                  {{ item.config.client_database.client.name }} &middot; {{ item.config.client_database.connection_name }}
                 </p>
               </div>
             </div>
@@ -188,17 +188,11 @@
         <!-- Body -->
         <div class="p-5 space-y-4">
 
-          <!-- Connector Name & Database -->
-          <div class="flex gap-6">
-            <div class="min-w-0 flex-1">
-              <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Connector Name</p>
-              <p class="text-sm text-gray-900 dark:text-white font-mono truncate">{{ item.config.connector_name }}</p>
-            </div>
-            <div class="min-w-0 flex-1">
-              <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Database</p>
-              <p class="text-sm text-gray-900 dark:text-white truncate">{{ item.config.client_database.connection_name }}</p>
-              <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.config.client_database.db_type|upper }} @ {{ item.config.client_database.host }}:{{ item.config.client_database.port }}/{{ item.config.client_database.database_name }}</p>
-            </div>
+          <!-- Database -->
+          <div>
+            <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Database</p>
+            <p class="text-sm text-gray-900 dark:text-white truncate">{{ item.config.client_database.connection_name }}</p>
+            <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.config.client_database.db_type|upper }} @ {{ item.config.client_database.host }}:{{ item.config.client_database.port }}/{{ item.config.client_database.database_name }}</p>
           </div>
 
           <!-- Tasks -->
@@ -273,8 +267,8 @@
         <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
           Start a replication to see real-time monitoring data here.
         </p>
-        <a href="{% url 'replications_list' %}" class="inline-flex items-center text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
-          View all replications →
+        <a href="{% url 'connectors_list' %}" class="inline-flex items-center text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium">
+          View all connectors →
         </a>
       </div>
     </div>

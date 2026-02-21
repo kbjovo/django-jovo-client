@@ -671,10 +671,65 @@ function renderColumns(tableName, columns) {
     }
 }
 
+// Real-time target table name validation
+const TABLE_NAME_PATTERN = /^[a-zA-Z0-9_]+$/;
+document.addEventListener('input', function(e) {
+    if (!e.target.name || !e.target.name.startsWith('target_table_')) return;
+    const val = e.target.value;
+    const existingError = e.target.parentElement.querySelector('.target-name-error');
+    if (!val || TABLE_NAME_PATTERN.test(val)) {
+        e.target.classList.remove('border-red-500');
+        e.target.classList.add('border-gray-300', 'dark:border-gray-600');
+        if (existingError) existingError.remove();
+    } else {
+        e.target.classList.add('border-red-500');
+        e.target.classList.remove('border-gray-300', 'dark:border-gray-600');
+        if (!existingError) {
+            const err = document.createElement('p');
+            err.className = 'target-name-error text-xs text-red-600 mt-1';
+            err.textContent = 'Only letters, numbers and underscores allowed.';
+            e.target.parentElement.appendChild(err);
+        }
+    }
+});
+
 // Form validation
 const MAX_TABLES_PER_CONNECTOR = {{ max_tables_per_connector }};
 document.querySelector('form').addEventListener('submit', function(e) {
     const checkedTables = document.querySelectorAll('.table-checkbox:checked');
+
+    // Validate target table names for selected tables
+    document.querySelectorAll('.target-name-error').forEach(el => el.remove());
+    const invalidTargetInputs = [];
+    checkedTables.forEach(function(checkbox) {
+        const tableName = checkbox.dataset.tableName;
+        const input = document.querySelector(`input[name="target_table_${tableName}"]`);
+        if (!input) return;
+        const val = input.value.trim();
+        input.classList.remove('border-red-500');
+        input.classList.add('border-gray-300', 'dark:border-gray-600');
+        if (!val || !TABLE_NAME_PATTERN.test(val)) {
+            invalidTargetInputs.push(input);
+        }
+    });
+    if (invalidTargetInputs.length > 0) {
+        e.preventDefault();
+        invalidTargetInputs.forEach(function(input) {
+            input.classList.add('border-red-500');
+            input.classList.remove('border-gray-300', 'dark:border-gray-600');
+            const err = document.createElement('p');
+            err.className = 'target-name-error text-xs text-red-600 mt-1';
+            err.textContent = 'Only letters, numbers and underscores allowed. Cannot be empty.';
+            input.parentElement.appendChild(err);
+            // Open accordion if collapsed
+            const accordionContent = input.closest('.accordion-content');
+            if (accordionContent && accordionContent.classList.contains('hidden')) {
+                accordionContent.classList.remove('hidden');
+            }
+        });
+        invalidTargetInputs[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return false;
+    }
 
     if (checkedTables.length === 0) {
         e.preventDefault();
