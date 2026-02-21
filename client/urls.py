@@ -23,19 +23,29 @@ from .views import (
     SinkConnectorDeleteView,
 )
 
-# Import multi-connector management views
-from .views.connector_views import (
-    ajax_get_table_schema,
+# Import connector views (split across focused modules)
+from .views.connector_list_views import (
     connectors_list,
     client_connectors_list,
     connector_list,
+)
+from .views.connector_crud_views import (
+    ajax_get_table_schema,
     connector_add,
     connector_create_debezium,
     connector_edit_tables,
     connector_delete,
     connector_recreate,
+)
+from .views.connector_monitor_views import (
     connector_monitor,
     connector_status_api,
+    connector_live_metrics_api,
+    connector_table_rows_api,
+    connector_fk_preview_api,
+    connector_fk_apply_api,
+)
+from .views.connector_action_views import (
     connector_pause,
     connector_resume,
     connector_restart,
@@ -45,10 +55,6 @@ from .views.connector_views import (
     sink_restart,
     sink_restart_failed_tasks,
     sink_restart_all_tasks,
-    connector_table_rows_api,
-    connector_live_metrics_api,
-    connector_fk_preview_api,
-    connector_fk_apply_api,
 )
 
 # Import provision/edit step endpoints (modal AJAX flow)
