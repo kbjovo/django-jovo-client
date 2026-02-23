@@ -179,7 +179,7 @@ def connector_add(request, database_pk):
                 )
 
                 # Use user-provided name or fall back to auto-generated
-                custom_name = request.POST.get('connector_name', '').strip()
+                custom_name = re.sub(r'[^a-zA-Z0-9._\-]', '', request.POST.get('connector_name', '').strip())
                 connector_name = custom_name if custom_name else generate_connector_name(client, database, version=next_version)
                 replication_config.connector_name = connector_name
                 # Topic prefix must match connector template (includes version for JMX uniqueness)
@@ -555,11 +555,6 @@ def connector_edit_tables(request, config_pk):
                         setattr(replication_config, int_field, new_val)
                         settings_changed = True
 
-            drop_before_sync = 'drop_before_sync' in request.POST
-            if drop_before_sync != replication_config.drop_before_sync:
-                replication_config.drop_before_sync = drop_before_sync
-                settings_changed = True
-
             # Processing mode & batch settings
             processing_mode = request.POST.get('processing_mode', replication_config.processing_mode)
             old_processing_mode = replication_config.processing_mode
@@ -731,21 +726,18 @@ def connector_delete(request, config_pk):
             from client.replication.orchestrator import ReplicationOrchestrator
 
             # Read optional cleanup flags from modal checkboxes
-            delete_topics = bool(request.POST.get('delete_topics'))
             drop_tables = bool(request.POST.get('drop_tables'))
             truncate_tables = bool(request.POST.get('truncate_tables'))
 
             orchestrator = ReplicationOrchestrator(replication_config)
             success, message = orchestrator.delete_replication(
-                delete_topics=delete_topics,
+                delete_topics=True,
                 drop_tables=drop_tables,
                 truncate_tables=truncate_tables,
             )
 
             if success:
-                extras = []
-                if delete_topics:
-                    extras.append("topics deleted")
+                extras = ["topics deleted"]
                 if drop_tables:
                     extras.append("target tables dropped")
                 if truncate_tables and not drop_tables:
@@ -784,46 +776,3 @@ def connector_delete(request, config_pk):
     return render(request, 'client/connectors/connector_delete.html', context)
 
 
-# ========================================
-# Recreate Source Connector (same version, same topics)
-# ========================================
-
-def connector_recreate(request, config_pk):
-    """
-    Recreate a source connector without changing version, topics, or sink.
-
-    Use when a connector is FAILED/stuck and needs a fresh start while
-    keeping the same Kafka topics and target tables intact.
-
-    POST only. Accepts optional 'snapshot_mode' parameter:
-      - 'when_needed' (default): Resume from Kafka offset
-      - 'initial': Full re-snapshot of all data
-    """
-    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-    database = replication_config.client_database
-
-    if request.method != 'POST':
-        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
-
-    try:
-        from client.replication.orchestrator import ReplicationOrchestrator
-
-        snapshot_mode = request.POST.get('snapshot_mode', 'when_needed')
-        if snapshot_mode not in ('when_needed', 'initial'):
-            snapshot_mode = 'when_needed'
-
-        orchestrator = ReplicationOrchestrator(replication_config)
-        success, message = orchestrator.recreate_source_connector(
-            snapshot_mode=snapshot_mode
-        )
-
-        if success:
-            messages.success(request, message)
-        else:
-            messages.error(request, f"Recreate failed: {message}")
-
-    except Exception as e:
-        logger.error(f"Error recreating connector: {e}", exc_info=True)
-        messages.error(request, f"Error recreating connector: {str(e)}")
-
-    return redirect('connector_monitor', config_pk=config_pk)

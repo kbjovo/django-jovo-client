@@ -342,12 +342,6 @@ def edit_save_settings(request, config_pk):
                     setattr(replication_config, field, val)
                     changed = True
 
-        # Drop-before-sync checkbox
-        new_drop = 'drop_before_sync' in request.POST
-        if new_drop != replication_config.drop_before_sync:
-            replication_config.drop_before_sync = new_drop
-            changed = True
-
         # Processing mode
         new_mode = request.POST.get('processing_mode', old_mode)
         mode_switched = new_mode != old_mode

@@ -63,6 +63,9 @@ def monitor_replication_health():
             # Track health statistics
             if overall_health == 'healthy':
                 healthy_count += 1
+                if config.status == 'error':
+                    config.status = 'active'
+                    config.save(update_fields=['status'])
             elif overall_health == 'degraded':
                 degraded_count += 1
                 # Try to fix degraded state

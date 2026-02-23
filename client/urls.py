@@ -35,7 +35,6 @@ from .views.connector_crud_views import (
     connector_create_debezium,
     connector_edit_tables,
     connector_delete,
-    connector_recreate,
 )
 from .views.connector_monitor_views import (
     connector_monitor,
@@ -156,11 +155,6 @@ urlpatterns = [
     path('connector/<int:config_pk>/delete/',
          connector_delete,
          name='connector_delete'),
-
-    # Recreate source connector (same version, same topics)
-    path('connector/<int:config_pk>/recreate/',
-         connector_recreate,
-         name='connector_recreate'),
 
     # Monitor connector (real-time status + snapshot progress)
     path('connector/<int:config_pk>/monitor/',

@@ -44,10 +44,21 @@
             </p>
 
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+
                 <!-- Snapshot Mode -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
                         Snapshot Mode
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">When to use each mode:</strong>
+                                <span class="block"><strong>initial:</strong> Reads all existing rows first, then streams changes. Best for first-time setup.</span>
+                                <span class="block mt-1"><strong>when_needed:</strong> Snapshots only if offsets are missing. Use when restarting a failed connector.</span>
+                                <span class="block mt-1"><strong>never:</strong> No snapshot — captures changes from now only. Use if target already has the data.</span>
+                                <span class="block mt-1"><strong>schema_only:</strong> Schema structure only — no rows written to target.</span>
+                            </span>
+                        </span>
                     </label>
                     <select name="snapshot_mode"
                             class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
@@ -56,15 +67,21 @@
                         <option value="never" {% if replication_config.snapshot_mode == 'never' %}selected{% endif %}>Never</option>
                         <option value="schema_only" {% if replication_config.snapshot_mode == 'schema_only' %}selected{% endif %}>Schema Only</option>
                     </select>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        How to handle initial data snapshot
-                    </p>
                 </div>
 
                 <!-- Max Queue Size -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
                         Max Queue Size
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">In-memory buffer between source reader and Kafka producer.</strong>
+                                <span class="block">↑ <strong>Increase:</strong> High-throughput sources with rapid changes — reduces throttling.</span>
+                                <span class="block mt-1">↓ <strong>Decrease:</strong> Low-memory environments.</span>
+                                <span class="block mt-1 text-amber-600 font-medium">⚠ Must always be greater than Max Batch Size.</span>
+                            </span>
+                        </span>
                     </label>
                     <input type="number"
                            name="max_queue_size"
@@ -72,15 +89,22 @@
                            min="1024"
                            max="65536"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Max events in memory queue
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Range: 1024–65536 (default 8192)</p>
                 </div>
 
                 <!-- Max Batch Size -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
                         Max Batch Size
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">Number of change events sent to Kafka in one batch.</strong>
+                                <span class="block">↑ <strong>Increase:</strong> High-volume tables or burst traffic — improves throughput.</span>
+                                <span class="block mt-1">↓ <strong>Decrease:</strong> Low-latency needs — events delivered to Kafka more frequently.</span>
+                                <span class="block mt-1 text-amber-600 font-medium">⚠ Must be smaller than Max Queue Size.</span>
+                            </span>
+                        </span>
                     </label>
                     <input type="number"
                            name="max_batch_size"
@@ -88,15 +112,22 @@
                            min="256"
                            max="16384"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Max events per batch
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Range: 256–16384 (default 2048)</p>
                 </div>
 
                 <!-- Poll Interval -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
                         Poll Interval (ms)
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">How often Debezium checks the source DB for new changes.</strong>
+                                <span class="block">↑ <strong>Increase (1000–5000ms):</strong> Quiet databases — reduces source DB connection load.</span>
+                                <span class="block mt-1">↓ <strong>Decrease (100–200ms):</strong> Very frequent changes needing near-real-time replication.</span>
+                                <span class="block mt-1 text-gray-500 italic">Lower = less latency but more DB load. Higher = less load, slightly delayed events.</span>
+                            </span>
+                        </span>
                     </label>
                     <input type="number"
                            name="poll_interval_ms"
@@ -104,15 +135,21 @@
                            min="100"
                            max="10000"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        How often to poll for changes
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Range: 100–10000ms (default 500ms)</p>
                 </div>
 
                 <!-- Incremental Snapshot Chunk Size -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
-                        Incremental Snapshot Chunk Size
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                        Snapshot Chunk Size
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">Rows read per chunk during incremental snapshots (after initial sync).</strong>
+                                <span class="block">↑ <strong>Increase:</strong> Fast DB and network — larger chunks speed up catch-up sync.</span>
+                                <span class="block mt-1">↓ <strong>Decrease:</strong> Source DB under load or rows are large — prevents query timeouts.</span>
+                            </span>
+                        </span>
                     </label>
                     <input type="number"
                            name="incremental_snapshot_chunk_size"
@@ -120,15 +157,22 @@
                            min="256"
                            max="65536"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Rows per incremental snapshot chunk
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Range: 256–65536 (default 1024)</p>
                 </div>
 
                 <!-- Snapshot Fetch Size -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
                         Snapshot Fetch Size
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">Rows fetched per JDBC call during the initial full snapshot.</strong>
+                                <span class="block">↑ <strong>Increase:</strong> Fast connection and small rows — speeds up initial data load.</span>
+                                <span class="block mt-1">↓ <strong>Decrease:</strong> Large rows, slow network, or source DB memory constraints.</span>
+                                <span class="block mt-1 text-amber-600 font-medium">⚠ Too large can cause out-of-memory on the Debezium worker.</span>
+                            </span>
+                        </span>
                     </label>
                     <input type="number"
                            name="snapshot_fetch_size"
@@ -136,15 +180,22 @@
                            min="1000"
                            max="50000"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Rows fetched per JDBC call during initial snapshot
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Range: 1000–50000 (default 10000)</p>
                 </div>
 
                 <!-- Sink Batch Size -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
                         Sink Batch Size
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">Records written to the target database in one INSERT batch.</strong>
+                                <span class="block">↑ <strong>Increase:</strong> High-volume replication where write speed is the bottleneck.</span>
+                                <span class="block mt-1">↓ <strong>Decrease:</strong> Target DB has row-size limits or write timeouts occur.</span>
+                                <span class="block mt-1 text-amber-600 font-medium">⚠ Must be ≤ Sink Max Poll Records.</span>
+                            </span>
+                        </span>
                     </label>
                     <input type="number"
                            name="sink_batch_size"
@@ -152,15 +203,22 @@
                            min="500"
                            max="10000"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Records written to target DB per batch
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Range: 500–10000 (default 3000)</p>
                 </div>
 
                 <!-- Sink Max Poll Records -->
                 <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
+                    <label class="flex items-center gap-1.5 text-sm font-semibold text-gray-900 dark:text-white mb-1">
                         Sink Max Poll Records
+                        <span class="relative group inline-flex cursor-help">
+                            <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                            <span class="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-64 p-3 bg-white text-gray-700 text-xs rounded-lg shadow-xl border border-gray-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 leading-relaxed">
+                                <strong class="block mb-1">Max records pulled from Kafka per poll cycle by the sink connector.</strong>
+                                <span class="block">↑ <strong>Increase:</strong> Sink can't keep pace with source — pulls more events per cycle.</span>
+                                <span class="block mt-1">↓ <strong>Decrease:</strong> Reduce memory usage on the Kafka Connect worker.</span>
+                                <span class="block mt-1 text-amber-600 font-medium">⚠ Must be ≥ Sink Batch Size to avoid partial batches.</span>
+                            </span>
+                        </span>
                     </label>
                     <input type="number"
                            name="sink_max_poll_records"
@@ -168,30 +226,9 @@
                            min="500"
                            max="10000"
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Records pulled from Kafka per poll (≥ Sink Batch Size)
-                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Range: 500–10000 (default 5000)</p>
                 </div>
 
-                <!-- Drop Before Sync -->
-                <div>
-                    <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">
-                        Target Table Handling
-                    </label>
-                    <div class="flex items-center mt-2">
-                        <input type="checkbox"
-                               name="drop_before_sync"
-                               id="drop_before_sync"
-                               {% if replication_config.drop_before_sync %}checked{% endif %}
-                               class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500">
-                        <label for="drop_before_sync" class="ml-2 text-sm text-gray-900 dark:text-white">
-                            Drop target tables before sync
-                        </label>
-                    </div>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Warning: This will delete existing data
-                    </p>
-                </div>
             </div>
 
             <!-- Processing Mode & Batch Settings -->
@@ -510,7 +547,6 @@ const ORIGINAL_SETTINGS = {
     snapshot_fetch_size:             {{ replication_config.snapshot_fetch_size }},
     sink_batch_size:                 {{ replication_config.sink_batch_size }},
     sink_max_poll_records:           {{ replication_config.sink_max_poll_records }},
-    drop_before_sync:                {{ replication_config.drop_before_sync|lower }},
     processing_mode:                 '{{ replication_config.processing_mode }}',
     batch_interval:                  '{{ replication_config.batch_interval|default:"" }}',
     batch_max_catchup_minutes:       {{ replication_config.batch_max_catchup_minutes }},
@@ -529,10 +565,6 @@ function detectSettingsChanged() {
         const el = form.querySelector(`[name=${field}]`);
         if (el && parseInt(el.value) !== ORIGINAL_SETTINGS[field]) return true;
     }
-
-    const dropEl = form.querySelector('[name=drop_before_sync]');
-    const dropVal = dropEl ? dropEl.checked : false;
-    if (dropVal !== ORIGINAL_SETTINGS.drop_before_sync) return true;
 
     const modeEl = form.querySelector('input[name=processing_mode]:checked');
     const modeVal = modeEl ? modeEl.value : '';
@@ -1132,7 +1164,7 @@ document.addEventListener('input', function(e) {
     }
 });
 
-// ── Form submit intercept ─────────────────────────────────────────────
+// ── Form submit intercept ──────────────────��──────────────────────────
 document.getElementById('edit-connector-form').addEventListener('submit', async function(e) {
     const removeChecked = [...document.querySelectorAll('.remove-checkbox:checked')];
     const addChecked    = [...document.querySelectorAll('.add-checkbox:checked')];

@@ -49,10 +49,33 @@ def dashboard(request):
         status='active'
     ).order_by('-updated_at')[:5]
 
-    # Recent connectors with issues
-    recent_failed = ReplicationConfig.objects.select_related(
+    # Recent connectors with issues — verify live against Debezium to avoid stale DB state
+    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+    _manager = DebeziumConnectorManager()
+    _candidates = ReplicationConfig.objects.select_related(
         'client_database', 'client_database__client'
-    ).filter(status='error').order_by('-updated_at')[:5]
+    ).filter(status='error').order_by('-updated_at')[:20]
+
+    recent_failed = []
+    for _config in _candidates:
+        try:
+            _exists, _status_data = _manager.get_connector_status(_config.connector_name)
+            if not _exists or not _status_data:
+                recent_failed.append(_config)
+                continue
+            _connector_state = _status_data.get('connector', {}).get('state', 'UNKNOWN')
+            _tasks = _status_data.get('tasks', [])
+            _has_failed = any(t.get('state') == 'FAILED' for t in _tasks)
+            if _connector_state == 'FAILED' or _has_failed:
+                recent_failed.append(_config)
+            else:
+                # Connector recovered — clear the stale error status
+                _config.status = 'active'
+                _config.save(update_fields=['status'])
+        except Exception:
+            recent_failed.append(_config)
+        if len(recent_failed) == 5:
+            break
 
     context = {
         'total_clients': total_clients,
