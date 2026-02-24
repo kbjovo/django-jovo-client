@@ -655,10 +655,7 @@ class ReplicationOrchestrator:
             primary_key_fields = self._get_primary_key_fields()
 
             # Generate new config with topics.regex
-            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS',
-                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-            )
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
 
             # Let sink_connector_templates.py handle topics.regex
             # (excludes ddl_events and debezium_signal tables)
@@ -717,10 +714,7 @@ class ReplicationOrchestrator:
             primary_key_fields = self._get_primary_key_fields()
 
             # Get Kafka bootstrap servers
-            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS',
-                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-            )
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
 
             # Let sink_connector_templates.py handle topics.regex
             # (excludes ddl_events and debezium_signal tables)
@@ -895,10 +889,7 @@ class ReplicationOrchestrator:
             if len(enabled_tables) > max_tables:
                 return False, f"Too many tables ({len(enabled_tables)}). Maximum {max_tables} tables per connector to prevent worker crashes."
 
-            kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS',
-                'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-            )
+            kafka_bootstrap = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
             schema_registry = settings.DEBEZIUM_CONFIG.get(
                 'SCHEMA_REGISTRY_URL',
                 'http://schema-registry:8081'

@@ -48,12 +48,17 @@ def connector_monitor(request, config_pk):
         source_tasks = unified_status['source_connector'].get('tasks', [])
         sink_tasks = unified_status['sink_connector'].get('tasks', [])
 
-        # Connector uptime — most recent active ConnectorHistory entry for this source connector
+        # Connector uptime — most recent active ConnectorHistory entry for source and sink
         from client.models.replication import ConnectorHistory
         connector_history = ConnectorHistory.objects.filter(
             connector_name=replication_config.connector_name,
             connector_type='source',
         ).exclude(status='deleted').order_by('-created_at').first()
+
+        sink_connector_history = ConnectorHistory.objects.filter(
+            connector_name=replication_config.sink_connector_name,
+            connector_type='sink',
+        ).exclude(status='deleted').order_by('-created_at').first() if replication_config.sink_connector_name else None
 
         context = {
             'replication_config': replication_config,
@@ -69,6 +74,7 @@ def connector_monitor(request, config_pk):
             'snapshot': unified_status.get('snapshot'),
             'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True).order_by('source_table'),
             'connector_history': connector_history,
+            'sink_connector_history': sink_connector_history,
         }
 
         return render(request, 'client/connectors/connector_monitor.html', context)
@@ -145,9 +151,7 @@ def connector_live_metrics_api(request, config_pk):
         try:
             from confluent_kafka import Consumer, TopicPartition
             from django.conf import settings as django_settings
-            kafka_servers = django_settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_INTERNAL_SERVERS', 'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-            )
+            kafka_servers = django_settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
             dlq_topic = f"client_{database.client.id}.dlq"
             consumer = Consumer({
                 'bootstrap.servers': kafka_servers,

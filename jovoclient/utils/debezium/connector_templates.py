@@ -148,10 +148,7 @@ def get_mysql_connector_config(
     # Get from settings if not provided
     if kafka_bootstrap_servers is None:
         from django.conf import settings
-        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-        )
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
     if schema_registry_url is None:
         from django.conf import settings
         schema_registry_url = settings.DEBEZIUM_CONFIG.get(
@@ -333,10 +330,7 @@ def get_postgresql_connector_config(
     # Get from settings if not provided
     if kafka_bootstrap_servers is None:
         from django.conf import settings
-        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-        )
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
     if schema_registry_url is None:
         from django.conf import settings
         schema_registry_url = settings.DEBEZIUM_CONFIG.get(
@@ -521,10 +515,7 @@ def get_sqlserver_connector_config(
     # Get from settings if not provided
     if kafka_bootstrap_servers is None:
         from django.conf import settings
-        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-        )
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
     if schema_registry_url is None:
         from django.conf import settings
         schema_registry_url = settings.DEBEZIUM_CONFIG.get(
@@ -700,10 +691,7 @@ def get_oracle_connector_config(
     # Get from settings if not provided
     if kafka_bootstrap_servers is None:
         from django.conf import settings
-        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-        )
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
     if schema_registry_url is None:
         from django.conf import settings
         schema_registry_url = settings.DEBEZIUM_CONFIG.get(
@@ -899,7 +887,7 @@ def get_connector_config_for_database(
     db_config: ClientDatabase,
     replication_config: Optional[ReplicationConfig] = None,
     tables_whitelist: Optional[List[str]] = None,
-    kafka_bootstrap_servers: str = 'kafka-1:29092,kafka-2:29092,kafka-3:29092',
+    kafka_bootstrap_servers: str = None,
     schema_registry_url: str = 'http://localhost:8081',
     snapshot_mode: str = 'initial',
 ) -> Optional[Dict[str, Any]]:

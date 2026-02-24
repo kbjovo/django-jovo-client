@@ -127,10 +127,7 @@ def get_mysql_sink_connector_config(
     # Get from settings if not provided
     if kafka_bootstrap_servers is None:
         from django.conf import settings
-        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-        )
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
     
     if schema_registry_url is None:
         from django.conf import settings
@@ -273,10 +270,7 @@ def get_postgresql_sink_connector_config(
     """
     if kafka_bootstrap_servers is None:
         from django.conf import settings
-        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-        )
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
 
     if schema_registry_url is None:
         from django.conf import settings
@@ -415,10 +409,7 @@ def get_sink_connector_config_for_database(
     # Get from settings if not provided
     if kafka_bootstrap_servers is None:
         from django.conf import settings
-        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
-            'KAFKA_INTERNAL_SERVERS',
-            'kafka-1:29092,kafka-2:29092,kafka-3:29092'
-        )
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
     
     if schema_registry_url is None:
         from django.conf import settings

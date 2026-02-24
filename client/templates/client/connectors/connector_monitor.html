@@ -78,7 +78,12 @@
     <!-- Source Connector Card -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-visible" x-data="{ srcMenu: false }">
       <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
-        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Source Connector</p>
+        <div>
+          <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Source Connector</p>
+          {% if connector_history %}
+          <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">Since {{ connector_history.created_at|timesince }}</p>
+          {% endif %}
+        </div>
         <div class="flex items-center gap-2">
           <span id="source-state" class="text-sm font-bold {% if source_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif source_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
             {{ source_state }}
@@ -125,9 +130,14 @@
       </div>
       <div id="source-tasks" class="px-4 py-2 space-y-1">
         {% for task in source_tasks %}
-        <div class="flex items-center justify-between text-xs px-2 py-1 rounded {% if task.state == 'RUNNING' %}bg-green-50 dark:bg-green-900/10{% elif task.state == 'PAUSED' %}bg-yellow-50 dark:bg-yellow-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
-          <span class="text-gray-600 dark:text-gray-400">Task {{ task.id }}</span>
-          <span class="font-medium {% if task.state == 'RUNNING' %}text-green-700 dark:text-green-400{% elif task.state == 'PAUSED' %}text-yellow-700 dark:text-yellow-400{% else %}text-red-700 dark:text-red-400{% endif %}">{{ task.state }}</span>
+        <div>
+          <div class="flex items-center justify-between text-xs px-2 py-1 rounded {% if task.state == 'RUNNING' %}bg-green-50 dark:bg-green-900/10{% elif task.state == 'PAUSED' %}bg-yellow-50 dark:bg-yellow-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
+            <span class="text-gray-600 dark:text-gray-400">Task {{ task.id }}</span>
+            <span class="font-medium {% if task.state == 'RUNNING' %}text-green-700 dark:text-green-400{% elif task.state == 'PAUSED' %}text-yellow-700 dark:text-yellow-400{% else %}text-red-700 dark:text-red-400{% endif %}">{{ task.state }}</span>
+          </div>
+          {% if task.state == 'FAILED' and task.trace %}
+          <div class="mt-0.5 px-2 py-1.5 bg-red-50 dark:bg-red-900/10 rounded text-xs font-mono text-red-600 dark:text-red-400 break-all">{{ task.trace|truncatechars:250 }}</div>
+          {% endif %}
         </div>
         {% empty %}
         <p class="text-xs text-gray-400 dark:text-gray-500 italic">No tasks</p>
@@ -138,9 +148,14 @@
     <!-- Sink Connector Card -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-visible" x-data="{ sinkMenu: false }">
       <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
-        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-          Sink Connector <span class="text-[10px] font-normal normal-case">(shared)</span>
-        </p>
+        <div>
+          <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+            Sink Connector <span class="text-[10px] font-normal normal-case">(shared)</span>
+          </p>
+          {% if sink_connector_history %}
+          <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">Since {{ sink_connector_history.created_at|timesince }}</p>
+          {% endif %}
+        </div>
         <div class="flex items-center gap-2">
           <span id="sink-state" class="text-sm font-bold {% if sink_state == 'RUNNING' %}text-green-600 dark:text-green-400{% elif sink_state == 'PAUSED' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
             {{ sink_state }}
@@ -172,9 +187,14 @@
       </div>
       <div id="sink-tasks" class="px-4 py-2 space-y-1">
         {% for task in sink_tasks %}
-        <div class="flex items-center justify-between text-xs px-2 py-1 rounded {% if task.state == 'RUNNING' %}bg-green-50 dark:bg-green-900/10{% elif task.state == 'PAUSED' %}bg-yellow-50 dark:bg-yellow-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
-          <span class="text-gray-600 dark:text-gray-400">Task {{ task.id }}</span>
-          <span class="font-medium {% if task.state == 'RUNNING' %}text-green-700 dark:text-green-400{% elif task.state == 'PAUSED' %}text-yellow-700 dark:text-yellow-400{% else %}text-red-700 dark:text-red-400{% endif %}">{{ task.state }}</span>
+        <div>
+          <div class="flex items-center justify-between text-xs px-2 py-1 rounded {% if task.state == 'RUNNING' %}bg-green-50 dark:bg-green-900/10{% elif task.state == 'PAUSED' %}bg-yellow-50 dark:bg-yellow-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
+            <span class="text-gray-600 dark:text-gray-400">Task {{ task.id }}</span>
+            <span class="font-medium {% if task.state == 'RUNNING' %}text-green-700 dark:text-green-400{% elif task.state == 'PAUSED' %}text-yellow-700 dark:text-yellow-400{% else %}text-red-700 dark:text-red-400{% endif %}">{{ task.state }}</span>
+          </div>
+          {% if task.state == 'FAILED' and task.trace %}
+          <div class="mt-0.5 px-2 py-1.5 bg-red-50 dark:bg-red-900/10 rounded text-xs font-mono text-red-600 dark:text-red-400 break-all">{{ task.trace|truncatechars:250 }}</div>
+          {% endif %}
         </div>
         {% empty %}
         <p class="text-xs text-gray-400 dark:text-gray-500 italic">No tasks</p>
@@ -1185,10 +1205,17 @@ fetchTableRows();
 
     container.innerHTML = tasks.map(t => {
       const state = t.state || 'UNKNOWN';
-      const trace = t.trace ? ` title="${t.trace.substring(0, 200).replace(/"/g, '&quot;')}"` : '';
-      return `<div class="flex items-center justify-between text-xs px-2 py-1 rounded ${taskBgClass(state)}"${trace}>
-        <span class="text-gray-600 dark:text-gray-400">Task ${t.id}</span>
-        <span class="font-medium ${taskTextClass(state)}">${state}</span>
+      let traceHtml = '';
+      if (state === 'FAILED' && t.trace) {
+        const shortTrace = t.trace.substring(0, 250)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        traceHtml = `<div class="mt-0.5 px-2 py-1.5 bg-red-50 dark:bg-red-900/10 rounded text-xs font-mono text-red-600 dark:text-red-400 break-all">${shortTrace}</div>`;
+      }
+      return `<div>
+        <div class="flex items-center justify-between text-xs px-2 py-1 rounded ${taskBgClass(state)}">
+          <span class="text-gray-600 dark:text-gray-400">Task ${t.id}</span>
+          <span class="font-medium ${taskTextClass(state)}">${state}</span>
+        </div>${traceHtml}
       </div>`;
     }).join('');
   }

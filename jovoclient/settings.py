@@ -514,13 +514,13 @@ DEBEZIUM_CONFIG = {
     # External bootstrap servers (for host machine connections)
     'KAFKA_BOOTSTRAP_SERVERS': os.getenv(
         'KAFKA_BOOTSTRAP_SERVERS',
-        'localhost:9092,localhost:9094,localhost:9096'
+        'localhost:9092'
     ),
 
     # Internal bootstrap servers (for Docker container communication)
     'KAFKA_INTERNAL_SERVERS': os.getenv(
         'KAFKA_INTERNAL_SERVERS',
-        'kafka-1:29092,kafka-2:29092,kafka-3:29092'
+        'kafka-1:29092'
     ),
 
     'SCHEMA_REGISTRY_URL': os.getenv('SCHEMA_REGISTRY_URL', 'http://localhost:8082'),
