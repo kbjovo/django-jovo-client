@@ -744,7 +744,6 @@ let _createSinkWasNew       = false;
 let _createConfigPk         = null;
 let _createProcessingMode   = null;
 let _createBatchInterval    = null;
-let _createSnapshotPollId   = null;   // setInterval ID for batch-mode snapshot polling
 
 // ── Client-side validation (shared between normal and AJAX submit) ───
 function validateCreateForm() {
@@ -912,41 +911,12 @@ async function runCreateProvisionSteps(formData) {
     if (_provisionCancelRequested) { await _doCreateCancel(); return; }
 
     // ── Step 4: Create source connector ─────────────────────────────
-    // Sink is already in the consumer group with known positions — no race with
-    // the broker during the snapshot.
+    // Sink is already in the consumer group with known positions — no race
+    // condition with the broker during the snapshot.
+    // provision/source/ returns immediately for both modes; the snapshot runs
+    // asynchronously in Debezium (we poll below for batch mode).
     const isBatch = _createProcessingMode === 'batch';
-    const sourceLabel = isBatch
-        ? 'Creating source connector (batch mode — waiting for initial snapshot)...'
-        : 'Creating source connector...';
-    addLogEntry('step-source', sourceLabel);
-
-    // Batch mode: poll snapshot progress in the background while provision/source/ blocks.
-    // CDC mode: provision/source/ returns immediately, so no polling needed here.
-    let _snapShown = false;
-    if (isBatch) {
-        _createSnapshotPollId = setInterval(async () => {
-            try {
-                const r    = await fetch(`/connector/${_createConfigPk}/status/`);
-                const data = await r.json();
-                if (!data.success) return;
-                const snap = data.status?.snapshot;
-                const done  = snap?.completed_tables ?? 0;
-                const total = snap?.total_tables     ?? '?';
-                const rows  = (snap?.total_rows_scanned || 0).toLocaleString();
-                const secs  = Math.round(snap?.duration_seconds ?? 0);
-                const msg   = snap?.running
-                    ? `Snapshot: ${done}/${total} tables, ${rows} rows scanned (${secs}s elapsed)`
-                    : 'Waiting for snapshot to start...';
-                if (!_snapShown) {
-                    _snapShown = true;
-                    addLogEntry('step-snap', msg);
-                } else {
-                    const textEl = document.querySelector('#log-entry-step-snap .log-text');
-                    if (textEl) textEl.textContent = msg;
-                }
-            } catch (_) { /* ignore transient network errors */ }
-        }, 10000);
-    }
+    addLogEntry('step-source', isBatch ? 'Creating source connector (batch mode)...' : 'Creating source connector...');
 
     try {
         const r = await fetch(`/connector/${_createConfigPk}/provision/source/`, {
@@ -954,14 +924,10 @@ async function runCreateProvisionSteps(formData) {
         });
         res = await r.json();
     } catch (err) {
-        clearInterval(_createSnapshotPollId); _createSnapshotPollId = null;
         markLogError('step-source', 'Network error creating source connector', err.message);
         showModalError('Network error — check your connection');
         return;
     }
-
-    clearInterval(_createSnapshotPollId); _createSnapshotPollId = null;
-    if (_snapShown) markLogSuccess('step-snap', 'Initial snapshot complete');
 
     if (!res.success) {
         markLogError('step-source', 'Failed to create source connector', res.error);
@@ -972,6 +938,45 @@ async function runCreateProvisionSteps(formData) {
     _createCompletedSteps.push('source_created');
     markLogSuccess('step-source', res.message);
 
+    if (_provisionCancelRequested) { await _doCreateCancel(); return; }
+
+    // ── Step 4b (batch only): poll snapshot → finalize ───────────────
+    // We wait here in the browser so we never block a Gunicorn sync worker.
+    if (isBatch && res.snapshot_pending) {
+        addLogEntry('step-snap', 'Waiting for snapshot to start...');
+
+        const snapDone = await _pollUntilSnapshotComplete();
+
+        if (_provisionCancelRequested) { await _doCreateCancel(); return; }
+
+        if (snapDone) {
+            markLogSuccess('step-snap', 'Initial snapshot complete');
+        } else {
+            markLogWarn('step-snap', 'Snapshot wait timed out — proceeding with finalization');
+        }
+
+        // Post-snapshot: pause connector, add FKs, set Celery schedule (all fast)
+        addLogEntry('step-finalize', 'Setting up batch schedule (pausing connector, adding FKs)...');
+        try {
+            const r = await fetch(`/connector/${_createConfigPk}/provision/batch-finalize/`, {
+                method: 'POST', headers: { 'X-CSRFToken': CSRF },
+            });
+            res = await r.json();
+        } catch (err) {
+            markLogError('step-finalize', 'Network error during batch finalization', err.message);
+            showModalError('Network error — check your connection');
+            return;
+        }
+
+        if (!res.success) {
+            markLogError('step-finalize', 'Batch finalization failed', res.error);
+            showModalError(res.error);
+            return;
+        }
+
+        markLogSuccess('step-finalize', res.message);
+    }
+
     // ── All done ─────────────────────────────────────────────────────
     document.getElementById('provision-modal-title').textContent = 'Connector created successfully!';
     if (!isBatch) {
@@ -980,13 +985,45 @@ async function runCreateProvisionSteps(formData) {
     showModalSuccess(`/connector/${_createConfigPk}/monitor/`);
 }
 
+// ── Snapshot completion poller (batch mode) ───────────────────────────
+// Polls /status/ every 10 s until snapshot.completed is true (or 90 min timeout).
+// Returns true when done, false on timeout. Respects _provisionCancelRequested.
+async function _pollUntilSnapshotComplete() {
+    const MAX_POLLS = 540; // 90 min
+    let hadData = false;
+    for (let i = 0; i < MAX_POLLS; i++) {
+        await new Promise(r => setTimeout(r, 10000));
+        if (_provisionCancelRequested) return false;
+        try {
+            const r    = await fetch(`/connector/${_createConfigPk}/status/`);
+            const data = await r.json();
+            if (!data.success) continue;
+            const snap = data.status?.snapshot;
+            if (snap?.completed) return true;
+            const textEl = document.querySelector('#log-entry-step-snap .log-text');
+            if (snap?.running) {
+                hadData = true;
+                const done  = snap.completed_tables ?? 0;
+                const total = snap.total_tables     ?? '?';
+                const rows  = (snap.total_rows_scanned || 0).toLocaleString();
+                const secs  = Math.round(snap.duration_seconds ?? 0);
+                if (textEl) textEl.textContent =
+                    `Snapshot: ${done}/${total} tables, ${rows} rows scanned (${secs}s elapsed)`;
+            } else if (!snap && hadData) {
+                // MBean deregistered after completion
+                return true;
+            } else if (textEl) {
+                textEl.textContent = 'Waiting for snapshot to start...';
+            }
+        } catch (_) { /* ignore transient errors */ }
+    }
+    return false; // timed out
+}
+
 // ── Cancel handler (overrides modal stub) ────────────────────────────
 async function handleProvisionCancel() {
     if (_provisionCancelLocked) return;
     _provisionCancelRequested = true;
-
-    // Stop any in-progress snapshot poll
-    if (_createSnapshotPollId) { clearInterval(_createSnapshotPollId); _createSnapshotPollId = null; }
 
     // If nothing was started yet, just close
     if (_createCompletedSteps.length === 0) {
@@ -1047,7 +1084,6 @@ document.getElementById('connector-form').addEventListener('submit', async funct
     _createCompletedSteps = [];
     _createSinkWasNew     = false;
     _createConfigPk       = null;
-    if (_createSnapshotPollId) { clearInterval(_createSnapshotPollId); _createSnapshotPollId = null; }
 
     openProvisionModal('Creating Source Connector v{{ next_version }}...');
     const formData = new FormData(this);

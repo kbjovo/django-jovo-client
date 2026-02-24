@@ -2259,6 +2259,58 @@ class ReplicationOrchestrator:
 
         return False, f"Timeout waiting for snapshot after {max_wait_minutes} minutes"
 
+    def finalize_batch_replication(self) -> Tuple[bool, str]:
+        """
+        Post-snapshot finalization steps for batch mode.
+
+        Called by the provision modal AFTER the frontend has polled and confirmed
+        the initial snapshot is complete (rather than blocking a Gunicorn worker).
+
+        Steps: add FKs → pause connector → set up Celery Beat schedule.
+        """
+        import time
+        self._log_info("Finalizing batch replication (post-snapshot)...")
+        try:
+            # 1. Add foreign keys to target tables
+            self._log_info("Adding foreign keys to target tables...")
+            from client.utils.table_creator import add_foreign_keys_to_target
+            try:
+                created, skipped, errors = add_foreign_keys_to_target(self.config)
+                self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
+                if errors:
+                    self._log_warning(f"⚠️ FK errors: {errors}")
+            except Exception as e:
+                self._log_warning(f"⚠️ Could not add foreign keys: {e}")
+
+            # 2. Pause connector so batch schedule controls when it runs
+            self._log_info("Pausing connector for batch scheduling...")
+            success, message = self.pause_connector()
+            if not success:
+                self._log_warning(f"Could not pause connector: {message}")
+                time.sleep(3)
+                success, message = self.pause_connector()
+                if not success:
+                    self._log_warning(f"Retry pause failed: {message}")
+
+            self.config.status = 'active'
+            self.config.is_active = True
+            self.config.connector_state = 'PAUSED'
+            self.config.save()
+
+            # 3. Set up Celery Beat schedule
+            self._log_info("Setting up batch schedule...")
+            success, message = self.setup_batch_schedule()
+            if not success:
+                return False, f"Failed to setup batch schedule: {message}"
+
+            self._log_info(f"✓ Batch replication ready — schedule: every {self.config.batch_interval}")
+            return True, f"Batch schedule set — next run: {self.config.next_batch_run}"
+
+        except Exception as e:
+            error_msg = f"Batch finalization failed: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
     def start_batch_replication(self) -> Tuple[bool, str]:
         """
         Start replication in batch mode.

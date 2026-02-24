@@ -61,6 +61,7 @@ from .views.connector_provision_views import (
     provision_topics,
     provision_source,
     provision_sink,
+    provision_batch_finalize,
     provision_cancel,
     edit_save_settings,
     edit_remove_tables,
@@ -238,6 +239,10 @@ urlpatterns = [
     path('connector/<int:config_pk>/provision/sink/',
          provision_sink,
          name='provision_sink'),
+
+    path('connector/<int:config_pk>/provision/batch-finalize/',
+         provision_batch_finalize,
+         name='provision_batch_finalize'),
 
     path('connector/<int:config_pk>/provision/cancel/',
          provision_cancel,

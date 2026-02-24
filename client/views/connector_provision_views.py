@@ -107,7 +107,12 @@ def provision_source(request, config_pk):
         if replication_config.processing_mode == 'batch':
             from client.replication.orchestrator import ReplicationOrchestrator
             orchestrator = ReplicationOrchestrator(replication_config)
-            success, message = orchestrator.start_batch_replication()
+            # Only create the connector — do NOT wait for snapshot here.
+            # Waiting inside a sync Gunicorn worker causes CRITICAL WORKER TIMEOUT
+            # for large databases (snapshot can take 10–60 min).
+            # The frontend polls /status/ until the snapshot completes, then calls
+            # /provision/batch-finalize/ to run the post-snapshot steps.
+            success, message = orchestrator.start_replication(skip_topic_conflict_check=True)
 
             if not success:
                 replication_config.status = 'error'
@@ -115,14 +120,13 @@ def provision_source(request, config_pk):
                 replication_config.save()
                 return JsonResponse({'success': False, 'error': message})
 
+            snapshot_pending = replication_config.snapshot_mode != 'never'
             return JsonResponse({
                 'success': True,
-                'message': (
-                    f'Source connector created (paused) — '
-                    f'batch schedule: every {replication_config.batch_interval}'
-                ),
+                'message': 'Source connector created — snapshot starting',
                 'processing_mode': 'batch',
                 'batch_interval': replication_config.batch_interval,
+                'snapshot_pending': snapshot_pending,
             })
 
         # ── CDC mode ─────────────────────────────────────────────────────────
@@ -230,6 +234,37 @@ def provision_sink(request, config_pk):
 
     except Exception as e:
         logger.error(f'provision_sink failed for config {config_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def provision_batch_finalize(request, config_pk):
+    """
+    AJAX (batch mode only): Run post-snapshot finalization.
+    Called by the frontend after polling /status/ confirms the initial snapshot
+    is complete. Pauses the connector, adds FKs, and sets the Celery schedule.
+    This keeps the snapshot wait entirely in the browser so it never blocks a
+    Gunicorn worker.
+    """
+    if err := _require_post(request):
+        return err
+
+    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
+
+    try:
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(replication_config)
+        success, message = orchestrator.finalize_batch_replication()
+
+        if not success:
+            return JsonResponse({'success': False, 'error': message})
+
+        return JsonResponse({
+            'success': True,
+            'message': f'Connector ready — batch schedule: every {replication_config.batch_interval}',
+        })
+
+    except Exception as e:
+        logger.error(f'provision_batch_finalize failed for config {config_pk}: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
