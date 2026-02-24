@@ -72,6 +72,19 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             schema = getattr(db_config, 'schema', 'dbo') or 'dbo'
             self._table_prefix = f"{schema}_"
 
+        # Build source_table → target_table lookup from TableMapping.
+        # When a user assigns a custom target name, the sink connector routes that
+        # topic directly to the custom name (not the default {prefix}{source} name).
+        # We must use the same name here so table_exists() checks the right table.
+        from client.models.replication import TableMapping
+        self._table_name_map: Dict[str, str] = {
+            m.source_table: m.target_table
+            for m in replication_config.table_mappings.filter(is_enabled=True)
+            if m.target_table and m.target_table != f"{self._table_prefix}{m.source_table}"
+        }
+        if self._table_name_map:
+            logger.info(f"   Custom table name mappings: {self._table_name_map}")
+
         # Initialize Kafka consumer
         group_id = consumer_group or f'ddl-processor-config-{replication_config.id}'
         self.consumer = Consumer({
@@ -879,11 +892,11 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         """
         Get target table name from source table name.
 
-        Uses the same naming convention as sink connector transforms.
-        Format: {database}_{table} or {schema}_{table}
-
-        Prefix is cached in __init__ to avoid repeated attribute traversal.
+        Uses custom TableMapping.target_table when set (matches sink connector routing).
+        Falls back to the default {database}_{table} / {schema}_{table} convention.
         """
+        if source_table in self._table_name_map:
+            return self._table_name_map[source_table]
         return f"{self._table_prefix}{source_table}"
 
     def _extract_length(self, type_str: str) -> Optional[int]:

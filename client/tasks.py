@@ -9,6 +9,7 @@ from django.conf import settings
 from client.models.replication import ReplicationConfig
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from client.utils.database_utils import get_database_engine
+from client.utils.notification_utils import maybe_send_alert, resolve_alert
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,19 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
             raise self.retry(countdown=60 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
             logger.error(f"Max retries exceeded for DDL processing config {config_id}")
+            try:
+                _cfg = ReplicationConfig.objects.get(id=config_id)
+                maybe_send_alert(
+                    _cfg, 'ddl_task_failed',
+                    subject=f"DDL Task Failed: {_cfg.connector_name or f'config #{config_id}'}",
+                    body=(
+                        f"DDL processing task for config #{config_id} exhausted all retries.\n"
+                        f"Last error: {str(e)}"
+                    ),
+                    connector_name=_cfg.connector_name or '',
+                )
+            except Exception:
+                pass
         return {'success': False, 'error': str(e)}
 
     finally:
@@ -333,6 +347,12 @@ def monitor_connectors():
 
         if not is_healthy:
             logger.error(f"Kafka Connect is unhealthy: {error}")
+            maybe_send_alert(
+                None, 'kafka_down',
+                subject="Kafka Connect Unreachable",
+                body=f"Kafka Connect health check failed.\nError: {error}",
+                connector_name='kafka_connect',
+            )
             return {'success': False, 'error': error}
 
         # Get all active replication configs
@@ -374,6 +394,25 @@ def monitor_connectors():
                         config.status = 'error'
                         config.save()
 
+            # Check DLQ for messages
+            dlq_count = _get_dlq_count(config)
+            if dlq_count > 0:
+                maybe_send_alert(
+                    config, 'dlq_messages',
+                    subject=f"DLQ Has {dlq_count} Messages: {config.connector_name}",
+                    body=(
+                        f"{dlq_count} unprocessed message(s) found in the Dead Letter Queue.\n"
+                        f"Topic: client_{config.client_database.client_id}.dlq\n"
+                        f"These records failed to be written to the target database."
+                    ),
+                    connector_name=config.connector_name or '',
+                )
+            else:
+                resolve_alert(config, 'dlq_messages', connector_name=config.connector_name or '')
+
+        # Kafka Connect is reachable — resolve any open kafka_down alert
+        resolve_alert(None, 'kafka_down', connector_name='kafka_connect')
+
         if issues:
             logger.warning(f"Found {len(issues)} connector issues: {issues}")
         else:
@@ -389,6 +428,33 @@ def monitor_connectors():
     except Exception as e:
         logger.error(f"Error monitoring connectors: {e}")
         return {'success': False, 'error': str(e)}
+
+
+def _get_dlq_count(config) -> int:
+    """Return the number of messages in the DLQ topic for the given config. Returns 0 on error."""
+    try:
+        from confluent_kafka import Consumer, TopicPartition
+        client_id = config.client_database.client_id
+        dlq_topic = f"client_{client_id}.dlq"
+        kafka_servers = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
+        consumer = Consumer({
+            'bootstrap.servers': kafka_servers,
+            'group.id': 'jovo-dlq-inspector',
+            'auto.offset.reset': 'earliest',
+        })
+        meta = consumer.list_topics(topic=dlq_topic, timeout=5)
+        topic_meta = meta.topics.get(dlq_topic)
+        total = 0
+        if topic_meta and not topic_meta.error:
+            for partition_id in topic_meta.partitions:
+                low, high = consumer.get_watermark_offsets(
+                    TopicPartition(dlq_topic, partition_id), timeout=3
+                )
+                total += max(0, high - low)
+        consumer.close()
+        return total
+    except Exception:
+        return 0
 
 
 @shared_task
@@ -566,6 +632,9 @@ def run_batch_sync(self, replication_config_id: int):
         config.next_batch_run = timezone.now() + timedelta(seconds=interval_seconds)
         config.save()
 
+        # Resolve any open missed-schedule alert now that the batch ran successfully
+        resolve_alert(config, 'batch_missed', connector_name=config.connector_name or '')
+
         logger.info(f"=" * 60)
         logger.info(f"✓ BATCH SYNC COMPLETED")
         logger.info(f"  Duration: {int(total_elapsed)} seconds")
@@ -599,6 +668,19 @@ def run_batch_sync(self, replication_config_id: int):
             raise self.retry(countdown=60 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
             logger.error(f"Max retries exceeded for batch sync")
+            try:
+                _cfg = ReplicationConfig.objects.get(id=replication_config_id)
+                maybe_send_alert(
+                    _cfg, 'batch_task_failed',
+                    subject=f"Batch Sync Task Failed: {_cfg.connector_name or f'config #{replication_config_id}'}",
+                    body=(
+                        f"Batch sync task for config #{replication_config_id} exhausted all retries.\n"
+                        f"Last error: {str(e)}"
+                    ),
+                    connector_name=_cfg.connector_name or '',
+                )
+            except Exception:
+                pass
 
         return {'success': False, 'error': str(e)}
 
@@ -683,5 +765,46 @@ def add_foreign_keys_task(self, replication_config_id: int):
         return {'success': False, 'error': str(e)}
 
 
+# ============================================================================
+# ALERT TASKS
+# ============================================================================
+
+@shared_task
+def check_batch_schedules():
+    """
+    Periodic task: Alert if a batch connector has missed its scheduled run.
+
+    Grace period is 10 minutes — a batch job is considered missed only if
+    next_batch_run is more than 10 minutes in the past with no completion.
+    Runs every 10 minutes (configured in celery.py beat schedule).
+    """
+    overdue_configs = ReplicationConfig.objects.filter(
+        is_active=True,
+        processing_mode='batch',
+        next_batch_run__isnull=False,
+        next_batch_run__lt=timezone.now() - timedelta(minutes=10),
+    ).select_related('client_database__client')
+
+    alerted = 0
+    for config in overdue_configs:
+        overdue_by = timezone.now() - config.next_batch_run
+        overdue_minutes = int(overdue_by.total_seconds() // 60)
+        sent = maybe_send_alert(
+            config, 'batch_missed',
+            subject=f"Batch Missed Schedule: {config.connector_name or f'config #{config.id}'}",
+            body=(
+                f"Batch sync is overdue by {overdue_minutes} minutes.\n"
+                f"Scheduled: {config.next_batch_run.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"The Celery task may not have run. Check the Celery worker and beat scheduler."
+            ),
+            connector_name=config.connector_name or '',
+        )
+        if sent:
+            alerted += 1
+
+    if alerted:
+        logger.warning(f"check_batch_schedules: alerted {alerted} overdue batch connector(s)")
+
+    return {'checked': overdue_configs.count(), 'alerted': alerted}
 
 

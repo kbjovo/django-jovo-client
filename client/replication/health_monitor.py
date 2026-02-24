@@ -9,6 +9,7 @@ Uses JDBC Sink Connectors for data replication (no Celery-based consumers).
 
 import logging
 from celery import shared_task
+from client.utils.notification_utils import maybe_send_alert, resolve_alert
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,8 @@ def monitor_replication_health():
             overall_health = status['overall']
             source_connector_health = status['source_connector']['healthy']
             sink_connector_health = status['sink_connector']['healthy']
+            source_state = status['source_connector']['state']
+            sink_state = status['sink_connector']['state']
 
             logger.info(f"[{config.connector_name}] Health: {overall_health} "
                        f"(Source: {'✓' if source_connector_health else '✗'}, "
@@ -66,13 +69,23 @@ def monitor_replication_health():
                 if config.status == 'error':
                     config.status = 'active'
                     config.save(update_fields=['status'])
+                # Resolve any open alerts — connector is back to healthy
+                resolve_alert(config, 'source_failed',     connector_name=config.connector_name or '')
+                resolve_alert(config, 'connector_missing', connector_name=config.connector_name or '')
+                resolve_alert(config, 'sink_failed',       connector_name=config.sink_connector_name or '')
+
             elif overall_health == 'degraded':
                 degraded_count += 1
+                # Send alerts for specific failure states
+                _check_and_alert(config, source_state, sink_state)
                 # Try to fix degraded state
                 if _try_fix_degraded(config, status):
                     fixed_count += 1
+
             else:
                 failed_count += 1
+                # Send alerts for specific failure states
+                _check_and_alert(config, source_state, sink_state)
                 # Update config to error state
                 config.status = 'error'
                 config.save()
@@ -90,6 +103,38 @@ def monitor_replication_health():
     logger.info(f"  Failed: {failed_count}")
     logger.info(f"  Auto-fixed: {fixed_count}")
     logger.info("=" * 60)
+
+
+def _check_and_alert(config, source_state, sink_state):
+    """
+    Fire transition-based alert emails for FAILED / NOT_FOUND connector states.
+    maybe_send_alert ensures only one email per incident (no spam).
+    """
+    src = config.connector_name or ''
+    snk = config.sink_connector_name or ''
+
+    if source_state == 'FAILED':
+        maybe_send_alert(
+            config, 'source_failed',
+            subject=f"Source Connector FAILED: {src}",
+            body=f"Source connector entered FAILED state. Check Kafka Connect logs for details.",
+            connector_name=src,
+        )
+    elif source_state == 'NOT_FOUND':
+        maybe_send_alert(
+            config, 'connector_missing',
+            subject=f"Connector Missing: {src}",
+            body="Source connector not found in Kafka Connect. It may have been deleted externally.",
+            connector_name=src,
+        )
+
+    if sink_state == 'FAILED' and snk:
+        maybe_send_alert(
+            config, 'sink_failed',
+            subject=f"Sink Connector FAILED: {snk}",
+            body=f"Sink connector entered FAILED state. Check Kafka Connect logs for details.",
+            connector_name=snk,
+        )
 
 
 def _try_fix_degraded(config, status):

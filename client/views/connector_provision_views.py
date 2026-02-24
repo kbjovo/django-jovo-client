@@ -408,6 +408,10 @@ def edit_remove_tables(request, config_pk):
         return JsonResponse({'success': False, 'error': f'Invalid JSON: {parse_err}'}, status=400)
 
     tables_to_remove = body.get('tables', [])
+    target_action = body.get('target_action', 'truncate')
+    if target_action not in ('truncate', 'drop'):
+        target_action = 'truncate'
+
     if not tables_to_remove:
         return JsonResponse({'success': False, 'error': 'No tables specified for removal'}, status=400)
 
@@ -424,16 +428,16 @@ def edit_remove_tables(request, config_pk):
     try:
         from client.replication.orchestrator import ReplicationOrchestrator
         orchestrator = ReplicationOrchestrator(replication_config)
-        success, message = orchestrator.remove_tables(tables_to_remove)
+        success, message, steps = orchestrator.remove_tables(tables_to_remove, target_action=target_action)
 
         if not success:
-            return JsonResponse({'success': False, 'error': message})
+            return JsonResponse({'success': False, 'error': message, 'steps': steps})
 
-        return JsonResponse({'success': True, 'message': message})
+        return JsonResponse({'success': True, 'message': message, 'steps': steps})
 
     except Exception as e:
         logger.error(f'edit_remove_tables failed for config {config_pk}: {e}', exc_info=True)
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+        return JsonResponse({'success': False, 'error': str(e), 'steps': []}, status=500)
 
 
 def edit_add_tables(request, config_pk):
@@ -480,19 +484,19 @@ def edit_add_tables(request, config_pk):
     try:
         from client.replication.orchestrator import ReplicationOrchestrator
         orchestrator = ReplicationOrchestrator(replication_config)
-        success, message = orchestrator.add_tables(
+        success, message, steps = orchestrator.add_tables(
             tables_to_add,
             target_table_names=target_names or None,
         )
 
         if not success:
-            return JsonResponse({'success': False, 'error': message})
+            return JsonResponse({'success': False, 'error': message, 'steps': steps})
 
-        return JsonResponse({'success': True, 'message': message})
+        return JsonResponse({'success': True, 'message': message, 'steps': steps})
 
     except Exception as e:
         logger.error(f'edit_add_tables failed for config {config_pk}: {e}', exc_info=True)
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+        return JsonResponse({'success': False, 'error': str(e), 'steps': []}, status=500)
 
 
 def edit_cancel(request, config_pk):
@@ -517,7 +521,7 @@ def edit_cancel(request, config_pk):
     try:
         from client.replication.orchestrator import ReplicationOrchestrator
         orchestrator = ReplicationOrchestrator(replication_config)
-        success, message = orchestrator.remove_tables(added_tables)
+        success, message, _ = orchestrator.remove_tables(added_tables)
 
         if success:
             return JsonResponse({'success': True, 'message': f'Reverted table additions: {message}'})

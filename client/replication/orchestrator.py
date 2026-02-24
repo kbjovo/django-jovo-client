@@ -987,13 +987,13 @@ class ReplicationOrchestrator:
     # Table Management (Add/Remove)
     # ==========================================
 
-    def remove_tables(self, table_names: list) -> Tuple[bool, str]:
+    def remove_tables(self, table_names: list, target_action: str = 'truncate') -> Tuple[bool, str, list]:
         """
         Remove tables from a connector with full cleanup.
 
         This will:
         1. Delete Kafka topics for the removed tables
-        2. Truncate target tables in target database
+        2. Truncate or drop target tables in target database
         3. Disable table mappings in database
         4. Update source connector config
         5. Restart source connector
@@ -1001,14 +1001,18 @@ class ReplicationOrchestrator:
 
         Args:
             table_names: List of source table names to remove
+            target_action: 'truncate' (keep structure, clear data) or 'drop' (remove table entirely)
 
         Returns:
-            (success, message)
+            (success, message, steps) where steps is a list of
+            {'id': str, 'status': 'ok'|'warn'|'error', 'msg': str} dicts
         """
         self._log_info("=" * 60)
         self._log_info("REMOVING TABLES FROM CONNECTOR")
         self._log_info(f"Tables to remove: {', '.join(table_names)}")
         self._log_info("=" * 60)
+
+        steps = []
 
         try:
             db_config = self.config.client_database
@@ -1021,7 +1025,7 @@ class ReplicationOrchestrator:
             )
 
             if not table_mappings_to_remove.exists():
-                return False, "No matching enabled tables found to remove"
+                return False, "No matching enabled tables found to remove", steps
 
             # ========================================
             # STEP 1: Delete Kafka topics for removed tables
@@ -1042,33 +1046,54 @@ class ReplicationOrchestrator:
             deleted_topics = []
             for topic in topics_to_delete:
                 try:
-                    success, error = self.topic_manager.delete_topic(topic)
-                    if success:
+                    topic_ok, topic_err = self.topic_manager.delete_topic(topic)
+                    if topic_ok:
                         deleted_topics.append(topic)
                         self._log_info(f"  ✓ Deleted topic: {topic}")
                     else:
-                        self._log_warning(f"  ⚠️ Failed to delete topic {topic}: {error}")
+                        self._log_warning(f"  ⚠️ Failed to delete topic {topic}: {topic_err}")
                 except Exception as e:
                     self._log_warning(f"  ⚠️ Error deleting topic {topic}: {e}")
 
             self._log_info(f"✓ Deleted {len(deleted_topics)}/{len(topics_to_delete)} topics")
+            steps.append({
+                'id': 'topics',
+                'status': 'ok' if len(deleted_topics) == len(topics_to_delete) else 'warn',
+                'msg': f"{len(deleted_topics)}/{len(topics_to_delete)} Kafka topic(s) deleted",
+            })
 
             # ========================================
-            # STEP 2: Truncate target tables
+            # STEP 2: Truncate or drop target tables
             # ========================================
-            self._log_info("STEP 2/5: Truncating target database tables...")
+            action_word = 'dropped' if target_action == 'drop' else 'truncated'
+            self._log_info(f"STEP 2/5: {action_word.capitalize()} target database tables...")
 
             from client.models.database import ClientDatabase
             target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
 
             if target_db:
-                success, message = truncate_tables_for_mappings(target_db, table_mappings_to_remove)
-                if success:
-                    self._log_info(f"✓ {message}")
+                if target_action == 'drop':
+                    from client.utils.table_creator import drop_tables_for_mappings
+                    tbl_ok, tbl_msg = drop_tables_for_mappings(target_db, table_mappings_to_remove)
                 else:
-                    self._log_warning(f"⚠️ {message}")
+                    tbl_ok, tbl_msg = truncate_tables_for_mappings(target_db, table_mappings_to_remove)
+
+                if tbl_ok:
+                    self._log_info(f"✓ {tbl_msg}")
+                else:
+                    self._log_warning(f"⚠️ {tbl_msg}")
+                steps.append({
+                    'id': 'target_tbl',
+                    'status': 'ok' if tbl_ok else 'warn',
+                    'msg': f"Target table(s) {action_word}" + (f" — {tbl_msg}" if not tbl_ok else ""),
+                })
             else:
                 self._log_warning("⚠️ No target database configured - skipping table truncate")
+                steps.append({
+                    'id': 'target_tbl',
+                    'status': 'warn',
+                    'msg': "No target database configured — skipped",
+                })
 
             # ========================================
             # STEP 3: Disable table mappings in database
@@ -1077,6 +1102,11 @@ class ReplicationOrchestrator:
 
             disabled_count = table_mappings_to_remove.update(is_enabled=False)
             self._log_info(f"✓ Disabled {disabled_count} table mappings")
+            steps.append({
+                'id': 'mappings',
+                'status': 'ok',
+                'msg': f"{disabled_count} table mapping(s) disabled",
+            })
 
             # Check if any tables remain
             remaining_tables = list(
@@ -1085,7 +1115,7 @@ class ReplicationOrchestrator:
             )
 
             if not remaining_tables:
-                return False, "Cannot remove all tables. Delete the connector instead."
+                return False, "Cannot remove all tables. Delete the connector instead.", steps
 
             # ========================================
             # STEP 4: Update and restart source connector
@@ -1101,23 +1131,37 @@ class ReplicationOrchestrator:
                 tables_whitelist=remaining_tables
             )
 
-            success, error = self.connector_manager.update_connector_config(
+            cfg_ok, cfg_err = self.connector_manager.update_connector_config(
                 self.config.connector_name,
                 source_config
             )
-            if not success:
-                # Re-pause if we resumed it
+            if not cfg_ok:
                 self._re_pause_if_batch_mode(was_paused)
-                return False, f"Failed to update source connector: {error}"
+                steps.append({
+                    'id': 'src_config',
+                    'status': 'error',
+                    'msg': f"Failed to update source connector: {cfg_err}",
+                })
+                return False, f"Failed to update source connector: {cfg_err}", steps
 
             self._log_info(f"✓ Source connector updated with {len(remaining_tables)} tables")
+            steps.append({
+                'id': 'src_config',
+                'status': 'ok',
+                'msg': f"Source connector updated ({len(remaining_tables)} table(s) remaining)",
+            })
 
             # Restart source connector
-            success, error = self.connector_manager.restart_connector(self.config.connector_name)
-            if success:
+            src_restart_ok, src_restart_err = self.connector_manager.restart_connector(self.config.connector_name)
+            if src_restart_ok:
                 self._log_info(f"✓ Source connector restarted")
             else:
-                self._log_warning(f"⚠️ Source connector restart failed: {error}")
+                self._log_warning(f"⚠️ Source connector restart failed: {src_restart_err}")
+            steps.append({
+                'id': 'src_restart',
+                'status': 'ok' if src_restart_ok else 'warn',
+                'msg': 'Source connector restarted' if src_restart_ok else f"Source connector restart warning: {src_restart_err}",
+            })
 
             # ========================================
             # STEP 5: Restart sink connector
@@ -1125,13 +1169,18 @@ class ReplicationOrchestrator:
             self._log_info("STEP 5/6: Restarting sink connector...")
 
             if self.config.sink_connector_name:
-                success, error = self.connector_manager.restart_connector(
+                sink_ok, sink_err = self.connector_manager.restart_connector(
                     self.config.sink_connector_name
                 )
-                if success:
+                if sink_ok:
                     self._log_info(f"✓ Sink connector restarted")
                 else:
-                    self._log_warning(f"⚠️ Sink connector restart failed: {error}")
+                    self._log_warning(f"⚠️ Sink connector restart failed: {sink_err}")
+                steps.append({
+                    'id': 'sink_restart',
+                    'status': 'ok' if sink_ok else 'warn',
+                    'msg': 'Sink connector restarted' if sink_ok else f"Sink connector restart warning: {sink_err}",
+                })
 
             # ========================================
             # STEP 6: Re-pause for batch mode (if applicable)
@@ -1146,7 +1195,8 @@ class ReplicationOrchestrator:
             self._log_info("✓ TABLES REMOVED SUCCESSFULLY")
             self._log_info("=" * 60)
 
-            return True, f"Removed {len(table_names)} tables (topics deleted, target tables dropped)"
+            action_past = 'dropped' if target_action == 'drop' else 'truncated'
+            return True, f"Removed {len(table_names)} table(s) (topics deleted, target tables {action_past})", steps
 
         except Exception as e:
             error_msg = f"Failed to remove tables: {str(e)}"
@@ -1154,9 +1204,9 @@ class ReplicationOrchestrator:
             # Ensure we re-pause on error if we resumed
             if 'was_paused' in locals() and was_paused:
                 self._re_pause_if_batch_mode(was_paused)
-            return False, error_msg
+            return False, error_msg, steps
 
-    def add_tables(self, table_names: list, target_table_names: dict = None) -> Tuple[bool, str]:
+    def add_tables(self, table_names: list, target_table_names: dict = None) -> Tuple[bool, str, list]:
         """
         Add tables to a connector with incremental snapshot.
 
@@ -1178,6 +1228,7 @@ class ReplicationOrchestrator:
         self._log_info(f"Tables to add: {', '.join(table_names)}")
         self._log_info("=" * 60)
 
+        steps = []
         db_config = self.config.client_database
         client = db_config.client
         added_tables = []
@@ -1261,20 +1312,33 @@ class ReplicationOrchestrator:
                     failed_tables.append(table_name)
 
             if not added_tables:
-                return False, "No tables could be added"
+                return False, "No tables could be added", steps
 
             self._log_info(f"✓ Created mappings for {len(added_tables)} tables")
+            steps.append({
+                'id': 'mappings',
+                'status': 'ok' if not failed_tables else 'warn',
+                'msg': (
+                    f"{len(added_tables)} table mapping(s) created"
+                    + (f" ({len(failed_tables)} failed: {', '.join(failed_tables)})" if failed_tables else "")
+                ),
+            })
 
             # ========================================
             # STEP 2: Create Kafka topics
             # ========================================
             self._log_info("STEP 2/6: Creating Kafka topics...")
 
-            success, message = self.create_topics()
-            if success:
-                self._log_info(f"✓ {message}")
+            topics_ok, topics_msg = self.create_topics()
+            if topics_ok:
+                self._log_info(f"✓ {topics_msg}")
             else:
-                self._log_warning(f"⚠️ Topic creation warning: {message}")
+                self._log_warning(f"⚠️ Topic creation warning: {topics_msg}")
+            steps.append({
+                'id': 'topics',
+                'status': 'ok' if topics_ok else 'warn',
+                'msg': topics_msg or "Kafka topics created",
+            })
 
             # Note: Target tables are auto-created by sink connector (schema.evolution=basic)
 
@@ -1297,14 +1361,19 @@ class ReplicationOrchestrator:
                 tables_whitelist=all_tables
             )
 
-            success, error = self.connector_manager.update_connector_config(
+            add_cfg_ok, add_cfg_err = self.connector_manager.update_connector_config(
                 self.config.connector_name,
                 source_config
             )
-            if not success:
+            if not add_cfg_ok:
                 # Re-pause if we resumed it
                 self._re_pause_if_batch_mode(was_paused)
-                return False, f"Failed to update source connector: {error}"
+                steps.append({
+                    'id': 'src_config',
+                    'status': 'error',
+                    'msg': f"Failed to update source connector: {add_cfg_err}",
+                })
+                return False, f"Failed to update source connector: {add_cfg_err}", steps
 
             self._log_info(f"✓ Source connector config updated with {len(all_tables)} tables")
 
@@ -1322,6 +1391,7 @@ class ReplicationOrchestrator:
             time.sleep(3)  # Initial wait for restart
 
             # Poll for RUNNING state with longer timeout
+            connector_ready = False
             for i in range(20):  # Up to 10 seconds
                 time.sleep(0.5)
                 exists, status_data = self.connector_manager.get_connector_status(self.config.connector_name)
@@ -1332,9 +1402,25 @@ class ReplicationOrchestrator:
                         self._log_info("  → Connector RUNNING, waiting for schema refresh...")
                         time.sleep(3)  # Extra time for schema history to be read
                         self._log_info("✓ Connector ready with updated schema")
+                        connector_ready = True
                         break
                     elif state == 'FAILED':
-                        return False, f"Connector failed after config update"
+                        steps.append({
+                            'id': 'src_config',
+                            'status': 'error',
+                            'msg': "Connector failed after config update",
+                        })
+                        return False, "Connector failed after config update", steps
+
+            steps.append({
+                'id': 'src_config',
+                'status': 'ok' if connector_ready else 'warn',
+                'msg': (
+                    f"Source connector updated ({len(all_tables)} table(s)), schema refreshed"
+                    if connector_ready else
+                    f"Source connector updated ({len(all_tables)} table(s)) — schema refresh timed out"
+                ),
+            })
 
             # ========================================
             # STEP 4: Send incremental snapshot signal
@@ -1350,9 +1436,19 @@ class ReplicationOrchestrator:
             )
 
             self._log_info(f"✓ Signal sent via {method} - ID: {signal_id}")
+            steps.append({
+                'id': 'signal_sent',
+                'status': 'ok',
+                'msg': f"Snapshot signal sent via {method} (ID: {signal_id})",
+            })
 
             # Verify incremental snapshot started via Jolokia
-            self._verify_incremental_snapshot_started(signal_id)
+            recv_result = self._verify_incremental_snapshot_started(signal_id)
+            steps.append({
+                'id': 'signal_recv',
+                'status': 'ok' if recv_result['confirmed'] else 'warn',
+                'msg': recv_result['msg'],
+            })
 
             # ========================================
             # STEP 5: Restart sink connector
@@ -1371,9 +1467,19 @@ class ReplicationOrchestrator:
                         target_db
                     )
                     self._log_info("✓ Sink connector config updated with new table transforms")
+                    steps.append({
+                        'id': 'sink',
+                        'status': 'ok',
+                        'msg': "Sink connector updated with new table transforms",
+                    })
                 else:
                     self.connector_manager.restart_connector(self.config.sink_connector_name)
                     self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
+                    steps.append({
+                        'id': 'sink',
+                        'status': 'ok',
+                        'msg': "Sink connector restarted",
+                    })
 
             # ========================================
             # STEP 5.5: Add foreign keys to new target tables
@@ -1388,8 +1494,21 @@ class ReplicationOrchestrator:
                 self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
                 if errors:
                     self._log_warning(f"⚠️ FK errors: {errors}")
+                steps.append({
+                    'id': 'fk',
+                    'status': 'ok' if not errors else 'warn',
+                    'msg': (
+                        f"Foreign keys: {created} created, {skipped} skipped"
+                        + (f" ({len(errors)} error(s))" if errors else "")
+                    ),
+                })
             except Exception as e:
                 self._log_warning(f"⚠️ Could not add foreign keys: {e}")
+                steps.append({
+                    'id': 'fk',
+                    'status': 'warn',
+                    'msg': f"Foreign key setup skipped: {e}",
+                })
 
             # ========================================
             # STEP 6: Handle batch mode state
@@ -1412,13 +1531,13 @@ class ReplicationOrchestrator:
             self._log_info("✓ TABLES ADDED SUCCESSFULLY")
             self._log_info("=" * 60)
 
-            result_msg = f"Added {len(added_tables)} tables via {method} signal (ID: {signal_id})"
+            result_msg = f"Added {len(added_tables)} table(s) via {method} signal (ID: {signal_id})"
             if was_paused:
                 result_msg += " | Connector running for snapshot (will pause on next schedule)"
             if failed_tables:
                 result_msg += f" | {len(failed_tables)} failed: {', '.join(failed_tables)}"
 
-            return True, result_msg
+            return True, result_msg, steps
 
         except Exception as e:
             error_msg = f"Failed to add tables: {str(e)}"
@@ -1426,7 +1545,7 @@ class ReplicationOrchestrator:
             # On error, re-pause if we resumed (snapshot didn't start)
             if 'was_paused' in locals() and was_paused:
                 self._re_pause_if_batch_mode(was_paused)
-            return False, error_msg
+            return False, error_msg, steps
 
     # ==========================================
     # Jolokia Snapshot Verification
@@ -1434,12 +1553,14 @@ class ReplicationOrchestrator:
 
     def _verify_incremental_snapshot_started(
         self, signal_id: str, grace_seconds: int = 10, polls: int = 3
-    ):
+    ) -> dict:
         """Best-effort check that an incremental snapshot actually started.
 
         Polls Jolokia a few times after the signal is sent. Logs a
         confirmation or warning but never fails the overall operation —
         the signal may simply be delayed or Jolokia may be unavailable.
+
+        Returns a dict: {'confirmed': bool, 'tables': int|None, 'msg': str}
         """
         import time
 
@@ -1455,19 +1576,22 @@ class ReplicationOrchestrator:
             )
             if progress and progress.get('running'):
                 tables = progress.get('total_tables', '?')
+                msg = f"Signal received — {tables} table(s) queued for snapshot"
                 self._log_info(
                     f"  Incremental snapshot confirmed running "
                     f"(signal {signal_id}): {tables} tables queued"
                 )
-                return
+                return {'confirmed': True, 'tables': tables, 'msg': msg}
 
             if attempt < polls - 1:
                 time.sleep(5)
 
+        msg = "Could not confirm snapshot via Jolokia — may still be starting"
         self._log_warning(
             f"  Could not confirm incremental snapshot via Jolokia "
             f"(signal {signal_id}) — may still be starting"
         )
+        return {'confirmed': False, 'tables': None, 'msg': msg}
 
     # ==========================================
     # Status and Health

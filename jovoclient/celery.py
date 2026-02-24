@@ -42,6 +42,11 @@ app.conf.beat_schedule = {
         'task': 'client.tasks.sync_postgresql_schemas',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
     },
+    # Alert: batch connectors that missed their scheduled run (every 10 minutes)
+    'check-batch-schedules': {
+        'task': 'client.tasks.check_batch_schedules',
+        'schedule': crontab(minute='*/10'),
+    },
 }
 
 app.conf.task_routes = {

@@ -212,6 +212,15 @@ ADMINS = [
     ('Dev Team', 'dev@example.com'),
 ]
 
+# Alert recipients for connector/replication failure notifications.
+# Set ALERT_EMAIL_RECIPIENTS in .env as a comma-separated list of addresses.
+# Example: ALERT_EMAIL_RECIPIENTS=admin@example.com,ops@example.com
+ALERT_EMAIL_RECIPIENTS = [
+    r.strip() for r in os.getenv('ALERT_EMAIL_RECIPIENTS', '').split(',') if r.strip()
+]
+# Set ALERT_EMAILS_ENABLED=False in .env to silence all alert emails (e.g. local dev).
+ALERT_EMAILS_ENABLED = os.getenv('ALERT_EMAILS_ENABLED', 'True').strip().lower() not in ('false', '0', 'no')
+
 # Environment identifier
 ENVIRONMENT = 'development'  # or 'staging', 'production'
 

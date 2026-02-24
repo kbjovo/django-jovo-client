@@ -9,6 +9,7 @@ from django.core.mail import send_mail, EmailMultiAlternatives
 from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
+from django.utils import timezone
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -350,7 +351,126 @@ Details:
         
         logger.info(f"Batch notification sent with {len(notifications)} items")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to send batch notification: {str(e)}")
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alert helpers (transition-based: one email per incident)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_alert_recipients() -> List[str]:
+    """
+    Return the list of alert email recipients.
+
+    Reads ALERT_EMAIL_RECIPIENTS from settings (set from .env).
+    Falls back to settings.ADMINS if not configured.
+    """
+    recipients = getattr(settings, 'ALERT_EMAIL_RECIPIENTS', [])
+    if recipients:
+        return recipients
+    # Fallback
+    return [admin[1] for admin in getattr(settings, 'ADMINS', [])]
+
+
+def maybe_send_alert(
+    replication_config,
+    event_type: str,
+    subject: str,
+    body: str,
+    connector_name: str = '',
+) -> bool:
+    """
+    Send an alert email only if no open incident exists for this
+    (replication_config, event_type, connector_name) combination.
+
+    Creates a NotificationLog entry on send so repeat polls don't re-email.
+    Returns True if an email was sent.
+    """
+    if not getattr(settings, 'ALERT_EMAILS_ENABLED', True):
+        return False
+
+    from client.models.replication import NotificationLog
+
+    try:
+        open_exists = NotificationLog.objects.filter(
+            replication_config=replication_config,
+            event_type=event_type,
+            connector_name=connector_name,
+            resolved_at__isnull=True,
+        ).exists()
+
+        if open_exists:
+            return False  # Incident already open — don't send again
+
+        recipients = get_alert_recipients()
+        if not recipients:
+            logger.warning(f"[alerts] No recipients configured — skipping {event_type}")
+            return False
+
+        # Build context lines for the email body
+        context_lines = []
+        if replication_config is not None:
+            try:
+                db = replication_config.client_database
+                context_lines.append(f"Client:    {db.client.name}")
+                context_lines.append(f"Database:  {db.connection_name}")
+            except Exception:
+                pass
+        if connector_name:
+            context_lines.append(f"Connector: {connector_name}")
+        context_lines.append(f"Time:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        full_body = "\n".join(context_lines) + "\n\n" + body
+
+        sent = send_mail(
+            subject=f"[JOVO ALERT] {subject}",
+            message=full_body,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@example.com'),
+            recipient_list=recipients,
+            fail_silently=True,
+        )
+
+        if sent:
+            NotificationLog.objects.create(
+                replication_config=replication_config,
+                event_type=event_type,
+                connector_name=connector_name,
+                message=full_body,
+            )
+            logger.info(f"[alerts] Sent '{event_type}' alert for connector '{connector_name}'")
+            return True
+
+        logger.warning(f"[alerts] send_mail returned 0 for '{event_type}' — check SMTP config")
+        return False
+
+    except Exception as e:
+        logger.error(f"[alerts] Failed to send alert '{event_type}': {e}")
+        return False
+
+
+def resolve_alert(
+    replication_config,
+    event_type: str,
+    connector_name: str = '',
+) -> None:
+    """
+    Mark open alert incidents as resolved so the next failure triggers a fresh email.
+    Silent — no email sent on resolution.
+    """
+    from client.models.replication import NotificationLog
+
+    try:
+        updated = NotificationLog.objects.filter(
+            replication_config=replication_config,
+            event_type=event_type,
+            connector_name=connector_name,
+            resolved_at__isnull=True,
+        ).update(resolved_at=timezone.now())
+
+        if updated:
+            logger.info(f"[alerts] Resolved '{event_type}' incident for connector '{connector_name}'")
+    except Exception as e:
+        logger.error(f"[alerts] Failed to resolve alert '{event_type}': {e}")

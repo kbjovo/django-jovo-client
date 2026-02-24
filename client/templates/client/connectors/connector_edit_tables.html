@@ -565,13 +565,30 @@
             </svg>
             <span class="text-gray-600 dark:text-gray-400"><span class="font-medium text-yellow-700 dark:text-yellow-300">Connector will restart</span> — replication will briefly pause</span>
           </div>
-          <div class="flex items-start gap-2">
-            <svg class="w-3.5 h-3.5 mt-0.5 text-orange-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-              <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/>
-            </svg>
-            <span class="text-gray-600 dark:text-gray-400"><span class="font-medium text-orange-700 dark:text-orange-300">Target tables will be truncated</span> — data cleared, structure kept</span>
-          </div>
         </div>
+      </div>
+
+      <hr class="border-gray-200 dark:border-gray-700">
+
+      <!-- Target table action choice -->
+      <div class="space-y-1.5">
+        <p class="font-semibold text-gray-700 dark:text-gray-300">Target table action:</p>
+        <label class="flex items-start gap-2 cursor-pointer select-none group">
+          <input type="radio" name="remove-target-action" value="truncate" checked
+                 class="mt-0.5 text-yellow-600 focus:ring-yellow-500 shrink-0">
+          <span class="text-gray-600 dark:text-gray-400">
+            <span class="font-medium text-orange-700 dark:text-orange-300">Truncate</span>
+            — clear data, keep table structure
+          </span>
+        </label>
+        <label class="flex items-start gap-2 cursor-pointer select-none group">
+          <input type="radio" name="remove-target-action" value="drop"
+                 class="mt-0.5 text-red-600 focus:ring-red-500 shrink-0">
+          <span class="text-gray-600 dark:text-gray-400">
+            <span class="font-medium text-red-700 dark:text-red-400">Drop table</span>
+            — remove table entirely from target database
+          </span>
+        </label>
       </div>
 
       <hr class="border-gray-200 dark:border-gray-700">
@@ -673,9 +690,30 @@ function showEditFormBanner(message, type) {
     if (pageHeader) pageHeader.insertAdjacentElement('afterend', banner);
 }
 
+// ── Sub-step animator ────────────────────────────────────────────────
+// Animates through the steps array returned by the backend, creating
+// individual spinning log entries then marking each ok/warn/error.
+async function animateSubSteps(subSteps, idPrefix) {
+    const DELAY = 130;
+    for (const step of (subSteps || [])) {
+        const fullId = `${idPrefix}-${step.id}`;
+        addLogEntry(fullId, step.msg);
+        await new Promise(r => setTimeout(r, DELAY));
+        if (step.status === 'ok') {
+            markLogSuccess(fullId, step.msg);
+        } else if (step.status === 'warn') {
+            markLogWarn(fullId, step.msg);
+        } else {
+            markLogError(fullId, step.msg);
+        }
+        await new Promise(r => setTimeout(r, DELAY));
+    }
+}
+
 // ── AJAX edit step runner ────────────────────────────────────────────
-async function runEditProvisionSteps(steps, removeTables, addTables, targetNames, settingsFormData) {
+async function runEditProvisionSteps(steps, removeTables, addTables, targetNames, settingsFormData, targetAction) {
     const CSRF = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    targetAction = targetAction || 'truncate';
 
     // ── Optional Step: Save settings ─────────────────────────────────
     if (steps.includes('save_settings')) {
@@ -708,7 +746,8 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
 
     // ── Optional Step: Remove tables ─────────────────────────────────
     if (steps.includes('remove_tables')) {
-        addLogEntry('step-remove', `Removing ${removeTables.length} table(s) — connector will restart...`);
+        const actionLabel = targetAction === 'drop' ? 'dropping' : 'truncating';
+        addLogEntry('step-remove', `Removing ${removeTables.length} table(s) (${actionLabel} target) — connector will restart...`);
 
         // Lock cancel: table removal is irreversible
         lockProvisionCancel('Cannot cancel after table removal starts');
@@ -718,7 +757,7 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
             const r = await fetch(`/connector/${_editConfigPk}/edit/remove-tables/`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
-                body: JSON.stringify({ tables: removeTables }),
+                body: JSON.stringify({ tables: removeTables, target_action: targetAction }),
             });
             res = await r.json();
         } catch (err) {
@@ -727,6 +766,9 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
             return;
         }
 
+        // Animate sub-steps regardless of success/failure
+        await animateSubSteps(res.steps, 'step-remove');
+
         if (!res.success) {
             markLogError('step-remove', 'Failed to remove tables', res.error);
             showModalError(res.error);
@@ -734,7 +776,7 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
         }
 
         _editCompletedSteps.push('remove_tables');
-        markLogSuccess('step-remove', res.message);
+        markLogSuccess('step-remove', `Removed ${removeTables.length} table(s)`);
     }
 
     // ── Optional Step: Add tables ─────────────────────────────────────
@@ -756,6 +798,9 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
             return;
         }
 
+        // Animate sub-steps regardless of success/failure
+        await animateSubSteps(res.steps, 'step-add');
+
         if (!res.success) {
             markLogError('step-add', 'Failed to add tables', res.error);
             showModalError(res.error);
@@ -763,7 +808,7 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
         }
 
         _editCompletedSteps.push('add_tables');
-        markLogSuccess('step-add', res.message);
+        markLogSuccess('step-add', `Added ${addTables.length} table(s)`);
 
         if (_provisionCancelRequested) { await _doEditCancel(); return; }
     }
@@ -1255,6 +1300,9 @@ function showRemoveTablesModal(tables) {
 
         checkbox.checked = false;
         proceedBtn.disabled = true;
+        // Reset radio to default (truncate) each time modal opens
+        const radios = modal.querySelectorAll('input[name="remove-target-action"]');
+        radios.forEach(r => { r.checked = r.value === 'truncate'; });
         modal.classList.remove('hidden');
 
         const cleanup = () => {
@@ -1265,8 +1313,12 @@ function showRemoveTablesModal(tables) {
             backdrop.removeEventListener('click', onCancel);
         };
         const onCheckbox = () => { proceedBtn.disabled = !checkbox.checked; };
-        const onProceed  = () => { cleanup(); resolve(true); };
-        const onCancel   = () => { cleanup(); resolve(false); };
+        const onProceed  = () => {
+            const chosen = modal.querySelector('input[name="remove-target-action"]:checked');
+            cleanup();
+            resolve({ confirmed: true, targetAction: chosen ? chosen.value : 'truncate' });
+        };
+        const onCancel   = () => { cleanup(); resolve(null); };
 
         checkbox.addEventListener('change', onCheckbox);
         proceedBtn.addEventListener('click', onProceed);
@@ -1331,9 +1383,11 @@ document.getElementById('edit-connector-form').addEventListener('submit', async 
     }
 
     // ── Removal confirmation ───────────────────────────────────────────
+    let targetAction = 'truncate';
     if (removeTables.length > 0) {
-        const confirmed = await showRemoveTablesModal(removeTables);
-        if (!confirmed) return;
+        const modalResult = await showRemoveTablesModal(removeTables);
+        if (!modalResult) return;
+        targetAction = modalResult.targetAction;
     }
 
     // ── Collect target names for tables being added ───────────────────
@@ -1357,7 +1411,7 @@ document.getElementById('edit-connector-form').addEventListener('submit', async 
     _editAddedTables    = [];
 
     openProvisionModal('Updating Connector...');
-    await runEditProvisionSteps(steps, removeTables, addTables, targetNames, settingsFormData);
+    await runEditProvisionSteps(steps, removeTables, addTables, targetNames, settingsFormData, targetAction);
 });
 
 // Initialize warnings on page load

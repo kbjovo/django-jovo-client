@@ -201,6 +201,49 @@ class ConnectorHistory(models.Model):
         return True
 
 
+class NotificationLog(models.Model):
+    """
+    Tracks open alert incidents for transition-based email notifications.
+
+    An entry with resolved_at=NULL means an alert has been sent and the
+    incident is still active. Once the issue is resolved, resolved_at is set
+    so the next failure will trigger a fresh email.
+    """
+
+    EVENT_CHOICES = [
+        ('source_failed',     'Source Connector Failed'),
+        ('sink_failed',       'Sink Connector Failed'),
+        ('connector_missing', 'Connector Missing'),
+        ('kafka_down',        'Kafka Connect Unreachable'),
+        ('batch_task_failed', 'Batch Task Failed'),
+        ('ddl_task_failed',   'DDL Task Failed'),
+        ('dlq_messages',      'DLQ Has Messages'),
+        ('batch_missed',      'Batch Missed Schedule'),
+    ]
+
+    replication_config = models.ForeignKey(
+        'ReplicationConfig',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='notification_logs',
+    )
+    event_type = models.CharField(max_length=50, choices=EVENT_CHOICES)
+    connector_name = models.CharField(max_length=255, blank=True, default='')
+    message = models.TextField(blank=True)
+    sent_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['connector_name', 'event_type', 'resolved_at']),
+        ]
+
+    def __str__(self):
+        status = 'open' if self.resolved_at is None else 'resolved'
+        return f"[{status}] {self.event_type} — {self.connector_name}"
+
+
 class ReplicationConfig(models.Model):
     """Configuration for replication from source DB to client's database"""
 

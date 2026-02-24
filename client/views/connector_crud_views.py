@@ -630,7 +630,7 @@ def connector_edit_tables(request, config_pk):
                     messages.error(request, "Cannot remove all tables. Delete the connector instead.")
                     return redirect('connector_edit_tables', config_pk=config_pk)
 
-                success, message = orchestrator.remove_tables(tables_to_remove)
+                success, message, _ = orchestrator.remove_tables(tables_to_remove)
                 if success:
                     messages.success(request, message)
                 else:
@@ -667,7 +667,7 @@ def connector_edit_tables(request, config_pk):
                             return redirect('connector_edit_tables', config_pk=config_pk)
                         custom_target_names[table_name] = custom
 
-                success, message = orchestrator.add_tables(
+                success, message, _ = orchestrator.add_tables(
                     tables_to_add,
                     target_table_names=custom_target_names or None,
                 )
