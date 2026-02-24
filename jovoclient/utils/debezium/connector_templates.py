@@ -205,6 +205,8 @@ def get_mysql_connector_config(
         # when running multiple source connectors for the same database with different table sets
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.client_{client.id}_db_{db_config.id}_v_{version or 0}",
+        # Only store DDL for captured tables — prevents crashes from DDL on unmonitored tables in the binlog
+        "schema.history.internal.store.only.captured.tables.ddl": "true",
 
         # Snapshot mode - use from replication_config if provided, otherwise use parameter
         "snapshot.mode": replication_config.snapshot_mode if replication_config and hasattr(replication_config, 'snapshot_mode') else snapshot_mode,
