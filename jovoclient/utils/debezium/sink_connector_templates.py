@@ -197,6 +197,10 @@ def get_mysql_sink_connector_config(
         "consumer.override.max.poll.records": str(replication_config.sink_max_poll_records) if replication_config and hasattr(replication_config, 'sink_max_poll_records') else "5000",
         # Permanent: generous offset flush timeout to prevent "Commit of offsets timed out" during snapshot
         "offset.flush.timeout.ms": "60000",
+        # Prevent "Timeout expired before position could be determined" when the broker is under
+        # heavy write load during the initial snapshot. The default is 60 s; 120 s gives the broker
+        # more headroom to respond to ListOffsets / position() requests for new partitions.
+        "consumer.override.default.api.timeout.ms": "120000",
         # Permanent: 50MB fetch buffer per partition
         "consumer.override.fetch.max.bytes": "52428800",
 
@@ -339,6 +343,10 @@ def get_postgresql_sink_connector_config(
         "consumer.override.max.poll.records": str(replication_config.sink_max_poll_records) if replication_config and hasattr(replication_config, 'sink_max_poll_records') else "5000",
         # Permanent: generous offset flush timeout to prevent "Commit of offsets timed out" during snapshot
         "offset.flush.timeout.ms": "60000",
+        # Prevent "Timeout expired before position could be determined" when the broker is under
+        # heavy write load during the initial snapshot. The default is 60 s; 120 s gives the broker
+        # more headroom to respond to ListOffsets / position() requests for new partitions.
+        "consumer.override.default.api.timeout.ms": "120000",
         # Permanent: 50MB fetch buffer per partition
         "consumer.override.fetch.max.bytes": "52428800",
 

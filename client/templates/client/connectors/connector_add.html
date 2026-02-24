@@ -739,11 +739,12 @@ document.addEventListener('input', function(e) {
 
 // ── Provision modal state ────────────────────────────────────────────
 const MAX_TABLES_PER_CONNECTOR = {{ max_tables_per_connector }};
-let _createCompletedSteps = [];
-let _createSinkWasNew     = false;
-let _createConfigPk       = null;
-let _createProcessingMode = null;
-let _createBatchInterval  = null;
+let _createCompletedSteps   = [];
+let _createSinkWasNew       = false;
+let _createConfigPk         = null;
+let _createProcessingMode   = null;
+let _createBatchInterval    = null;
+let _createSnapshotPollId   = null;   // setInterval ID for batch-mode snapshot polling
 
 // ── Client-side validation (shared between normal and AJAX submit) ───
 function validateCreateForm() {
@@ -880,35 +881,12 @@ async function runCreateProvisionSteps(formData) {
 
     if (_provisionCancelRequested) { await _doCreateCancel(); return; }
 
-    // ── Step 3: Create source connector ─────────────────────────────
-    const isBatch = _createProcessingMode === 'batch';
-    const sourceLabel = isBatch
-        ? 'Creating source connector (batch mode, will start paused)...'
-        : 'Creating source connector...';
-    addLogEntry('step-source', sourceLabel);
-    try {
-        const r = await fetch(`/connector/${_createConfigPk}/provision/source/`, {
-            method: 'POST', headers: { 'X-CSRFToken': CSRF },
-        });
-        res = await r.json();
-    } catch (err) {
-        markLogError('step-source', 'Network error creating source connector', err.message);
-        showModalError('Network error — check your connection');
-        return;
-    }
-
-    if (!res.success) {
-        markLogError('step-source', 'Failed to create source connector', res.error);
-        showModalError(res.error);
-        return;
-    }
-
-    _createCompletedSteps.push('source_created');
-    markLogSuccess('step-source', res.message);
-
-    if (_provisionCancelRequested) { await _doCreateCancel(); return; }
-
-    // ── Step 4: Configure sink connector ────────────────────────────
+    // ── Step 3: Configure sink connector (BEFORE source) ─────────────
+    // Creating the sink while topics are still empty means ListOffsets returns
+    // instantly (offset 0). If we created the sink after the source, the broker
+    // would be under heavy snapshot write-load and the position determination
+    // could time out (TimeoutException: 60 000 ms expired before position could
+    // be determined).
     addLogEntry('step-sink', 'Configuring sink connector (auto-creates target tables)...');
     try {
         const r = await fetch(`/connector/${_createConfigPk}/provision/sink/`, {
@@ -931,9 +909,74 @@ async function runCreateProvisionSteps(formData) {
     _createCompletedSteps.push('sink_provisioned');
     markLogSuccess('step-sink', res.message);
 
+    if (_provisionCancelRequested) { await _doCreateCancel(); return; }
+
+    // ── Step 4: Create source connector ─────────────────────────────
+    // Sink is already in the consumer group with known positions — no race with
+    // the broker during the snapshot.
+    const isBatch = _createProcessingMode === 'batch';
+    const sourceLabel = isBatch
+        ? 'Creating source connector (batch mode — waiting for initial snapshot)...'
+        : 'Creating source connector...';
+    addLogEntry('step-source', sourceLabel);
+
+    // Batch mode: poll snapshot progress in the background while provision/source/ blocks.
+    // CDC mode: provision/source/ returns immediately, so no polling needed here.
+    let _snapShown = false;
+    if (isBatch) {
+        _createSnapshotPollId = setInterval(async () => {
+            try {
+                const r    = await fetch(`/connector/${_createConfigPk}/status/`);
+                const data = await r.json();
+                if (!data.success) return;
+                const snap = data.status?.snapshot;
+                const done  = snap?.completed_tables ?? 0;
+                const total = snap?.total_tables     ?? '?';
+                const rows  = (snap?.total_rows_scanned || 0).toLocaleString();
+                const secs  = Math.round(snap?.duration_seconds ?? 0);
+                const msg   = snap?.running
+                    ? `Snapshot: ${done}/${total} tables, ${rows} rows scanned (${secs}s elapsed)`
+                    : 'Waiting for snapshot to start...';
+                if (!_snapShown) {
+                    _snapShown = true;
+                    addLogEntry('step-snap', msg);
+                } else {
+                    const textEl = document.querySelector('#log-entry-step-snap .log-text');
+                    if (textEl) textEl.textContent = msg;
+                }
+            } catch (_) { /* ignore transient network errors */ }
+        }, 10000);
+    }
+
+    try {
+        const r = await fetch(`/connector/${_createConfigPk}/provision/source/`, {
+            method: 'POST', headers: { 'X-CSRFToken': CSRF },
+        });
+        res = await r.json();
+    } catch (err) {
+        clearInterval(_createSnapshotPollId); _createSnapshotPollId = null;
+        markLogError('step-source', 'Network error creating source connector', err.message);
+        showModalError('Network error — check your connection');
+        return;
+    }
+
+    clearInterval(_createSnapshotPollId); _createSnapshotPollId = null;
+    if (_snapShown) markLogSuccess('step-snap', 'Initial snapshot complete');
+
+    if (!res.success) {
+        markLogError('step-source', 'Failed to create source connector', res.error);
+        showModalError(res.error);
+        return;
+    }
+
+    _createCompletedSteps.push('source_created');
+    markLogSuccess('step-source', res.message);
+
     // ── All done ─────────────────────────────────────────────────────
     document.getElementById('provision-modal-title').textContent = 'Connector created successfully!';
-    addLogNote('Connector is initialising — initial snapshot may take a few minutes.', 'info');
+    if (!isBatch) {
+        addLogNote('Connector is initialising — initial snapshot may take a few minutes.', 'info');
+    }
     showModalSuccess(`/connector/${_createConfigPk}/monitor/`);
 }
 
@@ -941,6 +984,9 @@ async function runCreateProvisionSteps(formData) {
 async function handleProvisionCancel() {
     if (_provisionCancelLocked) return;
     _provisionCancelRequested = true;
+
+    // Stop any in-progress snapshot poll
+    if (_createSnapshotPollId) { clearInterval(_createSnapshotPollId); _createSnapshotPollId = null; }
 
     // If nothing was started yet, just close
     if (_createCompletedSteps.length === 0) {
@@ -1001,6 +1047,7 @@ document.getElementById('connector-form').addEventListener('submit', async funct
     _createCompletedSteps = [];
     _createSinkWasNew     = false;
     _createConfigPk       = null;
+    if (_createSnapshotPollId) { clearInterval(_createSnapshotPollId); _createSnapshotPollId = null; }
 
     openProvisionModal('Creating Source Connector v{{ next_version }}...');
     const formData = new FormData(this);
