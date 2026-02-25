@@ -572,7 +572,7 @@ KAFKA_CONNECT_CONFIG = {
 # Dead Letter Queue (DLQ) settings for handling failed records
 # When enabled, failed records go to a .dlq topic instead of crashing the connector
 SINK_CONNECTOR_CONFIG = {
-    'ERRORS_TOLERANCE': os.getenv('SINK_ERRORS_TOLERANCE', 'all'),  # 'none' or 'all'
+    'ERRORS_TOLERANCE': os.getenv('SINK_ERRORS_TOLERANCE', 'none'),  # 'none' or 'all'
     'DLQ_ENABLED': os.getenv('SINK_DLQ_ENABLED', 'true').lower() in ('true', '1', 'yes'),
     'DLQ_REPLICATION_FACTOR': int(os.getenv('SINK_DLQ_REPLICATION_FACTOR', '3')),
     'DLQ_CONTEXT_HEADERS': os.getenv('SINK_DLQ_CONTEXT_HEADERS', 'true').lower() in ('true', '1', 'yes'),

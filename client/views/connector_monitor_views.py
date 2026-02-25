@@ -110,7 +110,6 @@ def connector_live_metrics_api(request, config_pk):
     AJAX endpoint for live connector metrics, polled every ~10s by the monitor page.
     Returns:
       - streaming: Jolokia JMX streaming metrics (lag, throughput, queue utilisation)
-      - dlq: Dead Letter Queue message count via Kafka Admin
       - config_diff: Live connector config vs stored model values
     """
     try:
@@ -147,34 +146,7 @@ def connector_live_metrics_api(request, config_pk):
         except Exception as e:
             result['streaming'] = {'available': False, 'error': str(e)}
 
-        # ── 2. DLQ message count via confluent_kafka consumer ──────────────
-        try:
-            from confluent_kafka import Consumer, TopicPartition
-            from django.conf import settings as django_settings
-            kafka_servers = django_settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
-            dlq_topic = f"client_{database.client.id}.dlq"
-            consumer = Consumer({
-                'bootstrap.servers': kafka_servers,
-                'group.id': 'jovo-dlq-inspector',
-                'auto.offset.reset': 'earliest',
-            })
-            meta = consumer.list_topics(topic=dlq_topic, timeout=5)
-            topic_meta = meta.topics.get(dlq_topic)
-            if topic_meta and not topic_meta.error:
-                total = 0
-                for partition_id in topic_meta.partitions:
-                    low, high = consumer.get_watermark_offsets(
-                        TopicPartition(dlq_topic, partition_id), timeout=3
-                    )
-                    total += max(0, high - low)
-                result['dlq'] = {'available': True, 'topic': dlq_topic, 'count': total}
-            else:
-                result['dlq'] = {'available': True, 'topic': dlq_topic, 'count': 0}
-            consumer.close()
-        except Exception as e:
-            result['dlq'] = {'available': False, 'error': str(e)}
-
-        # ── 3. Live config diff (Kafka Connect REST vs stored model) ───────
+        # ── 2. Live config diff (Kafka Connect REST vs stored model) ───────
         try:
             from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
             manager = DebeziumConnectorManager()
@@ -347,4 +319,82 @@ def connector_fk_apply_api(request, config_pk):
         })
     except Exception as e:
         logger.error(f'FK apply failed for config {config_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def database_fk_preview_api(request, database_pk):
+    """
+    AJAX GET endpoint returning a preview of FK constraints aggregated across
+    ALL source connectors for a given target database (ClientDatabase).
+    Read-only — does not create anything.
+    """
+    try:
+        from client.models.database import ClientDatabase
+        database = get_object_or_404(ClientDatabase, pk=database_pk)
+        configs = list(database.replication_configs.all())
+
+        from client.utils.table_creator import preview_foreign_keys
+
+        aggregate = {
+            'has_any_fks': False,
+            'summary': {
+                'tables_total': 0,
+                'tables_created': 0,
+                'tables_missing': 0,
+                'fk_will_create': 0,
+                'fk_already_exists': 0,
+                'fk_cannot_create': 0,
+                'fk_table_not_ready': 0,
+            },
+            'tables': [],
+        }
+
+        for config in configs:
+            result = preview_foreign_keys(config)
+            if result.get('has_any_fks'):
+                aggregate['has_any_fks'] = True
+            for key in aggregate['summary']:
+                aggregate['summary'][key] += result.get('summary', {}).get(key, 0)
+            for table in result.get('tables', []):
+                table['connector_name'] = config.connector_name
+                aggregate['tables'].append(table)
+
+        return JsonResponse({'success': True, **aggregate})
+    except Exception as e:
+        logger.error(f'DB FK preview failed for database {database_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def database_fk_apply_api(request, database_pk):
+    """
+    AJAX POST endpoint that applies FK constraints across ALL source connectors
+    for a given target database (ClientDatabase).
+    """
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        from client.models.database import ClientDatabase
+        database = get_object_or_404(ClientDatabase, pk=database_pk)
+        configs = list(database.replication_configs.all())
+
+        from client.utils.table_creator import add_foreign_keys_to_target
+
+        total_created = 0
+        total_skipped = 0
+        all_errors = []
+
+        for config in configs:
+            created, skipped, errors = add_foreign_keys_to_target(config)
+            total_created += created
+            total_skipped += skipped
+            all_errors.extend(errors)
+
+        return JsonResponse({
+            'success': True,
+            'created': total_created,
+            'skipped': total_skipped,
+            'errors': all_errors,
+        })
+    except Exception as e:
+        logger.error(f'DB FK apply failed for database {database_pk}: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)

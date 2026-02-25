@@ -16,8 +16,21 @@
     <div class="flex gap-2">
         <a href="{% url 'client_detail' client.pk %}?tab=databases"
            class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
-            <- Back to Client
+            &larr; Back to Client
         </a>
+        {% if source_connectors %}
+        <button
+            data-preview-url="{% url 'database_fk_preview_api' database.pk %}"
+            data-apply-url="{% url 'database_fk_apply_api' database.pk %}"
+            data-db-name="{{ database.connection_name }}"
+            onclick="openFKModal(this)"
+            class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm transition">
+            <svg class="w-4 h-4 mr-2 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+            </svg>
+            Foreign Keys
+        </button>
+        {% endif %}
         {% if can_add_connector %}
         <a href="{% url 'connector_add' database.pk %}"
            class="inline-flex items-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition">
@@ -45,9 +58,9 @@
 
 <!-- Source Connectors -->
 {% if source_connectors %}
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700">
         <!-- Table Header -->
-        <div class="bg-gray-100 dark:bg-gray-700 px-4 py-3 border-b border-gray-200 dark:border-gray-600">
+        <div class="bg-gray-100 dark:bg-gray-700 px-4 py-3 border-b border-gray-200 dark:border-gray-600 rounded-t-lg">
             <div class="grid grid-cols-12 gap-4 items-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                 <div class="col-span-3">Connector Name</div>
                 <div class="col-span-1 text-center">Mode</div>
@@ -59,7 +72,7 @@
 
         <!-- Connector Rows -->
         {% for config in source_connectors %}
-        <div class="border-b border-gray-200 dark:border-gray-700 last:border-b-0" x-data="{ expanded: false }">
+        <div class="border-b border-gray-200 dark:border-gray-700 last:border-b-0" x-data="{ expanded: false, menuOpen: false, menuPos: '' }">
             <!-- Main Row -->
             <div class="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
                 <div class="grid grid-cols-12 gap-4 items-center">
@@ -113,7 +126,7 @@
 
                     <!-- Actions -->
                     <div class="col-span-5 flex justify-end items-center gap-1.5">
-                        <!-- Show Tables -->
+                        <!-- Expand (always visible) -->
                         <button @click="expanded = !expanded"
                                 title="Show Tables"
                                 class="p-1.5 text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition">
@@ -121,30 +134,70 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                             </svg>
                         </button>
-                        <!-- Monitor -->
-                        <a href="{% url 'connector_monitor' config.pk %}"
-                           title="Monitor"
-                           class="p-1.5 text-white bg-green-600 hover:bg-green-700 rounded-lg transition">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
-                            </svg>
-                        </a>
-                        <!-- Edit -->
-                        <a href="{% url 'connector_edit_tables' config.pk %}"
-                           title="Edit"
-                           class="p-1.5 text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
-                            </svg>
-                        </a>
-                        <!-- Delete -->
-                        <button @click="deleteModal = { open: true, pk: {{ config.pk }}, name: '{{ config.connector_name }}', tables: {{ config.table_count }}, confirmed: false, truncate: true, drop: false, loading: false }"
-                                title="Delete"
-                                class="p-1.5 text-white bg-red-600 hover:bg-red-700 rounded-lg transition">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                            </svg>
-                        </button>
+
+                        <!-- Individual buttons: visible on md+ -->
+                        <div class="hidden md:flex items-center gap-1.5">
+                            <!-- Monitor -->
+                            <a href="{% url 'connector_monitor' config.pk %}"
+                               title="Monitor"
+                               class="p-1.5 text-white bg-green-600 hover:bg-green-700 rounded-lg transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                                </svg>
+                            </a>
+                            <!-- Edit -->
+                            <a href="{% url 'connector_edit_tables' config.pk %}"
+                               title="Edit"
+                               class="p-1.5 text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                                </svg>
+                            </a>
+                            <!-- Delete -->
+                            <button @click="deleteModal = { open: true, pk: {{ config.pk }}, name: '{{ config.connector_name }}', tables: {{ config.table_count }}, confirmed: false, truncate: true, drop: false, loading: false }"
+                                    title="Delete"
+                                    class="p-1.5 text-white bg-red-600 hover:bg-red-700 rounded-lg transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <!-- Kebab menu: visible below md -->
+                        <div class="flex md:hidden" @click.outside="menuOpen = false">
+                            <button @click="menuOpen = !menuOpen; if(menuOpen){ let r=$el.getBoundingClientRect(); menuPos=`top:${r.bottom+4}px;right:${window.innerWidth-r.right}px` }"
+                                    title="More actions"
+                                    class="p-1.5 text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition">
+                                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M12 6.75a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm0 6.75a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm0 6.75a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/>
+                                </svg>
+                            </button>
+                            <div x-show="menuOpen" x-transition
+                                 :style="menuPos"
+                                 class="fixed w-40 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-50 py-1">
+                                <a href="{% url 'connector_monitor' config.pk %}"
+                                   class="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+                                    <svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                                    </svg>
+                                    Monitor
+                                </a>
+                                <a href="{% url 'connector_edit_tables' config.pk %}"
+                                   class="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
+                                    <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                                    </svg>
+                                    Edit
+                                </a>
+                                <button @click="deleteModal = { open: true, pk: {{ config.pk }}, name: '{{ config.connector_name }}', tables: {{ config.table_count }}, confirmed: false, truncate: true, drop: false, loading: false }; menuOpen = false"
+                                        class="flex items-center gap-2 px-3 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-50 dark:hover:bg-gray-700 transition w-full text-left">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                    </svg>
+                                    Delete
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -219,5 +272,7 @@
 
 {% include "client/connectors/_delete_modal.html" %}
 </div>
+
+{% include "client/connectors/_fk_modal.html" %}
 
 {% endblock %}

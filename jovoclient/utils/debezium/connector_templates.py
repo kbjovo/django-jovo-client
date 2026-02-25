@@ -56,38 +56,7 @@ def format_table_for_connector(db_config: ClientDatabase, table_name: str, schem
 
 
 def generate_server_id(client_id: int, db_id: int, version: int = 0) -> int:
-    """
-    Generate a deterministic MySQL server ID based on client, database IDs, and connector version.
-
-    This ensures:
-    - Unique ID per connector version (no collisions when running multiple versions)
-    - Same ID on restart (no binlog confusion)
-    - Valid range for MySQL (1 to 2^32-1)
-
-    Formula: 100000 + (client_id * 10000) + (db_id * 100) + (version % 100)
-    Supports up to 999 clients with 99 databases each and 99 connector versions.
-    """
     return 100000 + (client_id * 10000) + (db_id * 100) + (version % 100)
-
-
-def build_column_include_list(replication_config: 'ReplicationConfig', db_config: ClientDatabase) -> Optional[str]:
-    """
-    Build column.include.list for Debezium.
-
-    NOTE: Column selection feature has been removed. All columns are now always replicated.
-    This function always returns None, letting Debezium include all columns by default.
-
-    Args:
-        replication_config: ReplicationConfig instance (unused)
-        db_config: ClientDatabase instance (unused)
-
-    Returns:
-        None - all columns are always replicated
-    """
-    # Column selection feature removed - all columns are always replicated
-    logger.info("All columns will be replicated (column selection feature removed)")
-    return None
-
 
 def generate_connector_name(client: Client, db_config: ClientDatabase, version: Optional[int] = None) -> str:
     """

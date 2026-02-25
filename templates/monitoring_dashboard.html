@@ -201,34 +201,59 @@
             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Tasks ({{ item.tasks|length }})</p>
             <div class="space-y-2">
               {% for task in item.tasks %}
-              <div class="flex items-center justify-between p-2 rounded-lg bg-gray-50 dark:bg-gray-700/50">
-                <div class="flex items-center gap-2 min-w-0 flex-1">
-                  {% if task.state == 'RUNNING' %}
-                  <div class="flex-shrink-0 w-2 h-2 rounded-full bg-green-500"></div>
-                  {% elif task.state == 'FAILED' %}
-                  <div class="flex-shrink-0 w-2 h-2 rounded-full bg-red-500"></div>
-                  {% else %}
-                  <div class="flex-shrink-0 w-2 h-2 rounded-full bg-gray-400"></div>
-                  {% endif %}
-                  <span class="text-xs text-gray-700 dark:text-gray-300 font-mono truncate">Task {{ task.id }}</span>
+              <div class="rounded-lg bg-gray-50 dark:bg-gray-700/50 overflow-hidden">
+                <div class="flex items-center justify-between p-2">
+                  <div class="flex items-center gap-2 min-w-0 flex-1">
+                    {% if task.state == 'RUNNING' %}
+                    <div class="flex-shrink-0 w-2 h-2 rounded-full bg-green-500"></div>
+                    {% elif task.state == 'FAILED' %}
+                    <div class="flex-shrink-0 w-2 h-2 rounded-full bg-red-500"></div>
+                    {% else %}
+                    <div class="flex-shrink-0 w-2 h-2 rounded-full bg-gray-400"></div>
+                    {% endif %}
+                    <span class="text-xs text-gray-700 dark:text-gray-300 font-mono truncate">Task {{ task.id }}</span>
+                  </div>
+                  <span class="text-xs font-medium flex-shrink-0
+                    {% if task.state == 'RUNNING' %}text-green-600 dark:text-green-400
+                    {% elif task.state == 'FAILED' %}text-red-600 dark:text-red-400
+                    {% else %}text-gray-600 dark:text-gray-400{% endif %}">
+                    {{ task.state }}
+                  </span>
                 </div>
-                <span class="text-xs font-medium flex-shrink-0
-                  {% if task.state == 'RUNNING' %}text-green-600 dark:text-green-400
-                  {% elif task.state == 'FAILED' %}text-red-600 dark:text-red-400
-                  {% else %}text-gray-600 dark:text-gray-400{% endif %}">
-                  {{ task.state }}
-                </span>
+                {% if task.state == 'FAILED' and task.trace %}
+                <button class="w-full text-left px-2 pb-2 group"
+                        onclick="showErrorModal('Task {{ task.id }} — Error Trace', '{{ task.trace|escapejs }}')">
+                  <p class="text-xs text-red-600 dark:text-red-400 font-mono truncate">{{ task.trace|truncatechars:120 }}</p>
+                  <p class="text-xs text-red-400 dark:text-red-500 mt-0.5 group-hover:underline">Click to view full trace &rarr;</p>
+                </button>
+                {% endif %}
               </div>
               {% endfor %}
             </div>
           </div>
           {% endif %}
 
-          <!-- Error Message -->
+          <!-- Connector-level error trace -->
+          {% if item.connector_trace %}
+          <div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
+            <button class="w-full text-left p-3 group"
+                    onclick="showErrorModal('{{ item.config.connector_name }} — Connector Error', '{{ item.connector_trace|escapejs }}')">
+              <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Connector Error</p>
+              <p class="text-xs text-red-700 dark:text-red-300 font-mono truncate">{{ item.connector_trace|truncatechars:120 }}</p>
+              <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full trace &rarr;</p>
+            </button>
+          </div>
+          {% endif %}
+
+          <!-- Error Message (view-level exception) -->
           {% if item.error_message %}
-          <div class="p-3 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30">
-            <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Error</p>
-            <p class="text-xs text-red-700 dark:text-red-300">{{ item.error_message }}</p>
+          <div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
+            <button class="w-full text-left p-3 group"
+                    onclick="showErrorModal('{{ item.config.connector_name }} — Error', '{{ item.error_message|escapejs }}')">
+              <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Error</p>
+              <p class="text-xs text-red-700 dark:text-red-300 truncate">{{ item.error_message }}</p>
+              <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full error &rarr;</p>
+            </button>
           </div>
           {% endif %}
 
@@ -278,12 +303,62 @@
 
 </div>
 
+<!-- Error Trace Modal -->
+<div id="error-modal" class="fixed inset-0 z-50 hidden" role="dialog" aria-modal="true">
+  <!-- Backdrop -->
+  <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="closeErrorModal()"></div>
+  <!-- Panel -->
+  <div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+    <div class="relative bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col pointer-events-auto">
+      <!-- Header -->
+      <div class="flex items-start justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+        <div class="min-w-0 flex-1 pr-4">
+          <p class="text-xs font-semibold text-red-500 uppercase tracking-wide mb-0.5">Error Details</p>
+          <h3 id="error-modal-title" class="text-sm font-semibold text-gray-900 dark:text-white font-mono break-all"></h3>
+        </div>
+        <button onclick="closeErrorModal()"
+                class="flex-shrink-0 p-1 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+        </button>
+      </div>
+      <!-- Scrollable body -->
+      <div class="overflow-y-auto flex-1 p-5">
+        <pre id="error-modal-body" class="text-xs text-red-700 dark:text-red-300 font-mono whitespace-pre-wrap break-words leading-relaxed"></pre>
+      </div>
+      <!-- Footer -->
+      <div class="flex justify-end px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex-shrink-0">
+        <button onclick="closeErrorModal()"
+                class="px-4 py-2 text-sm font-medium bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg transition">
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Auto-refresh script -->
 <script>
 // Auto-refresh every 30 seconds
 setTimeout(function() {
   window.location.reload();
 }, 30000);
+
+// Error modal
+function showErrorModal(title, trace) {
+  document.getElementById('error-modal-title').textContent = title;
+  document.getElementById('error-modal-body').textContent = trace;
+  document.getElementById('error-modal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+function closeErrorModal() {
+  document.getElementById('error-modal').classList.add('hidden');
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeErrorModal();
+});
 </script>
 
 {% endblock %}

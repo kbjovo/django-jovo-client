@@ -207,15 +207,13 @@ def get_mysql_sink_connector_config(
         # Error handling (configurable via settings)
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
-        "errors.deadletterqueue.topic.name": f"client_{client.id}.dlq",
-        "errors.deadletterqueue.context.headers.enable": "true",
     }
 
     # Apply DLQ settings from Django settings
     from django.conf import settings
     sink_config = getattr(settings, 'SINK_CONNECTOR_CONFIG', {})
 
-    errors_tolerance = sink_config.get('ERRORS_TOLERANCE', 'all')
+    errors_tolerance = sink_config.get('ERRORS_TOLERANCE', 'none')
     dlq_enabled = sink_config.get('DLQ_ENABLED', True)
     dlq_replication_factor = sink_config.get('DLQ_REPLICATION_FACTOR', 3)
     dlq_context_headers = sink_config.get('DLQ_CONTEXT_HEADERS', True)
@@ -359,7 +357,7 @@ def get_postgresql_sink_connector_config(
     from django.conf import settings
     sink_config = getattr(settings, 'SINK_CONNECTOR_CONFIG', {})
 
-    errors_tolerance = sink_config.get('ERRORS_TOLERANCE', 'all')
+    errors_tolerance = sink_config.get('ERRORS_TOLERANCE', 'none')
     dlq_enabled = sink_config.get('DLQ_ENABLED', True)
     dlq_replication_factor = sink_config.get('DLQ_REPLICATION_FACTOR', 3)
     dlq_context_headers = sink_config.get('DLQ_CONTEXT_HEADERS', True)

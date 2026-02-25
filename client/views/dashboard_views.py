@@ -172,9 +172,11 @@ def monitoring_dashboard(request):
                 tasks = status_data.get('tasks', [])
 
                 has_failed_task = any(task.get('state') == 'FAILED' for task in tasks)
+                connector_trace = status_data.get('connector', {}).get('trace', '')
                 monitoring_data.append({
                     'config': config,
                     'connector_state': connector_state,
+                    'connector_trace': connector_trace,
                     'tasks': tasks,
                     'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
                     'error_count': sum(1 for task in tasks if task.get('state') == 'FAILED'),

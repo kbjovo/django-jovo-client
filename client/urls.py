@@ -43,6 +43,8 @@ from .views.connector_monitor_views import (
     connector_table_rows_api,
     connector_fk_preview_api,
     connector_fk_apply_api,
+    database_fk_preview_api,
+    database_fk_apply_api,
 )
 from .views.connector_action_views import (
     connector_pause,
@@ -224,6 +226,16 @@ urlpatterns = [
     path('connector/<int:config_pk>/fk-apply/',
          connector_fk_apply_api,
          name='connector_fk_apply_api'),
+
+    # AJAX: DB-level FK preview — aggregates across all source connectors
+    path('database/<int:database_pk>/fk-preview/',
+         database_fk_preview_api,
+         name='database_fk_preview_api'),
+
+    # AJAX: DB-level FK apply — aggregates across all source connectors
+    path('database/<int:database_pk>/fk-apply/',
+         database_fk_apply_api,
+         name='database_fk_apply_api'),
 
     # ==========================================
     # Provision Step Endpoints (AJAX — modal create flow)
