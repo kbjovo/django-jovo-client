@@ -207,9 +207,11 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         if database_name.lower() in ('mysql', 'information_schema', 'performance_schema', 'sys'):
             return True
 
-        if self.source_db_type == 'mysql' and ddl:
-            # MySQL: Use raw DDL
-            return self._process_mysql_ddl(ddl, table_changes)
+        if self.source_db_type == 'mysql':
+            if ddl:
+                return self._process_mysql_ddl(ddl, table_changes)
+            # MySQL message without raw DDL (e.g. initial schema metadata) — skip gracefully
+            return True
         elif self.source_db_type in ('mssql', 'sqlserver'):
             # SQL Server: Use tableChanges metadata
             return self._process_mssql_schema_change(table_changes)
