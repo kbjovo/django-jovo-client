@@ -41,6 +41,7 @@ from .views.connector_monitor_views import (
     connector_status_api,
     connector_live_metrics_api,
     connector_table_rows_api,
+    connector_dashboard_card_api,
     connector_fk_preview_api,
     connector_fk_apply_api,
     database_fk_preview_api,
@@ -211,6 +212,11 @@ urlpatterns = [
     path('connector/<int:config_pk>/table-rows/',
          connector_table_rows_api,
          name='connector_table_rows_api'),
+
+    # AJAX: Dashboard card update (health + sync status, polled every 15s)
+    path('connector/<int:config_pk>/dashboard-card/',
+         connector_dashboard_card_api,
+         name='connector_dashboard_card_api'),
 
     # AJAX: Live metrics (streaming lag, DLQ count, config diff)
     path('connector/<int:config_pk>/live-metrics/',

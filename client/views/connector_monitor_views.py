@@ -286,6 +286,140 @@ def connector_table_rows_api(request, config_pk):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
+def connector_dashboard_card_api(request, config_pk):
+    """
+    Combined AJAX endpoint for monitoring dashboard card updates.
+    Returns connector card health (state, tasks) + row-level sync status.
+    Polled every 15s per card by the monitoring dashboard.
+    """
+    from django.utils import timezone
+    from datetime import timedelta
+    from client.utils.database_utils import get_database_connection
+    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+
+        # ── 1. Connector state via Debezium ────────────────────────────────
+        try:
+            manager = DebeziumConnectorManager()
+            exists, status_data = manager.get_connector_status(config.connector_name)
+            if exists and status_data:
+                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                tasks = status_data.get('tasks', [])
+                has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
+                card = {
+                    'connector_state': connector_state,
+                    'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
+                    'error_count': sum(1 for t in tasks if t.get('state') == 'FAILED'),
+                    'tasks': tasks,
+                    'connector_trace': status_data.get('connector', {}).get('trace', ''),
+                    'error_message': '',
+                }
+            else:
+                card = {
+                    'connector_state': 'NOT_FOUND',
+                    'is_healthy': False,
+                    'error_count': 1,
+                    'tasks': [],
+                    'connector_trace': '',
+                    'error_message': '',
+                }
+        except Exception as e:
+            card = {
+                'connector_state': 'ERROR',
+                'is_healthy': False,
+                'error_count': 1,
+                'tasks': [],
+                'connector_trace': '',
+                'error_message': str(e),
+            }
+
+        connector_state = card['connector_state']
+
+        # ── 2. Snapshot detection (only connectors created < 24h ago) ──────
+        is_new = (timezone.now() - config.created_at) < timedelta(hours=24)
+        if is_new:
+            try:
+                from client.replication.orchestrator import ReplicationOrchestrator
+                orchestrator = ReplicationOrchestrator(config)
+                snapshot = orchestrator._get_snapshot_progress()
+                if snapshot and snapshot.get('running'):
+                    return JsonResponse({
+                        'success': True,
+                        'card': card,
+                        'sync': {'status': 'snapshot_in_progress'},
+                    })
+            except Exception:
+                pass
+
+        # ── 3. Row count sync status ───────────────────────────────────────
+        try:
+            source_db = config.client_database
+            target_db = source_db.client.get_target_database()
+
+            source_reachable = True
+            try:
+                with get_database_connection(source_db):
+                    pass
+            except Exception:
+                source_reachable = False
+
+            target_reachable = True
+            if target_db:
+                try:
+                    with get_database_connection(target_db):
+                        pass
+                except Exception:
+                    target_reachable = False
+
+            if not source_reachable or not target_db or not target_reachable:
+                sync = {'status': 'unable_to_check'}
+            else:
+                mappings = config.table_mappings.filter(is_enabled=True)
+                total_count = mappings.count()
+
+                if total_count == 0:
+                    sync = {'status': 'unable_to_check'}
+                else:
+                    in_sync_count = 0
+                    for mapping in mappings:
+                        try:
+                            source_count = get_row_count(source_db, mapping.source_table, schema=mapping.source_schema)
+                            target_count = get_row_count(target_db, mapping.target_table, schema=mapping.target_schema or None)
+                            if source_count == target_count:
+                                in_sync_count += 1
+                        except Exception:
+                            pass  # table unreachable counts as not in sync
+
+                    not_synced_count = total_count - in_sync_count
+
+                    if in_sync_count == total_count:
+                        status = 'rows_in_sync'
+                    elif config.processing_mode == 'batch':
+                        status = 'syncing' if connector_state == 'RUNNING' else 'yet_to_be_synced'
+                    else:
+                        status = 'not_synced'
+
+                    sync = {
+                        'status': status,
+                        'in_sync_count': in_sync_count,
+                        'total_count': total_count,
+                        'synced': in_sync_count,
+                        'not_synced': not_synced_count,
+                    }
+
+        except Exception as e:
+            logger.warning(f'Sync status check failed for config {config_pk}: {e}')
+            sync = {'status': 'unable_to_check'}
+
+        return JsonResponse({'success': True, 'card': card, 'sync': sync})
+
+    except Exception as e:
+        logger.error(f'Dashboard card API failed for config {config_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
 def connector_fk_preview_api(request, config_pk):
     """
     AJAX GET endpoint returning a preview of FK constraints for the monitor page.

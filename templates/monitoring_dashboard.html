@@ -36,13 +36,14 @@
   </div>
 
   <!-- Scrollable Content Area -->
-  <div class="flex-1 overflow-y-auto px-6 py-6"
+  <div id="monitoring-root"
+       class="flex-1 overflow-y-auto px-6 py-6"
        x-data="{
          selectedClients: [],
          open: false,
          allItems: [
            {% for item in monitoring_data %}
-           { clientId: {{ item.config.client_database.client.pk }}, healthy: {{ item.is_healthy|yesno:'true,false' }}, errors: {{ item.error_count|default:0 }} }{% if not forloop.last %},{% endif %}
+           { configPk: {{ item.config.pk }}, clientId: {{ item.config.client_database.client.pk }}, healthy: {{ item.is_healthy|yesno:'true,false' }}, errors: {{ item.error_count|default:0 }} }{% if not forloop.last %},{% endif %}
            {% endfor %}
          ],
          toggle(id) {
@@ -132,15 +133,21 @@
     {% if monitoring_data %}
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {% for item in monitoring_data %}
-      <div x-show="isVisible({{ item.config.client_database.client.pk }})" x-transition
+      <div id="card-{{ item.config.pk }}"
+           data-config-pk="{{ item.config.pk }}"
+           data-connector-name="{{ item.config.connector_name|escapejs }}"
+           data-poll-url="{% url 'connector_dashboard_card_api' item.config.pk %}"
+           x-show="isVisible({{ item.config.client_database.client.pk }})" x-transition
            class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
 
         <!-- Header -->
-        <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-700 {% if item.is_healthy %}bg-green-50 dark:bg-green-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
+        <div id="card-header-{{ item.config.pk }}"
+             class="px-5 py-4 border-b border-gray-200 dark:border-gray-700 {% if item.is_healthy %}bg-green-50 dark:bg-green-900/10{% else %}bg-red-50 dark:bg-red-900/10{% endif %}">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3 min-w-0 flex-1">
+
               <!-- Status Indicator -->
-              <div class="flex-shrink-0">
+              <div id="status-icon-{{ item.config.pk }}" class="flex-shrink-0">
                 {% if item.is_healthy %}
                 <div class="w-10 h-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
                   <svg class="w-5 h-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -174,7 +181,8 @@
               {% else %}
               <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">CDC</span>
               {% endif %}
-              <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold
+              <span id="state-badge-{{ item.config.pk }}"
+                    class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold
                 {% if item.connector_state == 'RUNNING' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
                 {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400
                 {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400
@@ -188,6 +196,18 @@
         <!-- Body -->
         <div class="p-5 space-y-4">
 
+          <!-- Sync Status Row -->
+          <div class="flex items-center justify-between">
+            <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Sync Status</p>
+            <div id="sync-value-{{ item.config.pk }}">
+              <!-- Spinner shown until first AJAX response -->
+              <svg class="w-4 h-4 animate-spin text-gray-300 dark:text-gray-600" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+              </svg>
+            </div>
+          </div>
+
           <!-- Database -->
           <div>
             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Database</p>
@@ -195,9 +215,9 @@
             <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.config.client_database.db_type|upper }} @ {{ item.config.client_database.host }}:{{ item.config.client_database.port }}/{{ item.config.client_database.database_name }}</p>
           </div>
 
-          <!-- Tasks -->
-          {% if item.tasks %}
-          <div>
+          <!-- Tasks (updated by AJAX) -->
+          <div id="tasks-section-{{ item.config.pk }}">
+            {% if item.tasks %}
             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Tasks ({{ item.tasks|length }})</p>
             <div class="space-y-2">
               {% for task in item.tasks %}
@@ -230,32 +250,36 @@
               </div>
               {% endfor %}
             </div>
+            {% endif %}
           </div>
-          {% endif %}
 
-          <!-- Connector-level error trace -->
-          {% if item.connector_trace %}
-          <div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
-            <button class="w-full text-left p-3 group"
-                    onclick="showErrorModal('{{ item.config.connector_name }} — Connector Error', '{{ item.connector_trace|escapejs }}')">
-              <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Connector Error</p>
-              <p class="text-xs text-red-700 dark:text-red-300 font-mono truncate">{{ item.connector_trace|truncatechars:120 }}</p>
-              <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full trace &rarr;</p>
-            </button>
+          <!-- Connector-level error trace (updated by AJAX) -->
+          <div id="connector-trace-{{ item.config.pk }}">
+            {% if item.connector_trace %}
+            <div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
+              <button class="w-full text-left p-3 group"
+                      onclick="showErrorModal('{{ item.config.connector_name }} — Connector Error', '{{ item.connector_trace|escapejs }}')">
+                <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Connector Error</p>
+                <p class="text-xs text-red-700 dark:text-red-300 font-mono truncate">{{ item.connector_trace|truncatechars:120 }}</p>
+                <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full trace &rarr;</p>
+              </button>
+            </div>
+            {% endif %}
           </div>
-          {% endif %}
 
-          <!-- Error Message (view-level exception) -->
-          {% if item.error_message %}
-          <div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
-            <button class="w-full text-left p-3 group"
-                    onclick="showErrorModal('{{ item.config.connector_name }} — Error', '{{ item.error_message|escapejs }}')">
-              <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Error</p>
-              <p class="text-xs text-red-700 dark:text-red-300 truncate">{{ item.error_message }}</p>
-              <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full error &rarr;</p>
-            </button>
+          <!-- Error Message (updated by AJAX) -->
+          <div id="error-msg-{{ item.config.pk }}">
+            {% if item.error_message %}
+            <div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
+              <button class="w-full text-left p-3 group"
+                      onclick="showErrorModal('{{ item.config.connector_name }} — Error', '{{ item.error_message|escapejs }}')">
+                <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Error</p>
+                <p class="text-xs text-red-700 dark:text-red-300 truncate">{{ item.error_message }}</p>
+                <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full error &rarr;</p>
+              </button>
+            </div>
+            {% endif %}
           </div>
-          {% endif %}
 
           <!-- Actions -->
           <div class="flex items-center gap-2 pt-2 border-t border-gray-200 dark:border-gray-700">
@@ -338,14 +362,10 @@
   </div>
 </div>
 
-<!-- Auto-refresh script -->
 <script>
-// Auto-refresh every 30 seconds
-setTimeout(function() {
-  window.location.reload();
-}, 30000);
-
+// ─────────────────────────────────────────────────────────────
 // Error modal
+// ─────────────────────────────────────────────────────────────
 function showErrorModal(title, trace) {
   document.getElementById('error-modal-title').textContent = title;
   document.getElementById('error-modal-body').textContent = trace;
@@ -358,6 +378,238 @@ function closeErrorModal() {
 }
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') closeErrorModal();
+});
+
+// ─────────────────────────────────────────────────────────────
+// Sync status badge renderer
+// ─────────────────────────────────────────────────────────────
+function renderSyncBadge(sync) {
+  if (!sync || !sync.status) {
+    return '<span class="text-xs text-gray-400 dark:text-gray-500">—</span>';
+  }
+
+  const s = sync.status;
+
+  if (s === 'snapshot_in_progress') {
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+      <svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+      </svg>
+      Snapshot in progress
+    </span>`;
+  }
+
+  if (s === 'unable_to_check') {
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"></path>
+      </svg>
+      Unable to check
+    </span>`;
+  }
+
+  const n = sync.in_sync_count;
+  const t = sync.total_count;
+  const tip = `${sync.synced} synced · ${sync.not_synced} not synced`;
+
+  if (s === 'rows_in_sync') {
+    return `<span title="${tip}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 cursor-help">
+      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+      </svg>
+      ${n}/${t}
+    </span>`;
+  }
+
+  if (s === 'yet_to_be_synced') {
+    return `<span title="${tip}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 cursor-help">
+      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+      </svg>
+      ${n}/${t}
+    </span>`;
+  }
+
+  if (s === 'syncing') {
+    return `<span title="${tip}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 cursor-help">
+      <svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+      </svg>
+      ${n}/${t}
+    </span>`;
+  }
+
+  if (s === 'not_synced') {
+    return `<span title="${tip}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 cursor-help">
+      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+      </svg>
+      ${n}/${t}
+    </span>`;
+  }
+
+  return '<span class="text-xs text-gray-400 dark:text-gray-500">—</span>';
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tasks section renderer
+// ─────────────────────────────────────────────────────────────
+function renderTasks(tasks) {
+  if (!tasks || tasks.length === 0) return '';
+  const rows = tasks.map(task => {
+    const dotColor = task.state === 'RUNNING' ? 'bg-green-500' : task.state === 'FAILED' ? 'bg-red-500' : 'bg-gray-400';
+    const textColor = task.state === 'RUNNING' ? 'text-green-600 dark:text-green-400' : task.state === 'FAILED' ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-400';
+    const traceHtml = (task.state === 'FAILED' && task.trace) ? `
+      <button class="w-full text-left px-2 pb-2 group" onclick="showErrorModal('Task ${task.id} \u2014 Error Trace', ${JSON.stringify(task.trace)})">
+        <p class="text-xs text-red-600 dark:text-red-400 font-mono truncate">${task.trace.substring(0, 120)}</p>
+        <p class="text-xs text-red-400 dark:text-red-500 mt-0.5 group-hover:underline">Click to view full trace \u2192</p>
+      </button>` : '';
+    return `<div class="rounded-lg bg-gray-50 dark:bg-gray-700/50 overflow-hidden">
+      <div class="flex items-center justify-between p-2">
+        <div class="flex items-center gap-2 min-w-0 flex-1">
+          <div class="flex-shrink-0 w-2 h-2 rounded-full ${dotColor}"></div>
+          <span class="text-xs text-gray-700 dark:text-gray-300 font-mono truncate">Task ${task.id}</span>
+        </div>
+        <span class="text-xs font-medium flex-shrink-0 ${textColor}">${task.state}</span>
+      </div>${traceHtml}
+    </div>`;
+  }).join('');
+  return `<p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Tasks (${tasks.length})</p>
+    <div class="space-y-2">${rows}</div>`;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Card DOM updater
+// ─────────────────────────────────────────────────────────────
+function applyCardUpdate(pk, data) {
+  const { card, sync } = data;
+
+  // Header background
+  const header = document.getElementById(`card-header-${pk}`);
+  if (header) {
+    header.className = 'px-5 py-4 border-b border-gray-200 dark:border-gray-700 ' +
+      (card.is_healthy ? 'bg-green-50 dark:bg-green-900/10' : 'bg-red-50 dark:bg-red-900/10');
+  }
+
+  // Status icon
+  const iconEl = document.getElementById(`status-icon-${pk}`);
+  if (iconEl) {
+    if (card.is_healthy) {
+      iconEl.innerHTML = `<div class="w-10 h-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
+        <svg class="w-5 h-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+        </svg>
+      </div>`;
+    } else {
+      iconEl.innerHTML = `<div class="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+        <svg class="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+        </svg>
+      </div>`;
+    }
+  }
+
+  // State badge
+  const badgeEl = document.getElementById(`state-badge-${pk}`);
+  if (badgeEl) {
+    const st = card.connector_state;
+    let cls = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ';
+    if (st === 'RUNNING') cls += 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
+    else if (st === 'FAILED' || st === 'ERROR') cls += 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+    else if (st === 'PAUSED') cls += 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400';
+    else cls += 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
+    badgeEl.className = cls;
+    badgeEl.textContent = st;
+  }
+
+  // Sync status
+  const syncEl = document.getElementById(`sync-value-${pk}`);
+  if (syncEl) {
+    syncEl.innerHTML = renderSyncBadge(sync);
+  }
+
+  // Tasks section
+  const tasksEl = document.getElementById(`tasks-section-${pk}`);
+  if (tasksEl) {
+    tasksEl.innerHTML = renderTasks(card.tasks);
+  }
+
+  // Connector trace
+  const traceEl = document.getElementById(`connector-trace-${pk}`);
+  if (traceEl) {
+    if (card.connector_trace) {
+      const connectorName = document.getElementById(`card-${pk}`)?.dataset.connectorName || '';
+      traceEl.innerHTML = `<div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
+        <button class="w-full text-left p-3 group" onclick="showErrorModal(${JSON.stringify(connectorName + ' \u2014 Connector Error')}, ${JSON.stringify(card.connector_trace)})">
+          <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Connector Error</p>
+          <p class="text-xs text-red-700 dark:text-red-300 font-mono truncate">${card.connector_trace.substring(0, 120)}</p>
+          <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full trace \u2192</p>
+        </button>
+      </div>`;
+    } else {
+      traceEl.innerHTML = '';
+    }
+  }
+
+  // Error message
+  const errEl = document.getElementById(`error-msg-${pk}`);
+  if (errEl) {
+    if (card.error_message) {
+      const connectorName = document.getElementById(`card-${pk}`)?.dataset.connectorName || '';
+      errEl.innerHTML = `<div class="rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 overflow-hidden">
+        <button class="w-full text-left p-3 group" onclick="showErrorModal(${JSON.stringify(connectorName + ' \u2014 Error')}, ${JSON.stringify(card.error_message)})">
+          <p class="text-xs font-medium text-red-800 dark:text-red-400 mb-1">Error</p>
+          <p class="text-xs text-red-700 dark:text-red-300 truncate">${card.error_message}</p>
+          <p class="text-xs text-red-400 dark:text-red-500 mt-1 group-hover:underline">Click to view full error \u2192</p>
+        </button>
+      </div>`;
+    } else {
+      errEl.innerHTML = '';
+    }
+  }
+
+  // Update Alpine summary stats
+  const root = document.getElementById('monitoring-root');
+  if (root && window.Alpine) {
+    const alpineData = Alpine.$data(root);
+    if (alpineData && alpineData.allItems) {
+      const item = alpineData.allItems.find(i => i.configPk === pk);
+      if (item) {
+        item.healthy = card.is_healthy;
+        item.errors = card.error_count;
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Per-card polling (15s interval, no page reload)
+// ─────────────────────────────────────────────────────────────
+function pollCard(pk, url) {
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        applyCardUpdate(pk, data);
+      }
+    })
+    .catch(() => {
+      // Network error — leave card as-is, retry on next interval
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  const cards = document.querySelectorAll('[data-config-pk]');
+  cards.forEach(function(card) {
+    const pk = parseInt(card.dataset.configPk, 10);
+    const url = card.dataset.pollUrl;
+    // Fire immediately so sync status spinner resolves fast
+    pollCard(pk, url);
+    // Then poll every 15 seconds
+    setInterval(() => pollCard(pk, url), 15000);
+  });
 });
 </script>
 
