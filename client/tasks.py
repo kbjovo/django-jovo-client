@@ -2,6 +2,7 @@
 Celery tasks for CDC replication using JDBC Sink Connectors
 """
 import logging
+import redis as redis_lib
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
@@ -12,6 +13,75 @@ from client.utils.database_utils import get_database_engine
 from client.utils.notification_utils import maybe_send_alert, resolve_alert
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# REDIS-BASED DISTRIBUTED LOCK FOR CONTINUOUS DDL CONSUMERS
+# ============================================================================
+
+_CONSUMER_LOCK_PREFIX = 'ddl_consumer_lock'
+_CONSUMER_LOCK_TTL = 60        # seconds; must be > LOCK_REFRESH_INTERVAL
+_LOCK_REFRESH_INTERVAL = 10.0  # refresh TTL every 10 seconds in the consumer loop
+
+
+def _get_redis():
+    """Create a fresh Redis client from the Celery broker URL."""
+    return redis_lib.from_url(
+        settings.CELERY_BROKER_URL,
+        decode_responses=True,
+        socket_connect_timeout=3,
+        socket_timeout=3,
+    )
+
+
+def _consumer_lock_key(config_id: int) -> str:
+    return f'{_CONSUMER_LOCK_PREFIX}:{config_id}'
+
+
+def _try_acquire_lock(config_id: int, task_id: str) -> bool:
+    """
+    Atomically acquire the consumer lock (SET NX EX).
+    Returns True only if the lock was newly acquired.
+    """
+    try:
+        r = _get_redis()
+        return bool(r.set(_consumer_lock_key(config_id), task_id, ex=_CONSUMER_LOCK_TTL, nx=True))
+    except Exception as e:
+        logger.warning(f"Redis lock acquire failed for config {config_id}: {e}")
+        return False
+
+
+def _release_lock(config_id: int) -> None:
+    """Delete the consumer lock (used on clean exit or by stop task)."""
+    try:
+        _get_redis().delete(_consumer_lock_key(config_id))
+    except Exception as e:
+        logger.warning(f"Redis lock release failed for config {config_id}: {e}")
+
+
+def _refresh_and_check_lock(config_id: int) -> bool:
+    """
+    Refresh the lock TTL and return True if the lock still exists.
+    Returns False when stop_continuous_ddl_consumer has deleted the key,
+    signalling the consumer loop to exit.
+    Fails open (returns True) on Redis errors so transient blips don't
+    kill a healthy consumer.
+    """
+    try:
+        r = _get_redis()
+        # EXPIRE returns 1 if key exists and TTL was set, 0 if key is gone
+        return bool(r.expire(_consumer_lock_key(config_id), _CONSUMER_LOCK_TTL))
+    except Exception as e:
+        logger.warning(f"Redis lock refresh failed for config {config_id}: {e}")
+        return True  # fail open — keep running
+
+
+def _is_consumer_running(config_id: int) -> bool:
+    """Check whether a consumer lock is currently held for this config."""
+    try:
+        return bool(_get_redis().exists(_consumer_lock_key(config_id)))
+    except Exception:
+        return False
 
 
 # ============================================================================
@@ -154,7 +224,7 @@ def schedule_ddl_processing_all():
 
         # Skip if a continuous consumer is already handling this config.
         # Avoids competing on the same Kafka consumer group and causing rebalances.
-        if source_type in continuous_consumer_types and _running_consumers.get(config.id, False):
+        if source_type in continuous_consumer_types and _is_consumer_running(config.id):
             continue
 
         process_ddl_changes.delay(config.id)
@@ -166,11 +236,7 @@ def schedule_ddl_processing_all():
     return {'scheduled': scheduled}
 
 
-# Global flag to track running continuous consumers
-_running_consumers = {}
-
-
-@shared_task(bind=True, queue='ddl_consumer')
+@shared_task(bind=True, queue='ddl_consumer', time_limit=None, soft_time_limit=None)
 def start_continuous_ddl_consumer(self, config_id: int):
     """
     Start a continuous Kafka consumer for real-time DDL processing.
@@ -185,92 +251,106 @@ def start_continuous_ddl_consumer(self, config_id: int):
     from client.utils.ddl import KafkaDDLProcessor, PostgreSQLKafkaDDLProcessor
     import time
 
-    global _running_consumers
+    task_id = self.request.id or f'consumer-{config_id}'
 
-    # Check if already running for this config
-    if config_id in _running_consumers and _running_consumers[config_id]:
-        logger.info(f"Continuous DDL consumer already running for config {config_id}")
+    # Acquire distributed Redis lock — prevents multiple workers from running the
+    # same consumer simultaneously (fixes the per-process _running_consumers bug)
+    if not _try_acquire_lock(config_id, task_id):
+        logger.info(f"Continuous DDL consumer already running for config {config_id} (lock held)")
         return {'success': False, 'error': 'Already running'}
 
+    # Outer try/finally ensures the lock is always released, even on validation failures
+    # that return early before the processor loop's own finally block.
     try:
-        config = ReplicationConfig.objects.get(id=config_id)
-    except ReplicationConfig.DoesNotExist:
-        logger.error(f"ReplicationConfig {config_id} not found")
-        return {'success': False, 'error': 'Config not found'}
+        try:
+            config = ReplicationConfig.objects.get(id=config_id)
+        except ReplicationConfig.DoesNotExist:
+            logger.error(f"ReplicationConfig {config_id} not found")
+            return {'success': False, 'error': 'Config not found'}
 
-    source_type = config.client_database.db_type.lower()
-    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
-    if source_type not in supported_types:
-        logger.error(f"Continuous consumer only supports MySQL/MSSQL/PostgreSQL, not {source_type}")
-        return {'success': False, 'error': f'Unsupported source type: {source_type}'}
+        source_type = config.client_database.db_type.lower()
+        supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+        if source_type not in supported_types:
+            logger.error(f"Continuous consumer only supports MySQL/MSSQL/PostgreSQL, not {source_type}")
+            return {'success': False, 'error': f'Unsupported source type: {source_type}'}
 
-    target_db = config.client_database.client.client_databases.filter(is_target=True).first()
-    if not target_db:
-        logger.error(f"No target database for config {config_id}")
-        return {'success': False, 'error': 'No target database'}
+        target_db = config.client_database.client.client_databases.filter(is_target=True).first()
+        if not target_db:
+            logger.error(f"No target database for config {config_id}")
+            return {'success': False, 'error': 'No target database'}
 
-    target_engine = get_database_engine(target_db)
-    kafka_servers = settings.DEBEZIUM_CONFIG.get(
-        'KAFKA_BOOTSTRAP_SERVERS',
-        'localhost:9092,localhost:9094,localhost:9096'
-    )
+        target_engine = get_database_engine(target_db)
+        kafka_servers = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_BOOTSTRAP_SERVERS',
+            'localhost:9092,localhost:9094,localhost:9096'
+        )
 
-    _running_consumers[config_id] = True
-    logger.info(f"Starting continuous DDL consumer for config {config_id} (source: {source_type})")
+        logger.info(f"Starting continuous DDL consumer for config {config_id} (source: {source_type})")
 
-    processor = None
-    try:
-        # Select appropriate processor based on source type
-        if source_type in ('postgresql', 'postgres'):
-            processor = PostgreSQLKafkaDDLProcessor(
-                replication_config=config,
-                target_engine=target_engine,
-                bootstrap_servers=kafka_servers,
-                auto_execute_destructive=True
-            )
-        else:
-            # MySQL/MSSQL use KafkaDDLProcessor
-            processor = KafkaDDLProcessor(
-                replication_config=config,
-                target_engine=target_engine,
-                bootstrap_servers=kafka_servers,
-                auto_execute_destructive=True
-            )
+        processor = None
+        try:
+            # Select appropriate processor based on source type
+            if source_type in ('postgresql', 'postgres'):
+                processor = PostgreSQLKafkaDDLProcessor(
+                    replication_config=config,
+                    target_engine=target_engine,
+                    bootstrap_servers=kafka_servers,
+                    auto_execute_destructive=True
+                )
+            else:
+                # MySQL/MSSQL use KafkaDDLProcessor
+                processor = KafkaDDLProcessor(
+                    replication_config=config,
+                    target_engine=target_engine,
+                    bootstrap_servers=kafka_servers,
+                    auto_execute_destructive=True
+                )
 
-        # Continuous loop
-        while _running_consumers.get(config_id, False):
-            try:
-                # Process with short timeout for responsiveness
-                processed, errors = processor.process(timeout_sec=5, max_messages=10)
+            last_lock_refresh = time.time()
 
-                if errors > 0:
-                    logger.warning(f"[Continuous] Config {config_id}: {processed} processed, {errors} errors")
+            # Continuous loop — exits when the Redis lock is deleted (by stop task or TTL expiry)
+            while True:
+                try:
+                    # Process with short timeout for responsiveness
+                    processed, errors = processor.process(timeout_sec=5, max_messages=10)
 
-                # Small sleep to prevent tight loop when no messages
-                time.sleep(0.1)
+                    if errors > 0:
+                        logger.warning(f"[Continuous] Config {config_id}: {processed} processed, {errors} errors")
 
-            except Exception as e:
-                logger.error(f"Error in continuous consumer for config {config_id}: {e}")
-                time.sleep(5)  # Back off on error
+                    # Small sleep to prevent tight loop when no messages
+                    time.sleep(0.1)
 
-    except Exception as e:
-        logger.error(f"Continuous DDL consumer failed for config {config_id}: {e}", exc_info=True)
-        return {'success': False, 'error': str(e)}
+                except Exception as e:
+                    logger.error(f"Error in continuous consumer for config {config_id}: {e}")
+                    time.sleep(5)  # Back off on error
+
+                # Every LOCK_REFRESH_INTERVAL seconds: refresh TTL and check if we should stop
+                now = time.time()
+                if now - last_lock_refresh >= _LOCK_REFRESH_INTERVAL:
+                    if not _refresh_and_check_lock(config_id):
+                        logger.info(f"Consumer lock gone for config {config_id} — stopping")
+                        break
+                    last_lock_refresh = now
+
+        except Exception as e:
+            logger.error(f"Continuous DDL consumer failed for config {config_id}: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
+        finally:
+            if processor:
+                processor.close()
+            logger.info(f"Continuous DDL consumer stopped for config {config_id}")
+
+        return {'success': True, 'config_id': config_id}
+
     finally:
-        _running_consumers[config_id] = False
-        if processor:
-            processor.close()
-        logger.info(f"Continuous DDL consumer stopped for config {config_id}")
-
-    return {'success': True, 'config_id': config_id}
+        _release_lock(config_id)
 
 
 @shared_task
 def stop_continuous_ddl_consumer(config_id: int):
-    """Stop a running continuous DDL consumer."""
-    global _running_consumers
-    if config_id in _running_consumers:
-        _running_consumers[config_id] = False
+    """Stop a running continuous DDL consumer by deleting its Redis lock."""
+    if _is_consumer_running(config_id):
+        _release_lock(config_id)
         logger.info(f"Stopping continuous DDL consumer for config {config_id}")
         return {'success': True}
     return {'success': False, 'error': 'Not running'}
@@ -288,8 +368,6 @@ def ensure_continuous_ddl_consumers():
     - MySQL/MSSQL: Schema history topic
     - PostgreSQL: ddl_capture.ddl_events topic (requires event triggers on source)
     """
-    global _running_consumers
-
     supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
 
     active_configs = ReplicationConfig.objects.filter(
@@ -303,8 +381,8 @@ def ensure_continuous_ddl_consumers():
         if source_type not in supported_types:
             continue
 
-        # Check if consumer is running
-        if config.id not in _running_consumers or not _running_consumers[config.id]:
+        # Use Redis lock to check if a consumer is already running across all workers
+        if not _is_consumer_running(config.id):
             logger.info(f"Starting continuous DDL consumer for config {config.id}")
             start_continuous_ddl_consumer.delay(config.id)
             started += 1

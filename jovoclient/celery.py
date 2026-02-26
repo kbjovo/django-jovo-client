@@ -37,6 +37,11 @@ app.conf.beat_schedule = {
         'task': 'client.tasks.ensure_continuous_ddl_consumers',
         'schedule': 30.0,  # Every 30 seconds
     },
+    # Batch DDL fallback: fires for configs whose continuous consumer is down
+    'schedule-ddl-processing-all': {
+        'task': 'client.tasks.schedule_ddl_processing_all',
+        'schedule': crontab(minute='*/1'),  # Every 1 minute
+    },
     # PostgreSQL schema sync (every 5 minutes)
     'sync-postgresql-schemas': {
         'task': 'client.tasks.sync_postgresql_schemas',
@@ -87,7 +92,7 @@ def on_worker_ready(sender, **kwargs):
         from client.models.replication import ReplicationConfig
         from client.tasks import start_continuous_ddl_consumer
 
-        supported_types = ('mysql', 'mssql', 'sqlserver')
+        supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
 
         active_configs = ReplicationConfig.objects.filter(
             status='active',
