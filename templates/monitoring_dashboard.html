@@ -40,10 +40,11 @@
        class="flex-1 overflow-y-auto px-6 py-6"
        x-data="{
          selectedClients: [],
+         connectorSearch: '',
          open: false,
          allItems: [
            {% for item in monitoring_data %}
-           { configPk: {{ item.config.pk }}, clientId: {{ item.config.client_database.client.pk }}, healthy: {{ item.is_healthy|yesno:'true,false' }}, errors: {{ item.error_count|default:0 }} }{% if not forloop.last %},{% endif %}
+           { configPk: {{ item.config.pk }}, clientId: {{ item.config.client_database.client.pk }}, connectorName: '{{ item.config.connector_name|escapejs }}', healthy: {{ item.is_healthy|yesno:'true,false' }}, errors: {{ item.error_count|default:0 }} }{% if not forloop.last %},{% endif %}
            {% endfor %}
          ],
          toggle(id) {
@@ -51,13 +52,18 @@
            if (idx === -1) this.selectedClients.push(id);
            else this.selectedClients.splice(idx, 1);
          },
-         isVisible(clientId) {
-           return this.selectedClients.length === 0 || this.selectedClients.includes(clientId);
+         isVisible(clientId, connectorName) {
+           const clientOk = this.selectedClients.length === 0 || this.selectedClients.includes(clientId);
+           const nameOk = this.connectorSearch === '' || connectorName.toLowerCase().includes(this.connectorSearch.toLowerCase());
+           return clientOk && nameOk;
          },
-         clearAll() { this.selectedClients = []; },
+         clearAll() { this.selectedClients = []; this.connectorSearch = ''; },
          get filtered() {
-           if (this.selectedClients.length === 0) return this.allItems;
-           return this.allItems.filter(i => this.selectedClients.includes(i.clientId));
+           return this.allItems.filter(i => {
+             const clientOk = this.selectedClients.length === 0 || this.selectedClients.includes(i.clientId);
+             const nameOk = this.connectorSearch === '' || i.connectorName.toLowerCase().includes(this.connectorSearch.toLowerCase());
+             return clientOk && nameOk;
+           });
          },
          get activeCount() { return this.filtered.length; },
          get healthyCount() { return this.filtered.filter(i => i.healthy).length; },
@@ -66,8 +72,31 @@
        }">
 
     <!-- Filter Bar -->
-    {% if clients %}
-    <div class="mb-6 flex items-center gap-3">
+    {% if monitoring_data %}
+    <div class="mb-6 flex items-center gap-3 flex-wrap">
+
+      <!-- Connector name search -->
+      <div class="relative w-64">
+        <div class="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+          <svg class="w-4 h-4 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+          </svg>
+        </div>
+        <input type="text"
+               x-model="connectorSearch"
+               class="w-full pl-10 pr-10 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+               placeholder="Search connectors...">
+        <button type="button"
+                x-show="connectorSearch !== ''" x-cloak
+                @click="connectorSearch = ''"
+                class="absolute inset-y-0 right-3 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+        </button>
+      </div>
+
+      {% if clients %}
       <!-- Multi-select dropdown -->
       <div class="relative" @click.away="open = false">
         <button @click="open = !open"
@@ -96,9 +125,10 @@
           {% endfor %}
         </div>
       </div>
+      {% endif %}
 
       <!-- Clear filter button -->
-      <button x-show="selectedClients.length > 0" x-cloak
+      <button x-show="selectedClients.length > 0 || connectorSearch !== ''" x-cloak
               @click="clearAll()"
               class="inline-flex items-center gap-1 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -137,7 +167,7 @@
            data-config-pk="{{ item.config.pk }}"
            data-connector-name="{{ item.config.connector_name|escapejs }}"
            data-poll-url="{% url 'connector_dashboard_card_api' item.config.pk %}"
-           x-show="isVisible({{ item.config.client_database.client.pk }})" x-transition
+           x-show="isVisible({{ item.config.client_database.client.pk }}, '{{ item.config.connector_name|escapejs }}')" x-transition
            class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
 
         <!-- Header -->

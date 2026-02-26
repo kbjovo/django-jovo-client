@@ -394,13 +394,13 @@ def map_type_to_sqlalchemy(type_str: str):
     elif 'int' in type_lower:
         return Integer
     elif 'varchar' in type_lower or 'char' in type_lower:
-        match = re.search(r'\((\d+)\)', type_str)
+        match = re.search(r'\((\d+)\)', type_lower)
         length = int(match.group(1)) if match else 255
         return String(length)
     elif 'text' in type_lower:
         return Text
     elif 'decimal' in type_lower or 'numeric' in type_lower:
-        match = re.search(r'\((\d+),\s*(\d+)\)', type_str)
+        match = re.search(r'\((\d+),\s*(\d+)\)', type_lower)
         if match:
             return DECIMAL(int(match.group(1)), int(match.group(2)))
         return DECIMAL(18, 4)

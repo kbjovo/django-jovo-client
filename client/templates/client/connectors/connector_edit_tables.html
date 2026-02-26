@@ -350,8 +350,8 @@
                             <span class="ml-2 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400">Active</span>
                         </div>
 
-                        <!-- Column count indicator -->
-                        <span class="text-xs text-gray-500 dark:text-gray-400 ml-2 shrink-0" id="current-column-count-{{ escaped_name }}"></span>
+                        <!-- Row count indicator -->
+                        <span class="text-xs text-gray-500 dark:text-gray-400 ml-2 shrink-0" id="current-row-count-{{ escaped_name }}"></span>
                     </div>
 
                     <!-- Accordion Content -->
@@ -1064,9 +1064,20 @@ async function loadCurrentTableSchema(tableName) {
         // Mark as loaded
         loadedCurrentTables.add(tableName);
 
-        // Update column count indicator
-        document.getElementById(`current-column-count-${escapedName}`).textContent =
-            `${data.columns.length} columns`;
+        // Update row count indicator
+        const rowCountEl = document.getElementById(`current-row-count-${escapedName}`);
+        if (rowCountEl && data.row_count !== undefined) {
+            const rc = data.row_count;
+            if (rc > 1000000) {
+                rowCountEl.innerHTML = `<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-400">${rc.toLocaleString()} rows</span>`;
+            } else if (rc > 100000) {
+                rowCountEl.innerHTML = `<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400">${rc.toLocaleString()} rows</span>`;
+            } else if (rc === 0) {
+                rowCountEl.textContent = '0 rows (empty)';
+            } else {
+                rowCountEl.textContent = `${rc.toLocaleString()} rows`;
+            }
+        }
 
     } catch (error) {
         console.error('Error loading table schema:', error);
