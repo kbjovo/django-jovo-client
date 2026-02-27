@@ -45,10 +45,11 @@
                            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
                            value="{{ connector_name_preview }}"
                            placeholder="{{ connector_name_preview }}"
+                           maxlength="80"
                            oninput="sanitizeConnectorName(this)"
                            pattern="[a-zA-Z0-9._\-]+"
-                           title="Only letters, numbers, dots, underscores, and hyphens allowed">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Allowed: <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">a–z 0–9 _ - .</code> &nbsp;(no spaces)</p>
+                           title="Only letters, numbers, dots, underscores, and hyphens allowed (max 80 chars)">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Allowed: <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">a–z 0–9 _ - .</code> &nbsp;(no spaces) &nbsp;Max 80 chars.</p>
                 </div>
                 <div>
                     <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-1">Version</label>

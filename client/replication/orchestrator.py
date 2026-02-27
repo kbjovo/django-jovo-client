@@ -140,22 +140,6 @@ class ReplicationOrchestrator:
             self._log_info("")
 
             # ========================================
-            # STEP 3.5: Pre-create target tables for empty source tables
-            # ========================================
-            # The sink connector only creates target tables when it receives Kafka messages.
-            # If a source table is empty, the initial snapshot produces no messages,
-            # so the target table would never get created. We create them explicitly here
-            # using the source schema (column definitions), regardless of row count.
-            self._log_info("STEP 3.5/5: Pre-creating target tables (handles empty source tables)...")
-            try:
-                from client.utils.table_creator import create_target_tables
-                create_target_tables(self.config)
-                self._log_info("✓ Target tables pre-created (empty tables now have schema in target)")
-            except Exception as e:
-                self._log_warning(f"⚠️ Table pre-creation error (non-fatal): {e}")
-            self._log_info("")
-
-            # ========================================
             # STEP 4: Ensure Sink Connector Ready (Efficient)
             # ========================================
             self._log_info("STEP 4/5: Ensuring sink connector is ready...")
@@ -1261,6 +1245,7 @@ class ReplicationOrchestrator:
                     schema = get_table_schema(db_config, table_name)
                     columns = schema.get('columns', [])
                     primary_keys = schema.get('primary_keys', [])
+                    row_count = schema.get('row_count', -1)
 
                     for col in columns:
                         col['primary_key'] = col['name'] in primary_keys
@@ -1352,20 +1337,6 @@ class ReplicationOrchestrator:
                 'status': 'ok' if topics_ok else 'warn',
                 'msg': topics_msg or "Kafka topics created",
             })
-
-            # ========================================
-            # STEP 2.5: Pre-create target tables for newly added tables
-            # ========================================
-            # The sink connector only creates target tables on first Kafka message.
-            # Empty source tables produce no messages, so we create targets explicitly.
-            self._log_info("STEP 2.5/6: Pre-creating target tables for newly added tables...")
-            try:
-                from client.utils.table_creator import create_target_tables
-                create_target_tables(self.config, specific_tables=added_tables)
-                self._log_info("✓ Target tables pre-created (empty tables now have schema in target)")
-            except Exception as e:
-                self._log_warning(f"⚠️ Table pre-creation error (non-fatal): {e}")
-            self._log_info("")
 
             # ========================================
             # STEP 3: Update source connector config

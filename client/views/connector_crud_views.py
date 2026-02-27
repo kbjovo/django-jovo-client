@@ -142,6 +142,16 @@ def connector_add(request, database_pk):
                         return JsonResponse({'success': False, 'error': msg}, status=400)
                     return redirect('connector_add', database_pk=database_pk)
 
+                # Resolve connector name before creating any records
+                custom_name = re.sub(r'[^a-zA-Z0-9._\-]', '', request.POST.get('connector_name', '').strip())
+                if custom_name and len(custom_name) > 80:
+                    msg = "Connector name must be 80 characters or fewer."
+                    messages.error(request, msg)
+                    if is_ajax:
+                        return JsonResponse({'success': False, 'error': msg}, status=400)
+                    return redirect('connector_add', database_pk=database_pk)
+                connector_name = custom_name if custom_name else generate_connector_name(client, database, version=next_version)
+
                 # Get processing mode settings
                 processing_mode = request.POST.get('processing_mode', 'cdc')
                 batch_interval = request.POST.get('batch_interval') if processing_mode == 'batch' else None
@@ -178,9 +188,6 @@ def connector_add(request, database_pk):
                     created_by=request.user if request.user.is_authenticated else None
                 )
 
-                # Use user-provided name or fall back to auto-generated
-                custom_name = re.sub(r'[^a-zA-Z0-9._\-]', '', request.POST.get('connector_name', '').strip())
-                connector_name = custom_name if custom_name else generate_connector_name(client, database, version=next_version)
                 replication_config.connector_name = connector_name
                 # Topic prefix must match connector template (includes version for JMX uniqueness)
                 replication_config.kafka_topic_prefix = f"client_{client.id}_db_{database.id}_v_{next_version}"
@@ -356,9 +363,6 @@ def connector_create_debezium(request, config_pk):
             raise Exception(f"Failed to create Kafka topics: {topics_message}")
 
         logger.info(f"Topics created: {topics_message}")
-
-        # Note: Target tables are auto-created by sink connector (schema.evolution=basic)
-        # No manual table creation needed
 
         # Step 2: Create source connector
         logger.info(f"Creating source connector: {replication_config.connector_name}")

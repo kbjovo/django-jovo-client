@@ -61,9 +61,9 @@ class ConnectorHistory(models.Model):
 
     # Connector details
     connector_name = models.CharField(
-        max_length=255,
+        max_length=80,
         db_index=True,
-        help_text="Full connector name including version"
+        help_text="Connector name (max 80 chars)"
     )
     connector_version = models.IntegerField(
         help_text="Version number of this connector"
@@ -369,10 +369,10 @@ class ReplicationConfig(models.Model):
     
     # Debezium connector info
     connector_name = models.CharField(
-        max_length=255,
+        max_length=80,
         blank=True,
         null=True,
-        help_text="Debezium connector name in Kafka Connect"
+        help_text="Debezium connector name in Kafka Connect (max 80 chars)"
     )
     connector_version = models.IntegerField(
         default=1,

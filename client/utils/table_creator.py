@@ -108,20 +108,6 @@ def create_target_tables(replication_config, specific_tables=None):
             logger.warning(f"⚠️ No table mappings found to process!")
             return
         
-        # VERIFY we're connected to the right database
-        with target_engine.connect() as conn:
-            result = conn.execute(text("SELECT DATABASE()"))
-            connected_db = result.scalar()
-            logger.info(f"🔍 Verified target connection: Connected to database '{connected_db}'")
-            
-            if connected_db != target_db.database_name:
-                logger.error(
-                    f"❌ ERROR: Connected to wrong database!\n"
-                    f"   Expected: {target_db.database_name}\n"
-                    f"   Got: {connected_db}"
-                )
-                raise Exception(f"Connected to wrong database: {connected_db}")
-        
         for table_mapping in table_mappings:
             source_table = table_mapping.source_table
             target_table = table_mapping.target_table
@@ -228,26 +214,19 @@ def create_target_tables(replication_config, specific_tables=None):
                 table = Table(target_table, metadata, *columns, extend_existing=True)
                 
                 logger.info(f"   💾 Creating table in TARGET database '{target_db.database_name}'...")
-                
+
                 with target_engine.begin() as conn:
-                    # Double-check we're in the right database
-                    result = conn.execute(text("SELECT DATABASE()"))
-                    current_db = result.scalar()
-                    
-                    if current_db != target_db.database_name:
-                        raise Exception(f"Wrong database! Expected {target_db.database_name}, got {current_db}")
-                    
                     # Create the table
                     table.create(conn, checkfirst=True)
-                    
-                    # Verify creation
-                    result = conn.execute(text(f"SHOW TABLES LIKE '{target_table}'"))
-                    if result.fetchone():
-                        logger.info(f"   ✅ Successfully created table '{target_table}' in '{current_db}'")
-                        created_count += 1
-                    else:
-                        logger.error(f"   ❌ Table creation failed - table not found after creation")
-                        skipped_count += 1
+
+                # Verify creation using SQLAlchemy inspector (works for all DB types)
+                post_inspector = inspect(target_engine)
+                if target_table in post_inspector.get_table_names():
+                    logger.info(f"   ✅ Successfully created table '{target_table}' in '{target_db.database_name}'")
+                    created_count += 1
+                else:
+                    logger.error(f"   ❌ Table creation failed - table not found after creation")
+                    skipped_count += 1
                 
             except Exception as e:
                 logger.error(f"   ❌ Error processing table {target_table}: {e}", exc_info=True)

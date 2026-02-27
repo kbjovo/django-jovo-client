@@ -313,7 +313,57 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
         raise DatabaseOperationError(error_msg) from e
 
 
-def get_unassigned_tables(client_database_id: int, schema: Optional[str] = None) -> List[str]:
+def _get_non_empty_tables_bulk(db_config: ClientDatabase, table_names: List[str], schema: Optional[str] = None) -> set:
+    """
+    Return the subset of table_names that have at least one row.
+
+    Uses a single information_schema query for MySQL (TABLE_ROWS estimate is
+    sufficient for "is this table completely empty?" checks).  For all other
+    database types falls back to individual get_row_count calls.
+
+    On any failure the full list is returned so callers see all tables (safe
+    fallback — better to show an empty table than to hide a non-empty one).
+    """
+    if not table_names:
+        return set()
+
+    db_type = db_config.db_type.lower()
+    non_empty: set = set()
+
+    try:
+        if db_type == 'mysql':
+            # Single bulk query — TABLE_ROWS is an InnoDB estimate but it is
+            # reliably 0 / NULL for tables that have never had any rows.
+            engine = get_database_engine(db_config)
+            with engine.connect() as conn:
+                result = conn.execute(text(
+                    "SELECT TABLE_NAME, TABLE_ROWS "
+                    "FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'"
+                ))
+                for row in result:
+                    table_name_result, row_count = row[0], row[1]
+                    if table_name_result in table_names and row_count is not None and row_count > 0:
+                        non_empty.add(table_name_result)
+            engine.dispose()
+        else:
+            # Individual COUNT(*) queries for PostgreSQL, SQL Server, Oracle, etc.
+            for table_name in table_names:
+                try:
+                    count = get_row_count(db_config, table_name, schema=schema)
+                    if count > 0:
+                        non_empty.add(table_name)
+                except Exception:
+                    # Cannot determine count — treat as non-empty (safe)
+                    non_empty.add(table_name)
+    except Exception as e:
+        logger.warning(f"Bulk empty-table check failed: {e}. Treating all tables as non-empty.")
+        return set(table_names)
+
+    return non_empty
+
+
+def get_unassigned_tables(client_database_id: int, schema: Optional[str] = None, exclude_empty: bool = True) -> List[str]:
     """
     Get list of tables that are NOT assigned to any active ReplicationConfig.
     This is used when creating new source connectors to show only available tables.
@@ -321,6 +371,7 @@ def get_unassigned_tables(client_database_id: int, schema: Optional[str] = None)
     Args:
         client_database_id: ClientDatabase ID
         schema: Schema name (optional)
+        exclude_empty: When True (default), tables with 0 rows are excluded.
 
     Returns:
         List[str]: List of unassigned table names
@@ -353,6 +404,15 @@ def get_unassigned_tables(client_database_id: int, schema: Optional[str] = None)
         unassigned = [t for t in all_tables if t not in assigned_set]
 
         logger.info(f"Found {len(unassigned)} unassigned tables available for new connectors")
+
+        # Exclude tables that have no rows — sink connector cannot create target
+        # tables for empty sources (no Kafka messages are produced for them).
+        if exclude_empty and unassigned:
+            non_empty = _get_non_empty_tables_bulk(db_config, unassigned, schema=schema)
+            empty_count = len(unassigned) - len([t for t in unassigned if t in non_empty])
+            if empty_count:
+                logger.info(f"Excluding {empty_count} empty table(s) from connector table list")
+            unassigned = [t for t in unassigned if t in non_empty]
 
         return sorted(unassigned)
 

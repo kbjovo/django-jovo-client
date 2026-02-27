@@ -60,30 +60,33 @@ def generate_server_id(client_id: int, db_id: int, version: int = 0) -> int:
 
 def generate_connector_name(client: Client, db_config: ClientDatabase, version: Optional[int] = None) -> str:
     """
-    Generate connector name following the pattern: {client_name}_{db_name}_connector[_v_{version}]
+    Generate connector name following the pattern: {client_name}_{db_name}
+
+    Max total length is 80 chars. client_name is capped at 39 chars and db_name
+    at 40 chars, giving: 39 + '_' + 40 = 80 chars worst case.
+
+    The version parameter is accepted for backwards compatibility but is not included
+    in the connector name. Versioning is tracked in backend fields only.
 
     Args:
         client: Client instance
         db_config: ClientDatabase instance
-        version: Optional version number for the connector (e.g., 1 for _v_1, 2 for _v_2)
+        version: Accepted but unused in the name (kept for backwards compatibility)
 
     Returns:
-        str: Connector name
+        str: Connector name (max 80 chars)
     """
-    # Clean client name (remove spaces, special chars)
+    # Clean client name (remove spaces, special chars) and cap at 39 chars
     client_name = client.name.lower().replace(' ', '_').replace('-', '_')
     client_name = ''.join(c for c in client_name if c.isalnum() or c == '_')
+    client_name = client_name[:39]
 
-    # Clean database name
+    # Clean database name and cap at 40 chars
     db_name = db_config.connection_name.lower().replace(' ', '_').replace('-', '_')
     db_name = ''.join(c for c in db_name if c.isalnum() or c == '_')
+    db_name = db_name[:40]
 
-    # Generate base connector name
-    connector_name = f"{client_name}_{db_name}_connector"
-
-    # Add version suffix if provided
-    if version is not None:
-        connector_name = f"{connector_name}_v_{version}"
+    connector_name = f"{client_name}_{db_name}"
 
     logger.debug(f"Generated connector name: {connector_name}")
     return connector_name
@@ -671,12 +674,9 @@ def get_oracle_connector_config(
         )
 
     def generate_connector_name(client, db_config, version=None):
-        client_name = ''.join(c for c in client.name.lower().replace(' ', '_').replace('-', '_') if c.isalnum() or c == '_')
-        db_name = ''.join(c for c in db_config.connection_name.lower().replace(' ', '_').replace('-', '_') if c.isalnum() or c == '_')
-        connector_name = f"{client_name}_{db_name}_connector"
-        if version is not None:
-            connector_name = f"{connector_name}_v_{version}"
-        return connector_name
+        client_name = ''.join(c for c in client.name.lower().replace(' ', '_').replace('-', '_') if c.isalnum() or c == '_')[:39]
+        db_name = ''.join(c for c in db_config.connection_name.lower().replace(' ', '_').replace('-', '_') if c.isalnum() or c == '_')[:40]
+        return f"{client_name}_{db_name}"
 
     version = getattr(replication_config, 'connector_version', None)
     if replication_config and getattr(replication_config, 'connector_name', None):
