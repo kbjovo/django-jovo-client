@@ -152,8 +152,10 @@
                window.showToast('success', 'Database connection and connectors deleted successfully!');
              }
            } else {
+             const data = await response.json().catch(() => ({}));
+             const message = data.error || 'Failed to delete database connection';
              if (window.showToast) {
-               window.showToast('error', 'Failed to delete database connection');
+               window.showToast('error', message);
              }
            }
          } catch (error) {
@@ -287,7 +289,18 @@
         <!-- Delete Button -->
         <div x-data="{ showDeleteModal: false }">
           {% if client.status != 'deleted' %}
-          <button 
+          {% if connector_stats.total > 0 %}
+          <button
+            disabled
+            title="Delete all {{ connector_stats.total }} source connector{{ connector_stats.total|pluralize }} first before deleting this client"
+            class="inline-flex text-sm items-center gap-2 bg-red-300 dark:bg-red-900 text-white font-semibold py-2 px-3 rounded-lg shadow cursor-not-allowed opacity-60">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+            </svg>
+            Delete
+          </button>
+          {% else %}
+          <button
             @click="showDeleteModal = true"
             class="inline-flex text-sm items-center gap-2 bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-3 rounded-lg shadow transition">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -295,6 +308,7 @@
             </svg>
             Delete
           </button>
+          {% endif %}
 
           <!-- Delete Client Modal -->
           <div 
@@ -340,11 +354,26 @@
                       <h3 class="text-lg font-semibold leading-6 text-gray-900 dark:text-white">
                         Delete Client
                       </h3>
-                      <div class="mt-2">
+                      <div class="mt-2 space-y-3">
                         <p class="text-sm text-gray-500 dark:text-gray-400">
-                          Are you sure you want to delete <strong class="text-gray-900 dark:text-white">{{ client.name }}</strong>? 
+                          Are you sure you want to delete <strong class="text-gray-900 dark:text-white">{{ client.name }}</strong>?
                           This action cannot be undone.
                         </p>
+                        {% with source_dbs=client.client_databases.count %}
+                        {% if source_dbs > 0 or connector_stats.total > 0 %}
+                        <div class="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300 space-y-1">
+                          <p class="font-semibold">The following will also be permanently deleted:</p>
+                          <ul class="list-disc list-inside space-y-0.5 text-amber-700 dark:text-amber-400">
+                            {% if connector_stats.total > 0 %}
+                            <li>{{ connector_stats.total }} source connector{{ connector_stats.total|pluralize }} and their Kafka Connect configuration</li>
+                            {% endif %}
+                            {% if source_dbs > 0 %}
+                            <li>{{ source_dbs }} database connection{{ source_dbs|pluralize }} (source &amp; sink)</li>
+                            {% endif %}
+                          </ul>
+                        </div>
+                        {% endif %}
+                        {% endwith %}
                       </div>
                     </div>
                   </div>

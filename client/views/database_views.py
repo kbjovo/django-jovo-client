@@ -269,6 +269,19 @@ class ClientDatabaseDeleteView(View):
     def post(self, request, pk):
         database = get_object_or_404(ClientDatabase, pk=pk)
         client = database.client
+
+        # Block deletion if any source connectors still exist.
+        remaining = database.replication_configs.count()
+        if remaining:
+            error_msg = (
+                f"Cannot delete: {remaining} source connector"
+                f"{'s' if remaining != 1 else ''} still exist. "
+                "Delete all source connectors first."
+            )
+            if request.headers.get('HX-Request'):
+                return JsonResponse({'error': error_msg}, status=400)
+            return redirect('client_detail', pk=client.pk)
+
         delete_topics = request.POST.get('delete_topics') == '1'
         drop_tables = request.POST.get('drop_tables') == '1'
 

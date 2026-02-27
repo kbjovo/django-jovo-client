@@ -205,17 +205,52 @@ def client_soft_delete(request, pk):
     """
     Soft delete a client.
 
-    This marks the client as deleted, drops its dedicated database,
-    and removes all associated ClientDatabase entries.
-
-    Args:
-        request: HTTP request
-        pk: Primary key of the client to delete
-
-    Returns:
-        Redirect to main dashboard
+    Cleans up all Kafka Connect source connectors and the shared sink connector
+    before marking the client as deleted and removing all ClientDatabase rows.
     """
+    from client.models.database import ClientDatabase
+    from client.models.replication import ReplicationConfig
+    from client.replication.orchestrator import ReplicationOrchestrator
+    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+
     client = get_object_or_404(Client, pk=pk)
+
+    # Block deletion if any source connectors still exist across all databases.
+    remaining = ReplicationConfig.objects.filter(
+        client_database__client=client
+    ).count()
+    if remaining:
+        messages.error(
+            request,
+            f"Cannot delete client: {remaining} source connector"
+            f"{'s' if remaining != 1 else ''} still exist. "
+            "Delete all source connectors first."
+        )
+        return redirect('client_detail', pk=client.pk)
+
+    # Clean up source connectors for every source database.
+    # Must be done before the bulk CASCADE delete that soft_delete() triggers,
+    # because Django's CASCADE skips custom delete() methods.
+    for database in client.client_databases.filter(is_target=False):
+        for config in database.replication_configs.all():
+            try:
+                orchestrator = ReplicationOrchestrator(config)
+                orchestrator.delete_replication(delete_topics=False, drop_tables=False)
+            except Exception as e:
+                logger.warning(f"Failed to clean up connector {config.id} for client {pk}: {e}")
+
+    # Clean up the shared sink connector from Kafka Connect.
+    sink_db = client.client_databases.filter(is_target=True).first()
+    if sink_db:
+        try:
+            manager = DebeziumConnectorManager()
+            sink_name = sink_db.get_sink_connector_name()
+            exists, _ = manager.get_connector_status(sink_name)
+            if exists:
+                manager.delete_connector(sink_name)
+        except Exception as e:
+            logger.warning(f"Failed to delete sink connector for client {pk}: {e}")
+
     client.soft_delete()
 
     messages.success(request, 'Client deleted successfully!')
