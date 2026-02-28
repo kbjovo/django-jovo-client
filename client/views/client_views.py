@@ -35,7 +35,9 @@ class ClientCreateView(CreateView):
     model = Client
     form_class = ClientForm
     template_name = 'client/client_form.html'
-    success_url = reverse_lazy('main-dashboard')
+
+    def get_success_url(self):
+        return reverse_lazy('client_detail', kwargs={'pk': self.object.pk})
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -51,7 +53,7 @@ class ClientCreateView(CreateView):
         if self.request.headers.get('HX-Request'):
             from django.http import HttpResponse
             response = HttpResponse()
-            response['HX-Redirect'] = self.success_url
+            response['HX-Redirect'] = self.get_success_url()
             response['HX-Trigger'] = 'clientCreated'
 
         return response

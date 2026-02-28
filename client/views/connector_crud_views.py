@@ -224,8 +224,7 @@ def connector_add(request, database_pk):
                         if database.db_type == 'mysql':
                             default_target_table = f"{database.database_name}_{actual_table_name}"
                         elif database.db_type == 'postgresql':
-                            pg_schema = source_schema or 'public'
-                            default_target_table = f"{pg_schema}_{actual_table_name}"
+                            default_target_table = f"{database.database_name}_{actual_table_name}"
                         elif database.db_type == 'mssql':
                             mssql_schema = source_schema or 'dbo'
                             default_target_table = f"{mssql_schema}_{actual_table_name}"
@@ -518,7 +517,7 @@ def connector_edit_tables(request, config_pk):
             if db_type == 'mysql':
                 default_target = f"{database.database_name}_{table_name}"
             elif db_type == 'postgresql':
-                default_target = f"public_{table_name}"
+                default_target = f"{database.database_name}_{table_name}"
             elif db_type in ('mssql', 'sqlserver'):
                 default_target = f"dbo_{table_name}"
             elif db_type == 'oracle':

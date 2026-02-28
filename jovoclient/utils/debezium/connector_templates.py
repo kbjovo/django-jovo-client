@@ -60,33 +60,42 @@ def generate_server_id(client_id: int, db_id: int, version: int = 0) -> int:
 
 def generate_connector_name(client: Client, db_config: ClientDatabase, version: Optional[int] = None) -> str:
     """
-    Generate connector name following the pattern: {client_name}_{db_name}
+    Generate connector name following the pattern: {client_name}_{db_name}[_v{version}]
 
-    Max total length is 80 chars. client_name is capped at 39 chars and db_name
-    at 40 chars, giving: 39 + '_' + 40 = 80 chars worst case.
+    Version 1 (or no version) omits the suffix for backward compatibility.
+    Version 2+ appends _v{version} to ensure uniqueness when multiple connectors
+    exist for the same database connection.
 
-    The version parameter is accepted for backwards compatibility but is not included
-    in the connector name. Versioning is tracked in backend fields only.
+    Max total length is 80 chars.
 
     Args:
         client: Client instance
         db_config: ClientDatabase instance
-        version: Accepted but unused in the name (kept for backwards compatibility)
+        version: Connector version number; appended as _v{N} when > 1
 
     Returns:
         str: Connector name (max 80 chars)
     """
-    # Clean client name (remove spaces, special chars) and cap at 39 chars
+    # Clean client name (remove spaces, special chars)
     client_name = client.name.lower().replace(' ', '_').replace('-', '_')
     client_name = ''.join(c for c in client_name if c.isalnum() or c == '_')
-    client_name = client_name[:39]
 
-    # Clean database name and cap at 40 chars
+    # Clean database name
     db_name = db_config.connection_name.lower().replace(' ', '_').replace('-', '_')
     db_name = ''.join(c for c in db_name if c.isalnum() or c == '_')
-    db_name = db_name[:40]
 
-    connector_name = f"{client_name}_{db_name}"
+    # For version > 1, append _v{version} suffix and adjust base name lengths to stay ≤ 80 chars
+    if version and version > 1:
+        suffix = f"_v{version}"
+        # Reserve space for suffix: total = client_name + '_' + db_name + suffix ≤ 80
+        available = 80 - 1 - len(suffix)  # 1 for the separator '_'
+        client_name = client_name[:min(39, available // 2)]
+        db_name = db_name[:min(40, available - len(client_name))]
+        connector_name = f"{client_name}_{db_name}{suffix}"
+    else:
+        client_name = client_name[:39]
+        db_name = db_name[:40]
+        connector_name = f"{client_name}_{db_name}"
 
     logger.debug(f"Generated connector name: {connector_name}")
     return connector_name
@@ -329,7 +338,6 @@ def get_postgresql_connector_config(
     publication_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in publication_name)
     publication_name = publication_name[:63]
 
-    # ✅ CRITICAL FIX: Create signal table name
     signal_table = f"{schema_name}.debezium_signal"
 
     logger.debug(f"PostgreSQL connector: {connector_name}, slot: {safe_slot_name}, publication: {publication_name}")

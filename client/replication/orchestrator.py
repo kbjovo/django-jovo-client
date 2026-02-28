@@ -350,6 +350,9 @@ class ReplicationOrchestrator:
                             notes="Deleted via orchestrator"
                         )
                         self._log_info(f"✓ Deleted source: {source_connector_name}")
+                        # Drop the PostgreSQL replication slot and publication now that
+                        # the connector is gone and the slot is no longer active.
+                        self._drop_postgresql_slot()
                     else:
                         self._log_warning(f"⚠️ Source deletion failed: {error}")
                 except Exception as e:
@@ -468,6 +471,70 @@ class ReplicationOrchestrator:
             error_msg = f"Failed to delete: {str(e)}"
             self._log_error(error_msg)
             return False, error_msg
+
+    # ==========================================
+    # PostgreSQL Slot / Publication Cleanup
+    # ==========================================
+
+    def _drop_postgresql_slot(self) -> None:
+        """
+        Drop the PostgreSQL replication slot and publication for this connector version.
+
+        Called after the Kafka Connect source connector has been deleted so the slot
+        is no longer active.  Silently skips if the source DB is not PostgreSQL or if
+        the slot/publication don't exist.
+        """
+        db_config = self.config.client_database
+        if db_config.db_type.lower() != 'postgresql':
+            return
+
+        import re
+        match = re.search(r'_v_(\d+)$', self.config.kafka_topic_prefix or '')
+        version = int(match.group(1)) if match else 0
+
+        client_id = db_config.client_id
+        db_id = db_config.id
+
+        slot_name = f"debezium_{client_id}_{db_id}_v_{version}"
+        slot_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in slot_name)[:63]
+
+        pub_name = f"debezium_pub_{client_id}_{db_id}_v_{version}"
+        pub_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in pub_name)[:63]
+
+        try:
+            from sqlalchemy import create_engine
+            engine = create_engine(db_config.get_connection_url(), pool_pre_ping=True)
+            with engine.connect() as conn:
+                # If the Kafka Connect worker hasn't fully released the slot yet,
+                # terminate the WAL sender backend holding it so the drop succeeds immediately.
+                conn.execute(
+                    text(
+                        "SELECT pg_terminate_backend(active_pid) "
+                        "FROM pg_replication_slots "
+                        "WHERE slot_name = :slot AND active_pid IS NOT NULL"
+                    ),
+                    {"slot": slot_name},
+                )
+
+                result = conn.execute(
+                    text(
+                        "SELECT pg_drop_replication_slot(slot_name) "
+                        "FROM pg_replication_slots "
+                        "WHERE slot_name = :slot"
+                    ),
+                    {"slot": slot_name},
+                )
+                if result.rowcount:
+                    self._log_info(f"✓ Dropped replication slot: {slot_name}")
+                else:
+                    self._log_info(f"ℹ️ Replication slot not found (already gone): {slot_name}")
+
+                conn.execute(text(f'DROP PUBLICATION IF EXISTS "{pub_name}"'))
+                conn.commit()
+                self._log_info(f"✓ Dropped publication: {pub_name}")
+
+        except Exception as e:
+            self._log_warning(f"⚠️ Could not drop PostgreSQL slot/publication ({slot_name}): {e}")
 
     # ==========================================
     # Efficient Sink Connector Management
@@ -1253,6 +1320,9 @@ class ReplicationOrchestrator:
                     # Parse schema and table name
                     if (db_config.db_type in ['mssql', 'oracle']) and '.' in table_name:
                         source_schema, actual_table_name = table_name.split('.', 1)
+                    elif db_config.db_type == 'postgresql':
+                        source_schema = 'public'
+                        actual_table_name = table_name
                     else:
                         source_schema = schema.get('schema', '')
                         actual_table_name = table_name
@@ -1266,8 +1336,7 @@ class ReplicationOrchestrator:
                     elif db_config.db_type == 'mysql':
                         target_table_name = f"{db_config.database_name}_{actual_table_name}"
                     elif db_config.db_type == 'postgresql':
-                        pg_schema = source_schema or 'public'
-                        target_table_name = f"{pg_schema}_{actual_table_name}"
+                        target_table_name = f"{db_config.database_name}_{actual_table_name}"
                     elif db_config.db_type == 'mssql':
                         mssql_schema = source_schema or 'dbo'
                         target_table_name = f"{mssql_schema}_{actual_table_name}"
@@ -1419,9 +1488,52 @@ class ReplicationOrchestrator:
             })
 
             # ========================================
-            # STEP 4: Send incremental snapshot signal
+            # STEP 4: Update sink connector BEFORE snapshot signal
             # ========================================
-            self._log_info("STEP 4/6: Sending incremental snapshot signal...")
+            # CRITICAL ORDER: sink config must be updated (with custom table rename
+            # transforms) BEFORE the snapshot signal is sent.  The sink's topics.regex
+            # already subscribes to the new topic, so snapshot records start arriving
+            # the moment the signal fires.  If the sink still has the old config at that
+            # point, extractTableName routes every record to the wrong table (e.g.
+            # kbbio_busy_acc_greenera instead of kbbio_busy_acc_greenera_tst) and the
+            # custom target table is never created.
+            self._log_info("STEP 4/6: Updating sink connector (before snapshot signal)...")
+
+            if self.config.sink_connector_name:
+                target_db = client.get_target_database()
+                if target_db:
+                    sink_ok, sink_err = self._update_sink_connector(
+                        self.config.sink_connector_name,
+                        set(),  # topics unused — sink uses topics.regex
+                        target_db
+                    )
+                    if sink_ok:
+                        self._log_info("✓ Sink connector config updated with new table transforms")
+                        steps.append({
+                            'id': 'sink',
+                            'status': 'ok',
+                            'msg': "Sink connector updated with new table transforms",
+                        })
+                    else:
+                        self._log_warning(f"⚠️ Sink connector update failed: {sink_err}")
+                        steps.append({
+                            'id': 'sink',
+                            'status': 'warn',
+                            'msg': f"Sink connector update failed: {sink_err}",
+                        })
+                else:
+                    self.connector_manager.restart_connector(self.config.sink_connector_name)
+                    self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
+                    steps.append({
+                        'id': 'sink',
+                        'status': 'ok',
+                        'msg': "Sink connector restarted",
+                    })
+
+            # ========================================
+            # STEP 5: Send incremental snapshot signal
+            # ========================================
+            self._log_info("STEP 5/6: Sending incremental snapshot signal...")
 
             from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
 
@@ -1445,37 +1557,6 @@ class ReplicationOrchestrator:
                 'status': 'ok' if recv_result['confirmed'] else 'warn',
                 'msg': recv_result['msg'],
             })
-
-            # ========================================
-            # STEP 5: Restart sink connector
-            # ========================================
-            self._log_info("STEP 5/6: Restarting sink connector...")
-
-            if self.config.sink_connector_name:
-                # Update sink connector config so any new custom table rename transforms
-                # (for tables with non-default target names) are applied, then restart
-                # to pick up the new topics via topics.regex auto-subscription.
-                target_db = client.get_target_database()
-                if target_db:
-                    self._update_sink_connector(
-                        self.config.sink_connector_name,
-                        set(),  # topics unused — sink uses topics.regex
-                        target_db
-                    )
-                    self._log_info("✓ Sink connector config updated with new table transforms")
-                    steps.append({
-                        'id': 'sink',
-                        'status': 'ok',
-                        'msg': "Sink connector updated with new table transforms",
-                    })
-                else:
-                    self.connector_manager.restart_connector(self.config.sink_connector_name)
-                    self._log_info("✓ Sink connector restarted (uses topics.regex for auto-subscription)")
-                    steps.append({
-                        'id': 'sink',
-                        'status': 'ok',
-                        'msg': "Sink connector restarted",
-                    })
 
             # ========================================
             # STEP 5.5: Add foreign keys to new target tables

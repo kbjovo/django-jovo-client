@@ -45,8 +45,9 @@ def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
 
         all_mappings = TableMapping.objects.filter(
             replication_config__client_database__client=client,
+            replication_config__status__in=['configured', 'active', 'paused', 'error'],
             is_enabled=True,
-        ).select_related('replication_config__client_database')
+        ).select_related('replication_config__client_database').order_by('-id')
 
         custom_transform_names: List[str] = []
         seen_names: set = set()
@@ -61,7 +62,11 @@ def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
             if db_type == 'mysql':
                 schema_in_topic = source_db.database_name
             elif db_type == 'postgresql':
-                schema_in_topic = source_schema or 'public'
+                # The PostgreSQL source connector applies a routeTopic RegexRouter transform
+                # that replaces the schema segment with database_name in every topic:
+                #   {prefix}.public.table  →  {prefix}.{database_name}.table
+                # So the segment to match in the topic is database_name, not source_schema.
+                schema_in_topic = source_db.database_name
             elif db_type in ('mssql', 'sqlserver'):
                 schema_in_topic = source_schema or 'dbo'
             elif db_type == 'oracle':
@@ -303,9 +308,15 @@ def get_postgresql_sink_connector_config(
         "hibernate.c3p0.idle_test_period": "300",
 
         # Transforms
-        # castMicroTime: MySQL TIME columns > 24h cause a DateTimeException in the JDBC sink.
-        # Casting to string stores the raw microsecond value and avoids the crash.
+        # unwrap: flattens the Debezium envelope so downstream transforms (castMicroTime)
+        # and the JDBC sink see the actual row columns, not the {before/after/op/source} struct.
+        # Without this, Cast$Value throws DataException because time_taken is inside 'after',
+        # not at the top level — causing the connector task to fail and preventing table creation.
         # Custom per-table rename transforms are injected below after querying table mappings.
+        "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+        "transforms.unwrap.drop.tombstones": "true",
+        "transforms.unwrap.delete.handling.mode": "rewrite",
+
         "transforms.extractTableName.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.extractTableName.regex": ".*\\.([^.]+)\\.([^.]+)",
         "transforms.extractTableName.replacement": "$1_$2",
@@ -385,12 +396,12 @@ def get_postgresql_sink_connector_config(
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
     # Build custom per-table rename transforms and assemble the full transforms chain.
-    # Custom transforms are prepended so they run before the generic extractTableName.
+    # Order: unwrap (flatten envelope) → custom renames → extractTableName → castMicroTime
     custom_transforms = _get_custom_table_transforms(client, config)
     if custom_transforms:
-        config["transforms"] = ",".join(custom_transforms) + ",extractTableName,castMicroTime"
+        config["transforms"] = "unwrap," + ",".join(custom_transforms) + ",extractTableName,castMicroTime"
     else:
-        config["transforms"] = "extractTableName,castMicroTime"
+        config["transforms"] = "unwrap,extractTableName,castMicroTime"
 
     if custom_config:
         config.update(custom_config)
