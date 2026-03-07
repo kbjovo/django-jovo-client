@@ -992,7 +992,7 @@ class ReplicationOrchestrator:
 
             kafka_bootstrap = settings.DEBEZIUM_CONFIG['KAFKA_INTERNAL_SERVERS']
             schema_registry = settings.DEBEZIUM_CONFIG.get(
-                'SCHEMA_REGISTRY_URL',
+                'SCHEMA_REGISTRY_INTERNAL_URL',
                 'http://schema-registry:8081'
             )
 

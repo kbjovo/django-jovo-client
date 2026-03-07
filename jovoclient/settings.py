@@ -533,6 +533,9 @@ DEBEZIUM_CONFIG = {
     ),
 
     'SCHEMA_REGISTRY_URL': os.getenv('SCHEMA_REGISTRY_URL', 'http://localhost:8082'),
+
+    # Internal Schema Registry URL (for Docker container communication, used in connector configs)
+    'SCHEMA_REGISTRY_INTERNAL_URL': os.getenv('SCHEMA_REGISTRY_INTERNAL_URL', 'http://schema-registry:8081'),
     'CONSUMER_GROUP_PREFIX': 'cdc_consumer',
 
     # Max tables per source connector to prevent worker OOM during snapshots
