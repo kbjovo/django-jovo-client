@@ -315,6 +315,24 @@
     <!-- Source connection — always primary -->
     <input type="hidden" name="is_primary" value="on">
 
+    <!-- Replication Check Result (shown after successful test for MySQL/PostgreSQL) -->
+    <div x-show="replicationResult !== null" x-transition class="rounded-lg border px-3 py-2.5 text-xs"
+         :class="replicationResult && replicationResult.allOk
+             ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+             : 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800'">
+        <p class="font-semibold mb-1"
+           :class="replicationResult && replicationResult.allOk ? 'text-green-700 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'"
+           x-text="replicationResult && replicationResult.allOk ? 'Replication ready' : 'Replication — action required'">
+        </p>
+        <template x-for="item in (replicationResult ? replicationResult.items : [])" :key="item.label">
+            <div class="flex items-center gap-1.5 mt-0.5"
+                 :class="item.ok ? 'text-green-700 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'">
+                <span x-text="item.ok ? '✓' : '⚠'"></span>
+                <span x-text="item.label"></span>
+            </div>
+        </template>
+    </div>
+
     <!-- Form Actions -->
     <div class="flex items-center justify-end gap-3 pt-5 border-t border-gray-200 dark:border-gray-700">
       <button
@@ -390,6 +408,7 @@
       isTestingConnection: false,
       isSaving: false,
       isUpdateMode: {{ is_update|yesno:"true,false" }},
+      replicationResult: null,
 
       init() {
         if (this.isUpdateMode) {
@@ -458,8 +477,24 @@
         }
       },
 
+      buildReplicationResult(replication, dbType) {
+        if (!replication) return null;
+        const items = [];
+        if (dbType === 'mysql') {
+          items.push({ label: 'Binary logging (log_bin ON)', ok: replication.log_bin });
+          items.push({ label: 'GTID mode enabled', ok: replication.gtid_mode });
+          items.push({ label: 'REPLICATION SLAVE privilege', ok: replication.has_replication_slave });
+          if (replication.error) items.push({ label: 'Check error: ' + replication.error, ok: false });
+        } else if (dbType === 'postgresql' || dbType === 'postgres') {
+          items.push({ label: 'REPLICATION role granted', ok: replication.has_replication });
+          if (replication.error) items.push({ label: 'Check error: ' + replication.error, ok: false });
+        }
+        return { items, allOk: items.length > 0 && items.every(i => i.ok) };
+      },
+
       async testConnection() {
         this.isTestingConnection = true;
+        this.replicationResult = null;
         const formData = new FormData();
         Object.keys(this.formData).forEach(key => formData.append(key, this.formData[key]));
         formData.append('test_only', 'true');
@@ -474,6 +509,9 @@
           });
           const result = await response.json();
           this.isTestingConnection = false;
+          if (result.success && result.replication) {
+            this.replicationResult = this.buildReplicationResult(result.replication, this.formData.db_type);
+          }
           this.$dispatch('show-test-result', {
             success: result.success,
             message: result.message,

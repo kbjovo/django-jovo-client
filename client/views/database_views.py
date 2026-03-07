@@ -22,6 +22,54 @@ from client.replication.orchestrator import ReplicationOrchestrator
 logger = logging.getLogger(__name__)
 
 
+def _check_mysql_replication(db_instance) -> dict:
+    """
+    Quick replication readiness check for a MySQL source.
+    Returns dict with: log_bin, gtid_mode, has_replication_slave, error
+    """
+    result = {'log_bin': False, 'gtid_mode': False, 'has_replication_slave': False, 'error': ''}
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(db_instance.get_connection_url(), pool_pre_ping=True)
+        with engine.connect() as conn:
+            row = conn.execute(text("SHOW VARIABLES LIKE 'log_bin'")).fetchone()
+            result['log_bin'] = row and row[1].upper() == 'ON'
+
+            row = conn.execute(text("SHOW VARIABLES LIKE 'gtid_mode'")).fetchone()
+            result['gtid_mode'] = row and row[1].upper() == 'ON'
+
+            grants = conn.execute(text("SHOW GRANTS FOR CURRENT_USER()")).fetchall()
+            grants_text = ' '.join(str(g[0]).upper() for g in grants)
+            result['has_replication_slave'] = (
+                'ALL PRIVILEGES' in grants_text
+                or 'REPLICATION SLAVE' in grants_text
+            )
+        engine.dispose()
+    except Exception as e:
+        result['error'] = str(e)
+    return result
+
+
+def _check_postgresql_replication(db_instance) -> dict:
+    """
+    Quick replication readiness check for a PostgreSQL source.
+    Returns dict with: has_replication, error
+    """
+    result = {'has_replication': False, 'error': ''}
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(db_instance.get_connection_url(), pool_pre_ping=True)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT rolreplication FROM pg_roles WHERE rolname = current_user"
+            )).fetchone()
+            result['has_replication'] = bool(row[0]) if row else False
+        engine.dispose()
+    except Exception as e:
+        result['error'] = str(e)
+    return result
+
+
 class ClientDatabaseCreateView(CreateView):
     """
     Create a new database connection for a client.
@@ -60,13 +108,18 @@ class ClientDatabaseCreateView(CreateView):
                 temp_instance.client = self.client
 
                 try:
-                    # Test connection
                     status = temp_instance.check_connection_status(save=False)
-
                     if status == 'success':
+                        replication = None
+                        db_type = (temp_instance.db_type or '').lower()
+                        if db_type == 'mysql':
+                            replication = _check_mysql_replication(temp_instance)
+                        elif db_type in ('postgresql', 'postgres'):
+                            replication = _check_postgresql_replication(temp_instance)
                         return JsonResponse({
                             'success': True,
-                            'message': '✓ Connection test successful! The database is reachable and credentials are valid.'
+                            'message': '✓ Connection test successful! The database is reachable and credentials are valid.',
+                            'replication': replication,
                         })
                     else:
                         return JsonResponse({
@@ -74,19 +127,16 @@ class ClientDatabaseCreateView(CreateView):
                             'message': '✗ Connection test failed. Unable to connect to the database. Please verify the host, port, username, and password are correct.'
                         })
                 except Exception as e:
-                    # Return user-friendly error message (traceback suppressed)
                     error_message = str(e)
                     return JsonResponse({
                         'success': False,
                         'message': f'✗ Connection test failed: {error_message}'
                     })
             else:
-                # Form validation failed
                 errors = []
                 for field, error_list in form.errors.items():
                     for error in error_list:
                         errors.append(f"{field}: {error}")
-
                 return JsonResponse({
                     'success': False,
                     'message': f'✗ Please fill in all required fields correctly. {", ".join(errors)}'
@@ -155,9 +205,16 @@ class ClientDatabaseUpdateView(UpdateView):
             try:
                 status = self.object.check_connection_status(save=False)
                 if status == 'success':
+                    replication = None
+                    db_type = (self.object.db_type or '').lower()
+                    if db_type == 'mysql':
+                        replication = _check_mysql_replication(self.object)
+                    elif db_type in ('postgresql', 'postgres'):
+                        replication = _check_postgresql_replication(self.object)
                     return JsonResponse({
                         'success': True,
-                        'message': '✓ Connection test successful!'
+                        'message': '✓ Connection test successful!',
+                        'replication': replication,
                     })
                 else:
                     error_message = getattr(self.object, 'last_error', 'Connection failed')
@@ -186,13 +243,18 @@ class ClientDatabaseUpdateView(UpdateView):
                     temp_instance.password = self.object.password
 
                 try:
-                    # Test connection
                     status = temp_instance.check_connection_status(save=False)
-
                     if status == 'success':
+                        replication = None
+                        db_type = (temp_instance.db_type or '').lower()
+                        if db_type == 'mysql':
+                            replication = _check_mysql_replication(temp_instance)
+                        elif db_type in ('postgresql', 'postgres'):
+                            replication = _check_postgresql_replication(temp_instance)
                         return JsonResponse({
                             'success': True,
-                            'message': '✓ Connection test successful! The database is reachable and credentials are valid.'
+                            'message': '✓ Connection test successful! The database is reachable and credentials are valid.',
+                            'replication': replication,
                         })
                     else:
                         return JsonResponse({
@@ -200,19 +262,16 @@ class ClientDatabaseUpdateView(UpdateView):
                             'message': '✗ Connection test failed. Unable to connect to the database. Please verify the host, port, username, and password are correct.'
                         })
                 except Exception as e:
-                    # Return user-friendly error message (traceback suppressed)
                     error_message = str(e)
                     return JsonResponse({
                         'success': False,
                         'message': f'✗ Connection test failed: {error_message}'
                     })
             else:
-                # Form validation failed
                 errors = []
                 for field, error_list in form.errors.items():
                     for error in error_list:
                         errors.append(f"{field}: {error}")
-
                 return JsonResponse({
                     'success': False,
                     'message': f'✗ Please fill in all required fields correctly. {", ".join(errors)}'

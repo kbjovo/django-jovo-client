@@ -23,6 +23,12 @@ _CONSUMER_LOCK_PREFIX = 'ddl_consumer_lock'
 _CONSUMER_LOCK_TTL = 60        # seconds; must be > LOCK_REFRESH_INTERVAL
 _LOCK_REFRESH_INTERVAL = 10.0  # refresh TTL every 10 seconds in the consumer loop
 
+# Pending-start flag: set before queuing a start task, cleared when the task begins.
+# Prevents multiple ensure_continuous_ddl_consumers calls from each queuing a separate
+# start_continuous_ddl_consumer task for the same config (task-storm on worker restart).
+_CONSUMER_PENDING_PREFIX = 'ddl_consumer_pending'
+_CONSUMER_PENDING_TTL = 30     # seconds; must be > worker task pickup latency
+
 
 def _get_redis():
     """Create a fresh Redis client from the Celery broker URL."""
@@ -84,6 +90,111 @@ def _is_consumer_running(config_id: int) -> bool:
         return False
 
 
+def _consumer_pending_key(config_id: int) -> str:
+    return f'{_CONSUMER_PENDING_PREFIX}:{config_id}'
+
+
+def _mark_consumer_pending(config_id: int) -> bool:
+    """
+    Atomically set the pending-start flag (SET NX EX).
+    Returns True only if the flag was newly set (this caller "owns" the queuing).
+    """
+    try:
+        r = _get_redis()
+        return bool(r.set(_consumer_pending_key(config_id), '1', ex=_CONSUMER_PENDING_TTL, nx=True))
+    except Exception as e:
+        logger.warning(f"Redis pending flag set failed for config {config_id}: {e}")
+        return False
+
+
+def _clear_consumer_pending(config_id: int) -> None:
+    """Clear the pending-start flag (called when the start task actually executes)."""
+    try:
+        _get_redis().delete(_consumer_pending_key(config_id))
+    except Exception as e:
+        logger.warning(f"Redis pending flag clear failed for config {config_id}: {e}")
+
+
+def _is_consumer_active(config_id: int) -> bool:
+    """Return True if the consumer is running OR a start task is already pending."""
+    try:
+        r = _get_redis()
+        return bool(r.exists(_consumer_lock_key(config_id))) or bool(r.exists(_consumer_pending_key(config_id)))
+    except Exception:
+        return False
+
+
+# ============================================================================
+# REDIS-BASED SUPERVISOR LOCK
+# Single supervisor task manages all configs via threads (one Celery slot total)
+# ============================================================================
+
+_SUPERVISOR_LOCK_KEY     = 'ddl_supervisor_lock'
+_SUPERVISOR_LOCK_TTL     = 90    # seconds; must be > LOCK_REFRESH_INTERVAL
+_SUPERVISOR_PENDING_KEY  = 'ddl_supervisor_pending'
+_SUPERVISOR_PENDING_TTL  = 60    # seconds
+_CONFIG_REFRESH_INTERVAL = 10.0  # re-query active configs every N seconds
+_SUPERVISOR_POLL_INTERVAL = 5.0  # main-loop tick
+
+
+def _acquire_supervisor_lock(task_id: str) -> bool:
+    try:
+        r = _get_redis()
+        return bool(r.set(_SUPERVISOR_LOCK_KEY, task_id, ex=_SUPERVISOR_LOCK_TTL, nx=True))
+    except Exception as e:
+        logger.warning(f"Redis supervisor lock acquire failed: {e}")
+        return False
+
+
+def _release_supervisor_lock() -> None:
+    try:
+        _get_redis().delete(_SUPERVISOR_LOCK_KEY)
+    except Exception as e:
+        logger.warning(f"Redis supervisor lock release failed: {e}")
+
+
+def _refresh_supervisor_lock() -> bool:
+    try:
+        return bool(_get_redis().expire(_SUPERVISOR_LOCK_KEY, _SUPERVISOR_LOCK_TTL))
+    except Exception as e:
+        logger.warning(f"Redis supervisor lock refresh failed: {e}")
+        return True  # fail open
+
+
+def _is_supervisor_running() -> bool:
+    try:
+        return bool(_get_redis().exists(_SUPERVISOR_LOCK_KEY))
+    except Exception:
+        return False
+
+
+def _mark_supervisor_pending() -> bool:
+    try:
+        r = _get_redis()
+        return bool(r.set(_SUPERVISOR_PENDING_KEY, '1', ex=_SUPERVISOR_PENDING_TTL, nx=True))
+    except Exception as e:
+        logger.warning(f"Redis supervisor pending flag set failed: {e}")
+        return False
+
+
+def _clear_supervisor_pending() -> None:
+    try:
+        _get_redis().delete(_SUPERVISOR_PENDING_KEY)
+    except Exception as e:
+        logger.warning(f"Redis supervisor pending flag clear failed: {e}")
+
+
+def _is_supervisor_active() -> bool:
+    try:
+        r = _get_redis()
+        return (
+            bool(r.exists(_SUPERVISOR_LOCK_KEY))
+            or bool(r.exists(_SUPERVISOR_PENDING_KEY))
+        )
+    except Exception:
+        return False
+
+
 # ============================================================================
 # UNIFIED DDL PROCESSING TASKS
 # ============================================================================
@@ -95,7 +206,10 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
 
     Automatically selects the appropriate processor based on source database type:
     - MySQL/MSSQL: Kafka-based DDL processor (consumes schema history topic)
-    - PostgreSQL: Schema sync service (periodic comparison)
+    - PostgreSQL: Kafka-based DDL processor (consumes ddl_capture.ddl_events topic)
+
+    For types that also have a continuous consumer, this task acts as a batch
+    fallback that runs only when the continuous consumer is not active.
 
     Args:
         config_id: ReplicationConfig ID
@@ -104,7 +218,7 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
     Returns:
         Dict with processing results
     """
-    from client.utils.ddl import KafkaDDLProcessor, PostgreSQLSchemaSyncService
+    from client.utils.ddl import KafkaDDLProcessor, PostgreSQLKafkaDDLProcessor, PostgreSQLSchemaSyncService
 
     try:
         config = ReplicationConfig.objects.get(id=config_id)
@@ -124,12 +238,13 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
     processor = None
 
     try:
+        kafka_servers = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_BOOTSTRAP_SERVERS',
+            'localhost:9092,localhost:9094,localhost:9096'
+        )
+
         if source_type in ('mysql', 'mssql', 'sqlserver'):
             # Kafka-based processor for MySQL/MSSQL
-            kafka_servers = settings.DEBEZIUM_CONFIG.get(
-                'KAFKA_BOOTSTRAP_SERVERS',
-                'localhost:9092,localhost:9094,localhost:9096'
-            )
             processor = KafkaDDLProcessor(
                 replication_config=config,
                 target_engine=target_engine,
@@ -139,18 +254,17 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
             processed, errors = processor.process(timeout_sec=30, max_messages=100)
 
         elif source_type in ('postgresql', 'postgres'):
-            # PostgreSQL DDL is handled by continuous DDL consumer (PostgreSQLKafkaDDLProcessor)
-            # which consumes from ddl_capture.ddl_events Kafka topic.
-            # Schema sync service is DISABLED because it detects RENAME as DROP+ADD causing data loss.
-            logger.debug(f"Skipping PostgreSQL schema sync for config {config_id} - handled by continuous DDL consumer")
-            return {
-                'success': True,
-                'config_id': config_id,
-                'source_type': source_type,
-                'processed': 0,
-                'errors': 0,
-                'message': 'PostgreSQL DDL handled by continuous consumer'
-            }
+            # Batch fallback: use PostgreSQLKafkaDDLProcessor when the continuous
+            # consumer is not running (e.g. ddl_consumer queue at capacity).
+            # The continuous consumer (start_continuous_ddl_consumer) is the preferred
+            # path; this task acts as a catch-up run when it's unavailable.
+            processor = PostgreSQLKafkaDDLProcessor(
+                replication_config=config,
+                target_engine=target_engine,
+                bootstrap_servers=kafka_servers,
+                auto_execute_destructive=auto_destructive
+            )
+            processed, errors = processor.process(timeout_sec=30, max_messages=100)
 
         else:
             logger.warning(f"DDL processing not supported for source type: {source_type}")
@@ -202,14 +316,16 @@ def schedule_ddl_processing_all():
     Called periodically by Celery Beat (every 1 minute).
     Processes DDL for MySQL, MSSQL, and PostgreSQL sources.
 
-    MySQL/MSSQL configs are skipped when a continuous DDL consumer is already running
-    for them — both share the same Kafka consumer group, so running both simultaneously
-    causes unnecessary rebalances with no benefit. The batch task only fires for configs
-    whose continuous consumer has stopped (acts as a fallback).
+    All source types are skipped when their consumer is active (running or pending) —
+    both the batch task and the supervisor-managed thread share the same Kafka consumer
+    group, so running both simultaneously causes unnecessary rebalances with no benefit.
+    The batch task fires only as a fallback when the supervisor thread is down.
     """
     supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
-    # Kafka-based sources that have a continuous consumer (see start_continuous_ddl_consumer)
-    continuous_consumer_types = ('mysql', 'mssql', 'sqlserver')
+    # All source types that have a continuous consumer (see start_continuous_ddl_consumer).
+    # When the consumer is running we skip the batch task to avoid competing on the same
+    # Kafka consumer group. The batch task fires as a fallback when the consumer is down.
+    continuous_consumer_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
 
     active_configs = ReplicationConfig.objects.filter(
         status='active',
@@ -222,9 +338,11 @@ def schedule_ddl_processing_all():
         if source_type not in supported_types:
             continue
 
-        # Skip if a continuous consumer is already handling this config.
-        # Avoids competing on the same Kafka consumer group and causing rebalances.
-        if source_type in continuous_consumer_types and _is_consumer_running(config.id):
+        # Skip if a consumer is running OR pending for this config.
+        # Using _is_consumer_active (not just _is_consumer_running) avoids firing
+        # a batch task during the supervisor's startup window when the per-config
+        # thread is pending but not yet holding the lock.
+        if source_type in continuous_consumer_types and _is_consumer_active(config.id):
             continue
 
         process_ddl_changes.delay(config.id)
@@ -237,12 +355,246 @@ def schedule_ddl_processing_all():
 
 
 @shared_task(bind=True, queue='ddl_consumer', time_limit=None, soft_time_limit=None)
+def start_ddl_supervisor(self):
+    """
+    Single supervisor task that manages DDL consumers for ALL active configs.
+
+    Replaces N per-config start_continuous_ddl_consumer tasks with 1 Celery task
+    that spawns per-config threads internally.  One worker slot serves every source
+    database simultaneously regardless of how many configs exist.
+
+    Thread lifecycle:
+    - A thread is started for each active ReplicationConfig.
+    - If a thread crashes it is restarted on the next poll tick (every 5 s).
+    - If the per-config Redis lock is externally deleted (e.g. by the orchestrator
+      to force a connector-version restart) the thread is stopped and restarted so
+      it picks up the updated connector_version from the database.
+    - Config changes (new configs added, configs deactivated) are detected every
+      _CONFIG_REFRESH_INTERVAL seconds without restarting the whole supervisor.
+
+    Stopped by: stop_ddl_supervisor() or by deleting the supervisor lock key.
+    """
+    import threading
+    import time
+    from django.db import close_old_connections
+    from client.utils.ddl import KafkaDDLProcessor, PostgreSQLKafkaDDLProcessor
+
+    task_id = self.request.id or 'ddl-supervisor'
+    _clear_supervisor_pending()
+
+    if not _acquire_supervisor_lock(task_id):
+        logger.info("DDL supervisor already running (lock held)")
+        return {'success': False, 'error': 'Already running'}
+
+    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+    threads: dict = {}      # config_id -> Thread
+    stop_events: dict = {}  # config_id -> threading.Event
+
+    def _run_config(config_id: int, stop_event: threading.Event) -> None:
+        """Thread target: owns the processor loop for one ReplicationConfig."""
+        # Each thread needs its own Django DB connection.
+        close_old_connections()
+        logger.info(f"[Supervisor] DDL thread starting for config {config_id}")
+        processor = None
+        try:
+            config = ReplicationConfig.objects.get(id=config_id)
+            source_type = config.client_database.db_type.lower()
+            target_db = (
+                config.client_database.client
+                .client_databases.filter(is_target=True)
+                .first()
+            )
+            if not target_db:
+                logger.error(f"[Supervisor] No target database for config {config_id}")
+                return
+
+            target_engine = get_database_engine(target_db)
+            kafka_servers = settings.DEBEZIUM_CONFIG.get(
+                'KAFKA_BOOTSTRAP_SERVERS',
+                'localhost:9092,localhost:9094,localhost:9096',
+            )
+
+            if source_type in ('postgresql', 'postgres'):
+                processor = PostgreSQLKafkaDDLProcessor(
+                    replication_config=config,
+                    target_engine=target_engine,
+                    bootstrap_servers=kafka_servers,
+                    auto_execute_destructive=True,
+                )
+            else:
+                processor = KafkaDDLProcessor(
+                    replication_config=config,
+                    target_engine=target_engine,
+                    bootstrap_servers=kafka_servers,
+                    auto_execute_destructive=True,
+                )
+
+            while not stop_event.is_set():
+                try:
+                    # Long-poll: Kafka blocks up to timeout_sec when the topic is
+                    # empty, so no extra sleep is needed between iterations.
+                    processed, errors = processor.process(timeout_sec=10, max_messages=50)
+                    if errors:
+                        logger.warning(
+                            f"[Supervisor] Config {config_id}: "
+                            f"{processed} processed, {errors} errors"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"[Supervisor] Error in consumer for config {config_id}: {e}",
+                        exc_info=True,
+                    )
+                    stop_event.wait(timeout=5)  # back off before retrying
+
+        except ReplicationConfig.DoesNotExist:
+            logger.error(f"[Supervisor] Config {config_id} not found — thread exiting")
+        except Exception as e:
+            logger.error(
+                f"[Supervisor] Thread for config {config_id} crashed: {e}",
+                exc_info=True,
+            )
+        finally:
+            if processor:
+                try:
+                    processor.close()
+                except Exception:
+                    pass
+            # Release per-config lock so schedule_ddl_processing_all can fire as fallback.
+            _release_lock(config_id)
+            logger.info(f"[Supervisor] DDL thread stopped for config {config_id}")
+
+    def _start_thread(config_id: int) -> None:
+        """Acquire per-config lock and start a processor thread."""
+        try:
+            r = _get_redis()
+            # SET (not SET NX) — overwrite any stale lock from a previous run.
+            r.set(_consumer_lock_key(config_id), task_id, ex=_CONSUMER_LOCK_TTL)
+        except Exception:
+            pass
+        stop_events[config_id] = threading.Event()
+        t = threading.Thread(
+            target=_run_config,
+            args=(config_id, stop_events[config_id]),
+            name=f"ddl-config-{config_id}",
+            daemon=True,
+        )
+        t.start()
+        threads[config_id] = t
+        logger.info(f"[Supervisor] Started DDL thread for config {config_id}")
+
+    def _stop_thread(config_id: int) -> None:
+        """Signal a thread to stop and wait for it."""
+        if config_id in stop_events:
+            stop_events[config_id].set()
+        if config_id in threads:
+            threads[config_id].join(timeout=15)
+            del threads[config_id]
+        if config_id in stop_events:
+            del stop_events[config_id]
+        _release_lock(config_id)
+
+    try:
+        r = _get_redis()
+        last_lock_refresh = time.time()
+        last_config_refresh = 0.0  # force immediate query on first tick
+
+        while True:
+            time.sleep(_SUPERVISOR_POLL_INTERVAL)
+            now = time.time()
+
+            # 1. Refresh supervisor lock; exit if it was externally deleted.
+            if now - last_lock_refresh >= _LOCK_REFRESH_INTERVAL:
+                if not _refresh_supervisor_lock():
+                    logger.info("[Supervisor] Supervisor lock gone — shutting down")
+                    break
+                last_lock_refresh = now
+
+            # 2. Check per-config locks for running threads.
+            #    If a lock is gone (deleted externally, e.g. by the orchestrator to
+            #    force a restart with a new connector_version), stop the thread; it
+            #    will be restarted with fresh DB config in the next config-refresh step.
+            for config_id in list(threads.keys()):
+                t = threads[config_id]
+                if not t.is_alive():
+                    # Thread crashed — will be restarted in config-refresh step.
+                    del threads[config_id]
+                    if config_id in stop_events:
+                        del stop_events[config_id]
+                    continue
+                try:
+                    if r.exists(_consumer_lock_key(config_id)):
+                        r.expire(_consumer_lock_key(config_id), _CONSUMER_LOCK_TTL)
+                    else:
+                        logger.info(
+                            f"[Supervisor] Lock released for config {config_id} "
+                            "— restarting thread (connector version change?)"
+                        )
+                        stop_events[config_id].set()
+                        threads[config_id].join(timeout=15)
+                        del threads[config_id]
+                        del stop_events[config_id]
+                except Exception as e:
+                    logger.warning(f"[Supervisor] Redis error for config {config_id}: {e}")
+
+            # 3. Periodically re-query active configs to start/stop threads.
+            if now - last_config_refresh < _CONFIG_REFRESH_INTERVAL:
+                continue
+            last_config_refresh = now
+
+            try:
+                close_old_connections()
+                active_ids = {
+                    c.id
+                    for c in ReplicationConfig.objects.filter(
+                        status='active', is_active=True,
+                    ).select_related('client_database')
+                    if c.client_database.db_type.lower() in supported_types
+                }
+            except Exception as e:
+                logger.error(f"[Supervisor] DB query failed: {e}")
+                continue
+
+            # Start threads for new or crashed configs.
+            for config_id in active_ids:
+                if config_id not in threads or not threads[config_id].is_alive():
+                    _start_thread(config_id)
+
+            # Stop threads for configs that are no longer active.
+            for config_id in list(threads.keys()):
+                if config_id not in active_ids:
+                    logger.info(f"[Supervisor] Config {config_id} deactivated — stopping thread")
+                    _stop_thread(config_id)
+
+    except Exception as e:
+        logger.error(f"[Supervisor] Fatal error: {e}", exc_info=True)
+    finally:
+        logger.info(f"[Supervisor] Shutting down {len(threads)} thread(s)")
+        for config_id in list(threads.keys()):
+            _stop_thread(config_id)
+        _release_supervisor_lock()
+        logger.info("[Supervisor] DDL supervisor stopped")
+
+    return {'success': True}
+
+
+@shared_task
+def stop_ddl_supervisor():
+    """Stop the DDL supervisor by releasing its lock."""
+    if _is_supervisor_running():
+        _release_supervisor_lock()
+        logger.info("Stopping DDL supervisor")
+        return {'success': True}
+    return {'success': False, 'error': 'Supervisor not running'}
+
+
+@shared_task(bind=True, queue='ddl_consumer', time_limit=None, soft_time_limit=None)
 def start_continuous_ddl_consumer(self, config_id: int):
     """
-    Start a continuous Kafka consumer for real-time DDL processing.
+    Start a continuous Kafka consumer for a single config.
 
-    This runs indefinitely, processing DDL changes as they arrive.
-    Use stop_continuous_ddl_consumer() to stop it.
+    Legacy per-config consumer kept for manual use or overrides.
+    The preferred path is start_ddl_supervisor() which handles all configs
+    in one task via threads.  Use stop_continuous_ddl_consumer() to stop it.
 
     Supports:
     - MySQL/MSSQL: Uses KafkaDDLProcessor (schema history topic)
@@ -252,6 +604,11 @@ def start_continuous_ddl_consumer(self, config_id: int):
     import time
 
     task_id = self.request.id or f'consumer-{config_id}'
+
+    # Clear the pending flag now that this task is executing.
+    # This allows ensure_continuous_ddl_consumers to queue a new start task
+    # if needed after this one exits (e.g., after a crash).
+    _clear_consumer_pending(config_id)
 
     # Acquire distributed Redis lock — prevents multiple workers from running the
     # same consumer simultaneously (fixes the per-process _running_consumers bug)
@@ -311,14 +668,13 @@ def start_continuous_ddl_consumer(self, config_id: int):
             # Continuous loop — exits when the Redis lock is deleted (by stop task or TTL expiry)
             while True:
                 try:
-                    # Process with short timeout for responsiveness
-                    processed, errors = processor.process(timeout_sec=5, max_messages=10)
+                    # Long-poll: Kafka blocks up to timeout_sec when the topic is
+                    # empty, returning immediately when messages arrive.
+                    # No extra sleep needed — the poll itself acts as the idle wait.
+                    processed, errors = processor.process(timeout_sec=10, max_messages=50)
 
                     if errors > 0:
                         logger.warning(f"[Continuous] Config {config_id}: {processed} processed, {errors} errors")
-
-                    # Small sleep to prevent tight loop when no messages
-                    time.sleep(0.1)
 
                 except Exception as e:
                     logger.error(f"Error in continuous consumer for config {config_id}: {e}")
@@ -359,38 +715,21 @@ def stop_continuous_ddl_consumer(config_id: int):
 @shared_task
 def ensure_continuous_ddl_consumers():
     """
-    Ensure continuous DDL consumers are running for all active replications.
+    Ensure the DDL supervisor is running.
 
-    Called periodically by Celery Beat to auto-start/restart consumers.
-    This keeps DDL sync always on.
+    Called periodically by Celery Beat.  Starts start_ddl_supervisor if neither
+    the supervisor nor a pending-start flag is present.  _mark_supervisor_pending
+    is atomic (SET NX) so concurrent calls only queue one supervisor task.
 
-    Supports:
-    - MySQL/MSSQL: Schema history topic
-    - PostgreSQL: ddl_capture.ddl_events topic (requires event triggers on source)
+    The supervisor manages all active configs internally via threads, so a single
+    Celery task slot handles every source type simultaneously.
     """
-    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
-
-    active_configs = ReplicationConfig.objects.filter(
-        status='active',
-        is_active=True
-    ).select_related('client_database')
-
-    started = 0
-    for config in active_configs:
-        source_type = config.client_database.db_type.lower()
-        if source_type not in supported_types:
-            continue
-
-        # Use Redis lock to check if a consumer is already running across all workers
-        if not _is_consumer_running(config.id):
-            logger.info(f"Starting continuous DDL consumer for config {config.id}")
-            start_continuous_ddl_consumer.delay(config.id)
-            started += 1
-
-    if started > 0:
-        logger.info(f"Started {started} continuous DDL consumers")
-
-    return {'started': started}
+    if not _is_supervisor_active():
+        if _mark_supervisor_pending():
+            logger.info("DDL supervisor not running — starting")
+            start_ddl_supervisor.delay()
+            return {'started': 1}
+    return {'started': 0}
 
 
 @shared_task

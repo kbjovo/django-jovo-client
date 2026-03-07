@@ -17,6 +17,7 @@ from .kafka_processor import KafkaDDLProcessor
 from .postgres_kafka_processor import PostgreSQLKafkaDDLProcessor
 from .schema_sync import PostgreSQLSchemaSyncService
 from .adapters import MySQLTargetAdapter, PostgreSQLTargetAdapter, BaseTargetAdapter
+from .postgres_setup import setup_postgresql_ddl_capture, check_postgresql_privileges
 
 __all__ = [
     'DDLOperation',
@@ -33,4 +34,6 @@ __all__ = [
     'MYSQL_TYPE_MAP',
     'MSSQL_TYPE_MAP',
     'POSTGRESQL_TYPE_MAP',
+    'setup_postgresql_ddl_capture',
+    'check_postgresql_privileges',
 ]

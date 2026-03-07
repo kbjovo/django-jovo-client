@@ -57,6 +57,7 @@ from .views.connector_action_views import (
     sink_restart,
     sink_restart_failed_tasks,
     sink_restart_all_tasks,
+    check_postgresql_privileges_api,
 )
 
 # Import provision/edit step endpoints (modal AJAX flow)
@@ -207,6 +208,11 @@ urlpatterns = [
     path('connector/<int:config_pk>/sink/restart-all-tasks/',
          sink_restart_all_tasks,
          name='sink_restart_all_tasks'),
+
+    # AJAX: PostgreSQL privilege check (used by connector_add form)
+    path('database/<int:database_pk>/check-postgresql-privileges/',
+         check_postgresql_privileges_api,
+         name='check_postgresql_privileges'),
 
     # AJAX: Table row counts (source + target)
     path('connector/<int:config_pk>/table-rows/',

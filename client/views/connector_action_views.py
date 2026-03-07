@@ -7,6 +7,7 @@ Connector Action Views (AJAX POST endpoints)
 import logging
 from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
+from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
@@ -162,3 +163,20 @@ def sink_restart_all_tasks(request, config_pk):
     except Exception as e:
         logger.error(f'Failed to restart sink tasks: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def check_postgresql_privileges_api(request, database_pk):
+    """
+    AJAX GET: Check PostgreSQL privileges for CDC + DDL capture.
+    Returns privilege status for the connector_add form.
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET required'}, status=405)
+    try:
+        db_config = get_object_or_404(ClientDatabase, pk=database_pk)
+        from client.utils.ddl.postgres_setup import check_postgresql_privileges
+        result = check_postgresql_privileges(db_config)
+        return JsonResponse(result)
+    except Exception as e:
+        logger.error(f'Privilege check error: {e}', exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)

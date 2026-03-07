@@ -169,6 +169,7 @@ def connector_add(request, database_pk):
                     status='configured',
                     is_active=False,
                     auto_create_tables=request.POST.get('auto_create_tables') == 'on',
+                    enable_ddl_sync=request.POST.get('enable_ddl_sync') == '1',
 
                     # Processing mode settings
                     processing_mode=processing_mode,

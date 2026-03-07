@@ -394,6 +394,10 @@ class ReplicationConfig(models.Model):
         default=False,
         help_text="Drop and recreate tables (only for full refresh)"
     )
+    enable_ddl_sync = models.BooleanField(
+        default=False,
+        help_text="Enable DDL sync for PostgreSQL sources (requires CREATE EVENT TRIGGER privilege)"
+    )
 
     # ====== PERFORMANCE TUNING SETTINGS ======
     # These settings control Debezium connector performance and behavior
@@ -606,6 +610,16 @@ class ReplicationConfig(models.Model):
             except Exception as e:
                 logger.warning(f"    ⚠ Error checking for orphaned tasks: {e}")
 
+            # Release DDL consumer Redis lock so ensure_continuous_ddl_consumers
+            # doesn't keep trying to restart a consumer for this (now-deleted) config.
+            try:
+                from client.tasks import _release_lock, _clear_consumer_pending
+                _release_lock(config_id)
+                _clear_consumer_pending(config_id)
+                logger.info(f"    ✓ Released DDL consumer Redis lock for config {config_id}")
+            except Exception as e:
+                logger.warning(f"    ⚠ Could not release DDL consumer lock: {e}")
+
             # ========================================
             # STEP 2: Clean up Source Connector (Debezium)
             # ========================================
@@ -629,6 +643,9 @@ class ReplicationConfig(models.Model):
                         logger.info(f"    ✓ Deleted source connector")
                     except Exception as e:
                         logger.warning(f"    ⚠ Could not delete source connector: {e}")
+
+                    # Drop PostgreSQL replication slot and publication (no-op for non-PG)
+                    self._drop_postgresql_slot()
 
                 except Exception as e:
                     logger.error(f"    ❌ Error during source connector cleanup: {e}")
@@ -681,6 +698,66 @@ class ReplicationConfig(models.Model):
                 logger.error(f"❌ Failed to delete model: {e2}")
                 raise
 
+    def _drop_postgresql_slot(self) -> None:
+        """
+        Drop the PostgreSQL replication slot and publication for this connector version.
+
+        Called after the Kafka Connect source connector has been deleted so the slot
+        is no longer active.  Silently skips if the source DB is not PostgreSQL or if
+        the slot/publication don't exist.
+        """
+        import re
+        from sqlalchemy import create_engine
+        from sqlalchemy.sql import text as sa_text
+
+        db_config = self.client_database
+        if db_config.db_type.lower() != 'postgresql':
+            return
+
+        match = re.search(r'_v_(\d+)$', self.kafka_topic_prefix or '')
+        version = int(match.group(1)) if match else 0
+
+        client_id = db_config.client_id
+        db_id = db_config.id
+
+        slot_name = f"debezium_{client_id}_{db_id}_v_{version}"
+        slot_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in slot_name)[:63]
+
+        pub_name = f"debezium_pub_{client_id}_{db_id}_v_{version}"
+        pub_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in pub_name)[:63]
+
+        try:
+            engine = create_engine(db_config.get_connection_url(), pool_pre_ping=True)
+            with engine.connect() as conn:
+                # Terminate any WAL sender holding the slot so the drop succeeds immediately.
+                conn.execute(
+                    sa_text(
+                        "SELECT pg_terminate_backend(active_pid) "
+                        "FROM pg_replication_slots "
+                        "WHERE slot_name = :slot AND active_pid IS NOT NULL"
+                    ),
+                    {"slot": slot_name},
+                )
+
+                result = conn.execute(
+                    sa_text(
+                        "SELECT pg_drop_replication_slot(slot_name) "
+                        "FROM pg_replication_slots "
+                        "WHERE slot_name = :slot"
+                    ),
+                    {"slot": slot_name},
+                )
+                if result.rowcount:
+                    logger.info(f"    ✓ Dropped replication slot: {slot_name}")
+                else:
+                    logger.info(f"    ℹ️ Replication slot not found (already gone): {slot_name}")
+
+                conn.execute(sa_text(f'DROP PUBLICATION IF EXISTS "{pub_name}"'))
+                conn.commit()
+                logger.info(f"    ✓ Dropped publication: {pub_name}")
+
+        except Exception as e:
+            logger.warning(f"    ⚠ Could not drop PostgreSQL slot/publication ({slot_name}): {e}")
 
 
 class TableMapping(models.Model):

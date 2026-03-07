@@ -162,6 +162,21 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
                     self.consumer.commit(msg)
 
                 except Exception as e:
+                    err_str = str(e).lower()
+                    exc_module = getattr(type(e), '__module__', '') or ''
+                    is_registry_conn_error = (
+                        'connection refused' in err_str
+                        or 'connection error' in err_str
+                        or 'connecterror' in type(e).__name__.lower()
+                        or 'schema_registry' in exc_module.lower()
+                    )
+                    if is_registry_conn_error:
+                        # Schema Registry temporarily unavailable — do NOT commit offset,
+                        # message will be reprocessed when SR comes back.
+                        logger.warning(
+                            f"Schema Registry unavailable, pausing DDL processing: {e}"
+                        )
+                        break
                     logger.error(f"Error processing DDL message: {e}", exc_info=True)
                     errors += 1
 
@@ -225,7 +240,7 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
         if schema_name in ('pg_catalog', 'information_schema', 'pg_toast', 'ddl_capture'):
             return True
 
-        logger.info(f"Processing PostgreSQL DDL: {event_type} {object_type} {schema_name}.{object_name}")
+        logger.debug(f"Processing PostgreSQL DDL: {event_type} {object_type} {schema_name}.{object_name}")
         logger.debug(f"DDL command: {ddl_command}")
 
         # Process based on event type
@@ -319,7 +334,7 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
 
         # Check if target table exists
         if not self.target_adapter.table_exists(target_table):
-            logger.info(
+            logger.debug(
                 f"Skipping ALTER for {target_table} - table doesn't exist yet "
                 "(sink connector will create it)"
             )
@@ -558,8 +573,10 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
         if table_mapping and table_mapping.target_table:
             return table_mapping.target_table
 
-        # Fallback: compute using schema_table convention
-        return f"{schema_name}_{source_table}"
+        # Fallback: use database_name (not schema_name) to match the target table naming
+        # convention used by connector_add/connector_edit_tables:
+        # "{database_name}_{table_name}" (e.g., "kbbio_users", not "public_users")
+        return f"{self.source_database}_{source_table}"
 
     def _extract_length(self, type_str: str) -> Optional[int]:
         """Extract length from type string like VARCHAR(255)."""
@@ -593,8 +610,10 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
             version = self.replication_config.connector_version or 0
             topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{version}"
 
-            # Schema subject format: {topic_prefix}.{schema}.{table}
-            full_table_name = f"{schema_name}.{source_table}"
+            # Schema subject format after RegexRouter transform:
+            # {topic_prefix}.{database_name}.{table}  (NOT schema_name, because the
+            # RegexRouter replaces schema with database_name in all topic/subject names)
+            full_table_name = f"{self.source_database}.{source_table}"
 
             logger.info(
                 f"Deleting schema subjects for {full_table_name} due to breaking schema change"

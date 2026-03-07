@@ -124,6 +124,21 @@ class ReplicationOrchestrator:
 
             self._log_info(f"✓ Connector version: {next_version}")
             self._log_info(f"✓ Topic prefix: {self.config.kafka_topic_prefix}")
+
+            # Stop any running DDL consumer immediately so it is restarted with the
+            # new version after the connector is created.  The consumer holds the old
+            # topic name (client_..._v_{prev}) in memory; releasing the lock here
+            # causes the watchdog (ensure_continuous_ddl_consumers) to spawn a fresh
+            # consumer that picks up the updated connector_version from the DB.
+            if db_config.db_type.lower() in ('postgresql', 'postgres'):
+                try:
+                    from client.tasks import _release_lock, _clear_consumer_pending
+                    _release_lock(self.config.id)
+                    _clear_consumer_pending(self.config.id)
+                    self._log_info("✓ Released old DDL consumer lock (will restart with new version)")
+                except Exception as e:
+                    self._log_warning(f"⚠️ Could not release DDL consumer lock: {e}")
+
             self._log_info("")
 
             # ========================================
@@ -157,6 +172,28 @@ class ReplicationOrchestrator:
             # ========================================
             # STEP 5: Create Fresh Source Connector
             # ========================================
+            # For PostgreSQL: set up DDL capture infrastructure only when user enabled it
+            if db_config.db_type.lower() in ('postgresql', 'postgres') and self.config.enable_ddl_sync:
+                try:
+                    from client.utils.ddl.postgres_setup import check_postgresql_privileges, setup_postgresql_ddl_capture
+                    privs = check_postgresql_privileges(db_config)
+                    if privs.get('error'):
+                        self._log_warning(f"⚠️ DDL privilege check failed: {privs['error']}")
+                    elif privs.get('ddl_triggers_found', 0) >= 2 or privs.get('any_ddl_triggers', 0) >= 2:
+                        self._log_info("✓ DDL capture triggers already present — skipping setup")
+                    elif privs.get('can_setup_ddl'):
+                        ok, msg = setup_postgresql_ddl_capture(db_config)
+                        if ok:
+                            self._log_info("✓ PostgreSQL DDL capture infrastructure created")
+                        else:
+                            self._log_warning(f"⚠️ DDL capture setup failed: {msg}")
+                    else:
+                        self._log_warning("⚠️ DDL sync enabled but user lacks CREATE EVENT TRIGGER — skipping")
+                except Exception as e:
+                    self._log_warning(f"⚠️ DDL capture setup error: {e}")
+            elif db_config.db_type.lower() in ('postgresql', 'postgres'):
+                self._log_info("ℹ️ DDL sync disabled for this connector")
+
             self._log_info("STEP 5/5: Creating fresh source connector...")
             self._log_info("  → Snapshot mode: 'initial' (full snapshot + CDC streaming)")
             self._log_info("  → Source: {}.{}".format(
@@ -186,19 +223,19 @@ class ReplicationOrchestrator:
             self.config.save()
 
             # ========================================
-            # Start Continuous DDL Consumer
+            # Ensure DDL Supervisor is running
             # ========================================
-            source_type = self.config.client_database.db_type.lower()
-            if source_type in ('mysql', 'mssql', 'sqlserver'):
-                from client.tasks import start_continuous_ddl_consumer
-                start_continuous_ddl_consumer.delay(self.config.id)
-                self._log_info("✓ Started continuous DDL consumer for real-time schema sync")
-            elif source_type in ('postgresql', 'postgres'):
-                # PostgreSQL DDL consumer requires ddl_capture.ddl_events table
-                # to be included in Debezium table.include.list
-                from client.tasks import start_continuous_ddl_consumer
-                start_continuous_ddl_consumer.delay(self.config.id)
-                self._log_info("✓ Started PostgreSQL DDL consumer (ddl_capture.ddl_events topic)")
+            # The supervisor manages DDL consumers for ALL configs in one Celery task
+            # via threads. Calling ensure_continuous_ddl_consumers starts the supervisor
+            # if not already running; it will pick up this new config within its next
+            # config-refresh cycle (≤30 s). This avoids the per-config task storm that
+            # resulted from calling start_continuous_ddl_consumer directly.
+            try:
+                from client.tasks import ensure_continuous_ddl_consumers
+                ensure_continuous_ddl_consumers.delay()
+                self._log_info("✓ DDL supervisor signalled (picks up new config within 30 s)")
+            except Exception as e:
+                self._log_warning(f"⚠️ Could not signal DDL supervisor: {e}")
 
             # ========================================
             # Success Summary

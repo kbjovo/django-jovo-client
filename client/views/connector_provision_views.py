@@ -364,6 +364,13 @@ def edit_save_settings(request, config_pk):
             replication_config.snapshot_mode = new_snapshot_mode
             changed = True
 
+        # DDL sync (PostgreSQL only)
+        if replication_config.client_database.db_type.lower() in ('postgresql', 'postgres'):
+            new_ddl_sync = request.POST.get('enable_ddl_sync') == '1'
+            if new_ddl_sync != replication_config.enable_ddl_sync:
+                replication_config.enable_ddl_sync = new_ddl_sync
+                changed = True
+
         # Numeric performance fields
         for field in [
             'max_queue_size', 'max_batch_size', 'poll_interval_ms',

@@ -62,10 +62,6 @@ def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
             if db_type == 'mysql':
                 schema_in_topic = source_db.database_name
             elif db_type == 'postgresql':
-                # The PostgreSQL source connector applies a routeTopic RegexRouter transform
-                # that replaces the schema segment with database_name in every topic:
-                #   {prefix}.public.table  →  {prefix}.{database_name}.table
-                # So the segment to match in the topic is database_name, not source_schema.
                 schema_in_topic = source_db.database_name
             elif db_type in ('mssql', 'sqlserver'):
                 schema_in_topic = source_schema or 'dbo'

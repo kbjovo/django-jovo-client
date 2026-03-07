@@ -58,6 +58,7 @@ def format_table_for_connector(db_config: ClientDatabase, table_name: str, schem
 def generate_server_id(client_id: int, db_id: int, version: int = 0) -> int:
     return 100000 + (client_id * 10000) + (db_id * 100) + (version % 100)
 
+
 def generate_connector_name(client: Client, db_config: ClientDatabase, version: Optional[int] = None) -> str:
     """
     Generate connector name following the pattern: {client_name}_{db_name}[_v{version}]
@@ -188,6 +189,8 @@ def get_mysql_connector_config(
         "schema.history.internal.kafka.topic": f"schema-history.client_{client.id}_db_{db_config.id}_v_{version or 0}",
         # Only store DDL for captured tables — prevents crashes from DDL on unmonitored tables in the binlog
         "schema.history.internal.store.only.captured.tables.ddl": "true",
+        # Skip unparseable DDL (e.g. CHANGE COLUMN on a renamed table not in history) instead of crashing
+        "schema.history.internal.skip.unparseable.ddl": "true",
 
         # Snapshot mode - use from replication_config if provided, otherwise use parameter
         "snapshot.mode": replication_config.snapshot_mode if replication_config and hasattr(replication_config, 'snapshot_mode') else snapshot_mode,
@@ -195,7 +198,7 @@ def get_mysql_connector_config(
 
         # Include schema changes
         "include.schema.changes": "true",
-
+    
         "database.allowPublicKeyRetrieval": "true",
 
         # Read-only mode - user has no write permissions to source database
@@ -384,14 +387,11 @@ def get_postgresql_connector_config(
         "incremental.snapshot.allow.schema.changes": "true",
         "incremental.snapshot.chunk.size": str(replication_config.incremental_snapshot_chunk_size) if replication_config and hasattr(replication_config, 'incremental_snapshot_chunk_size') else "1024",
 
-        # ✅ CRITICAL FIX: Add BOTH signal channels and signal data collection
-        "signal.enabled.channels": "source,kafka",  # ✅ Enable BOTH channels
-        # CRITICAL: Include version to match topic.prefix and prevent conflicts between connector versions
+        "signal.enabled.channels": "source,kafka",
         "signal.kafka.topic": f"client_{client.id}_db_{db_config.id}_v_{version or 0}.signals",
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
-        "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
+        "signal.kafka.consumer.auto.offset.reset": "latest",
 
-        # ✅ THIS WAS MISSING - CRITICAL FOR INCREMENTAL SNAPSHOTS
         "signal.data.collection": signal_table,
 
         "include.schema.changes": "true",
