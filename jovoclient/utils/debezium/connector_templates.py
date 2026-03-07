@@ -248,11 +248,11 @@ def get_mysql_connector_config(
         "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "500",
 
         "key.converter": "io.confluent.connect.avro.AvroConverter",
-        "key.converter.schema.registry.url": "http://schema-registry:8081",
+        "key.converter.schema.registry.url": schema_registry_url,
         "key.converter.schemas.enable": "true",
 
         "value.converter": "io.confluent.connect.avro.AvroConverter",
-        "value.converter.schema.registry.url": "http://schema-registry:8081",
+        "value.converter.schema.registry.url": schema_registry_url,
         "value.converter.schemas.enable": "true",
 
         "key.converter.enhanced.avro.schema.support": "true",
@@ -427,6 +427,17 @@ def get_postgresql_connector_config(
         "connect.backoff.initial.delay.ms": "1000",
         "connect.backoff.max.delay.ms": "10000",
 
+        "key.converter": "io.confluent.connect.avro.AvroConverter",
+        "key.converter.schema.registry.url": schema_registry_url,
+        "key.converter.schemas.enable": "true",
+
+        "value.converter": "io.confluent.connect.avro.AvroConverter",
+        "value.converter.schema.registry.url": schema_registry_url,
+        "value.converter.schemas.enable": "true",
+
+        "key.converter.enhanced.avro.schema.support": "true",
+        "value.converter.enhanced.avro.schema.support": "true",
+
         # JDBC driver properties - autoReconnect for connection resilience
         "driver.autoReconnect": "true",
 
@@ -594,6 +605,17 @@ def get_sqlserver_connector_config(
         # Connection settings
         "database.connection.timeout.ms": "30000",
         "heartbeat.interval.ms": "10000",
+
+        "key.converter": "io.confluent.connect.avro.AvroConverter",
+        "key.converter.schema.registry.url": schema_registry_url,
+        "key.converter.schemas.enable": "true",
+
+        "value.converter": "io.confluent.connect.avro.AvroConverter",
+        "value.converter.schema.registry.url": schema_registry_url,
+        "value.converter.schemas.enable": "true",
+
+        "key.converter.enhanced.avro.schema.support": "true",
+        "value.converter.enhanced.avro.schema.support": "true",
 
         # JDBC driver properties - autoReconnect for connection resilience
         "driver.autoReconnect": "true",
@@ -793,13 +815,24 @@ def get_oracle_connector_config(
         "database.jdbc.driver": "oracle.jdbc.OracleDriver",
         
         "heartbeat.interval.ms": "10000",
-        
+
         "errors.tolerance": "none",
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
 
         "provide.transaction.metadata": "false",
         "skipped.operations": "t",
+
+        "key.converter": "io.confluent.connect.avro.AvroConverter",
+        "key.converter.schema.registry.url": schema_registry_url,
+        "key.converter.schemas.enable": "true",
+
+        "value.converter": "io.confluent.connect.avro.AvroConverter",
+        "value.converter.schema.registry.url": schema_registry_url,
+        "value.converter.schemas.enable": "true",
+
+        "key.converter.enhanced.avro.schema.support": "true",
+        "value.converter.enhanced.avro.schema.support": "true",
 
         # JDBC driver properties - autoReconnect for connection resilience
         "driver.autoReconnect": "true",
