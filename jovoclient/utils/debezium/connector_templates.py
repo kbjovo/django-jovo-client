@@ -900,7 +900,7 @@ def get_connector_config_for_database(
     replication_config: Optional[ReplicationConfig] = None,
     tables_whitelist: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
-    schema_registry_url: str = 'http://localhost:8081',
+    schema_registry_url: str = None,
     snapshot_mode: str = 'initial',
 ) -> Optional[Dict[str, Any]]:
     """
@@ -917,6 +917,19 @@ def get_connector_config_for_database(
     Returns:
         Optional[Dict[str, Any]]: Connector configuration or None if unsupported
     """
+    if kafka_bootstrap_servers is None:
+        from django.conf import settings
+        kafka_bootstrap_servers = settings.DEBEZIUM_CONFIG.get(
+            'KAFKA_INTERNAL_SERVERS',
+            'kafka-1:29092'
+        )
+    if schema_registry_url is None:
+        from django.conf import settings
+        schema_registry_url = settings.DEBEZIUM_CONFIG.get(
+            'SCHEMA_REGISTRY_INTERNAL_URL',
+            'http://schema-registry:8081'
+        )
+
     client = db_config.client
     db_type = db_config.db_type.lower()
 
