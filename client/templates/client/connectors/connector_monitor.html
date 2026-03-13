@@ -71,6 +71,8 @@
       <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-700">
         <div>
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Source Connector</p>
+          <p class="text-xs font-semibold text-gray-700 dark:text-gray-300 mt-0.5">{{ database.database_name }}</p>
+          <p class="text-xs text-gray-400 dark:text-gray-500">{{ database.host }}:{{ database.port }}</p>
           {% if connector_history %}
           <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">Since {{ connector_history.created_at|timesince }}</p>
           {% endif %}
@@ -147,6 +149,10 @@
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
             Sink Connector <span class="text-[10px] font-normal normal-case">(shared)</span>
           </p>
+          {% if target_database %}
+          <p class="text-xs font-semibold text-gray-700 dark:text-gray-300 mt-0.5">{{ target_database.database_name }}</p>
+          <p class="text-xs text-gray-400 dark:text-gray-500">{{ target_database.host }}:{{ target_database.port }}</p>
+          {% endif %}
           {% if sink_connector_history %}
           <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">Since {{ sink_connector_history.created_at|timesince }}</p>
           {% endif %}
@@ -231,60 +237,6 @@
     </div>
   </button>
   {% endif %}
-
-  <!-- Live Metrics Panel (streaming lag, DLQ, queue — polled every 10s) -->
-  <div class="mb-4 bg-white dark:bg-gray-800 rounded-lg shadow" x-data="{ metricsOpen: true }">
-    <div class="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-t-lg transition border-b border-gray-100 dark:border-gray-700"
-         @click="metricsOpen = !metricsOpen">
-      <div class="flex items-center gap-2">
-        <svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
-        </svg>
-        <span class="text-sm font-semibold text-gray-900 dark:text-white">Live Metrics</span>
-        <span id="metrics-refresh-badge" class="text-xs text-gray-400 dark:text-gray-500 hidden">refreshing…</span>
-      </div>
-      <div class="flex items-center gap-3">
-        <span id="metrics-last-updated" class="text-xs text-gray-400 dark:text-gray-500"></span>
-        <svg class="w-4 h-4 text-gray-400 transition-transform" :class="metricsOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-        </svg>
-      </div>
-    </div>
-    <div x-show="metricsOpen" x-transition>
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-0 divide-x divide-y divide-gray-100 dark:divide-gray-700">
-
-        <!-- Lag -->
-        <div class="px-4 py-3">
-          <p class="text-xs text-gray-500 dark:text-gray-400">Source Lag</p>
-          <p id="m-lag" class="text-xl font-bold text-gray-900 dark:text-white mt-0.5">--</p>
-          <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">behind source</p>
-        </div>
-
-        <!-- Queue Utilisation -->
-        <div class="px-4 py-3">
-          <p class="text-xs text-gray-500 dark:text-gray-400">Queue Utilisation</p>
-          <div class="flex items-center gap-2 mt-0.5">
-            <p id="m-queue-pct" class="text-xl font-bold text-gray-900 dark:text-white">--</p>
-          </div>
-          <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 mt-1.5">
-            <div id="m-queue-bar" class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div>
-          </div>
-        </div>
-
-
-      </div>
-
-      <!-- Config Drift Alert -->
-      <div id="config-drift-banner" class="hidden px-4 py-2 border-t border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-900/20">
-        <p class="text-xs font-semibold text-yellow-700 dark:text-yellow-400">Config drift detected — live connector differs from stored settings:</p>
-        <ul id="config-drift-list" class="mt-1 space-y-0.5 text-xs font-mono text-yellow-600 dark:text-yellow-300"></ul>
-      </div>
-
-      <div id="metrics-unavailable" class="hidden px-4 py-3 border-t border-gray-100 dark:border-gray-700">
-        <p class="text-xs text-gray-400 dark:text-gray-500 italic">Streaming metrics unavailable — connector may be in snapshot phase or Jolokia unreachable.</p>
-      </div>
-    </div>
-  </div>
 
   <!-- Snapshot Progress Panel (shown/hidden by JS) -->
   <div id="snapshot-panel" class="{% if not snapshot %}hidden{% endif %} mb-6">
@@ -469,85 +421,6 @@
       </div>
     </div>
   </div>
-
-  <!-- Connector Information -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Connector Info</h3>
-      </div>
-      <div class="p-6 space-y-3 text-sm">
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Connector Name</span>
-          <span class="font-mono text-gray-900 dark:text-white">{{ replication_config.connector_name }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Version</span>
-          <span class="text-gray-900 dark:text-white">v{{ replication_config.connector_version }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Topic Prefix</span>
-          <span class="font-mono text-gray-900 dark:text-white">{{ replication_config.kafka_topic_prefix }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Processing Mode</span>
-          <span class="text-gray-900 dark:text-white">{{ replication_config.processing_mode|upper }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Snapshot Mode</span>
-          <span class="text-gray-900 dark:text-white">{{ replication_config.snapshot_mode }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Last Sync</span>
-          <span class="text-gray-900 dark:text-white">{{ replication_config.last_sync_at|date:"M d, Y g:i A"|default:"Never" }}</span>
-        </div>
-        {% if connector_history %}
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Deployed At</span>
-          <span class="text-gray-900 dark:text-white" title="{{ connector_history.created_at|date:'Y-m-d H:i:s' }}">{{ connector_history.created_at|date:"M d, Y g:i A" }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Uptime</span>
-          <span class="text-gray-900 dark:text-white">{{ connector_history.created_at|timesince }}</span>
-        </div>
-        {% endif %}
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Config Sync</span>
-          <span id="info-config-sync" class="text-gray-400 dark:text-gray-500 italic text-xs">checking…</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Statistics -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Statistics</h3>
-      </div>
-      <div class="p-6 space-y-3 text-sm">
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Total Rows Synced</span>
-          <span id="stat-rows" class="font-semibold text-gray-900 dark:text-white">{{ unified_status.statistics.total_rows_synced|default:"0" }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Tables Enabled</span>
-          <span class="text-gray-900 dark:text-white">{{ unified_status.statistics.tables_enabled }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Sink Connector</span>
-          <span class="font-mono text-gray-900 dark:text-white">{{ replication_config.sink_connector_name|default:"--" }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Database Type</span>
-          <span class="text-gray-900 dark:text-white">{{ database.db_type|upper }}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-gray-500 dark:text-gray-400">Host</span>
-          <span class="font-mono text-gray-900 dark:text-white">{{ database.host }}:{{ database.port }}</span>
-        </div>
-      </div>
-    </div>
-  </div>
-
 
   <!-- Delete Modal -->
   {% include "client/connectors/_delete_modal.html" %}

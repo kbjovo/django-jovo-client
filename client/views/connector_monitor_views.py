@@ -60,9 +60,12 @@ def connector_monitor(request, config_pk):
             connector_type='sink',
         ).exclude(status='deleted').order_by('-created_at').first() if replication_config.sink_connector_name else None
 
+        target_database = client.client_databases.filter(is_target=True).first()
+
         context = {
             'replication_config': replication_config,
             'database': database,
+            'target_database': target_database,
             'client': client,
             'unified_status': unified_status,
             'source_exists': source_exists,

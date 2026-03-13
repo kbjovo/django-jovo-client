@@ -227,7 +227,7 @@
      }"
      @close-modal.window="showDatabaseModal = false"
      @close-sink-modal.window="showSinkModal = false"
-     @show-test-result.window="testResult = $event.detail; showTestResultModal = true; if (!$event.detail.isUpdateMode) { $event.detail.isSink ? (showSinkModal = false) : (showDatabaseModal = false); }"
+     @show-test-result.window="testResult = $event.detail; showTestResultModal = true; $event.detail.isSink ? (showSinkModal = false) : (showDatabaseModal = false);"
      @clientUpdated.window="editMode = false">
   
   <!-- Breadcrumbs -->
@@ -563,7 +563,7 @@
   </div>
 
   <!-- Test Result Modal -->
-  <div 
+  <div
     x-show="showTestResultModal"
     x-cloak
     @keydown.escape.window="showTestResultModal = false"
@@ -617,6 +617,66 @@
               <div class="mt-2">
                 <p class="text-sm text-gray-500 dark:text-gray-400" x-text="testResult.message"></p>
               </div>
+
+              <!-- Privilege / replication check (shown on success when privileges data is present) -->
+              <template x-if="testResult.success && testResult.privileges && testResult.privileges.length > 0">
+                <div class="mt-4">
+                  <div class="flex items-center justify-between mb-2">
+                    <p class="text-sm font-medium text-gray-700 dark:text-gray-300"
+                       x-text="testResult.privilege_section_title || 'Required Privileges'"></p>
+                    <template x-if="!testResult.privilege_check_error">
+                      <span
+                        :class="testResult.all_privileges_granted
+                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                          : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'"
+                        class="text-xs font-medium px-2 py-0.5 rounded">
+                        <span x-text="testResult.all_privileges_granted ? 'All granted' : 'Some missing'"></span>
+                      </span>
+                    </template>
+                  </div>
+
+                  <!-- Privilege check failed to run -->
+                  <template x-if="testResult.privilege_check_error">
+                    <p class="text-xs text-gray-500 dark:text-gray-400 italic">
+                      Could not verify privileges: <span x-text="testResult.privilege_check_error"></span>
+                    </p>
+                  </template>
+
+                  <!-- Privilege rows -->
+                  <template x-if="!testResult.privilege_check_error">
+                    <ul class="space-y-1.5">
+                      <template x-for="priv in testResult.privileges" :key="priv.name">
+                        <li class="flex items-start gap-2">
+                          <span class="mt-0.5 flex-shrink-0">
+                            <svg x-show="priv.granted" class="w-4 h-4 text-green-500 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                            </svg>
+                            <svg x-show="!priv.granted" class="w-4 h-4 text-red-500 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                          </span>
+                          <span class="flex-1 min-w-0">
+                            <span
+                              :class="priv.granted ? 'text-gray-800 dark:text-gray-200' : 'text-red-700 dark:text-red-400'"
+                              class="text-sm font-medium"
+                              x-text="priv.name"></span>
+                            <span class="text-xs text-gray-400 dark:text-gray-500 ml-1.5" x-text="'— ' + priv.note"></span>
+                          </span>
+                        </li>
+                      </template>
+                    </ul>
+                  </template>
+
+                  <!-- Warning footer when something is missing -->
+                  <template x-if="!testResult.privilege_check_error && !testResult.all_privileges_granted">
+                    <p class="mt-3 text-xs text-amber-600 dark:text-amber-400"
+                       x-text="testResult.isSink
+                         ? 'Grant the missing privileges before creating the connector, otherwise the sink connector will fail to write data.'
+                         : 'Grant the missing privileges or enable the required server settings before creating a source connector.'">
+                    </p>
+                  </template>
+                </div>
+              </template>
             </div>
           </div>
         </div>
@@ -641,7 +701,7 @@
           <!-- Cancel button -->
           <button
             type="button"
-            @click="showTestResultModal = false; if (!testResult.isUpdateMode) { testResult.isSink ? (showSinkModal = true) : (showDatabaseModal = true); }"
+            @click="showTestResultModal = false; testResult.isSink ? (showSinkModal = true) : (showDatabaseModal = true);"
             :disabled="isSavingConnection"
             class="mt-3 inline-flex w-full justify-center rounded-lg bg-white dark:bg-gray-800 px-4 py-2 text-sm font-semibold text-gray-900 dark:text-gray-200 shadow-sm ring-1 ring-inset ring-gray-300 dark:ring-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 sm:mt-0 sm:w-auto transition disabled:opacity-50 disabled:cursor-not-allowed">
             Cancel

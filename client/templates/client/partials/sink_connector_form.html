@@ -346,6 +346,9 @@
           this.$dispatch('show-test-result', {
             success: result.success,
             message: result.message,
+            privileges: result.privileges || [],
+            all_privileges_granted: result.all_privileges_granted ?? true,
+            privilege_check_error: result.privilege_check_error || '',
             formData: this.formData,
             url: url,
             isUpdateMode: this.isUpdateMode,

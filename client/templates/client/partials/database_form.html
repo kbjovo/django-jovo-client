@@ -315,24 +315,6 @@
     <!-- Source connection — always primary -->
     <input type="hidden" name="is_primary" value="on">
 
-    <!-- Replication Check Result (shown after successful test for MySQL/PostgreSQL) -->
-    <div x-show="replicationResult !== null" x-transition class="rounded-lg border px-3 py-2.5 text-xs"
-         :class="replicationResult && replicationResult.allOk
-             ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
-             : 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800'">
-        <p class="font-semibold mb-1"
-           :class="replicationResult && replicationResult.allOk ? 'text-green-700 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'"
-           x-text="replicationResult && replicationResult.allOk ? 'Replication ready' : 'Replication — action required'">
-        </p>
-        <template x-for="item in (replicationResult ? replicationResult.items : [])" :key="item.label">
-            <div class="flex items-center gap-1.5 mt-0.5"
-                 :class="item.ok ? 'text-green-700 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'">
-                <span x-text="item.ok ? '✓' : '⚠'"></span>
-                <span x-text="item.label"></span>
-            </div>
-        </template>
-    </div>
-
     <!-- Form Actions -->
     <div class="flex items-center justify-end gap-3 pt-5 border-t border-gray-200 dark:border-gray-700">
       <button
@@ -515,6 +497,10 @@
           this.$dispatch('show-test-result', {
             success: result.success,
             message: result.message,
+            privileges: (result.replication && result.replication.privileges) || [],
+            all_privileges_granted: (result.replication && result.replication.all_granted) ?? true,
+            privilege_check_error: (result.replication && result.replication.error) || '',
+            privilege_section_title: 'Replication Readiness',
             formData: this.formData,
             url: url,
             isUpdateMode: this.isUpdateMode

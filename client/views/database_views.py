@@ -24,27 +24,46 @@ logger = logging.getLogger(__name__)
 
 def _check_mysql_replication(db_instance) -> dict:
     """
-    Quick replication readiness check for a MySQL source.
-    Returns dict with: log_bin, gtid_mode, has_replication_slave, error
+    Replication readiness check for a MySQL source.
+    Returns dict with: log_bin, gtid_mode, has_replication_slave, error,
+                       privileges [{name, granted, note}], all_granted
     """
-    result = {'log_bin': False, 'gtid_mode': False, 'has_replication_slave': False, 'error': ''}
+    result = {
+        'log_bin': False, 'gtid_mode': False, 'has_replication_slave': False,
+        'error': '', 'privileges': [], 'all_granted': False,
+    }
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(db_instance.get_connection_url(), pool_pre_ping=True)
         with engine.connect() as conn:
             row = conn.execute(text("SHOW VARIABLES LIKE 'log_bin'")).fetchone()
-            result['log_bin'] = row and row[1].upper() == 'ON'
+            result['log_bin'] = bool(row and row[1].upper() == 'ON')
 
             row = conn.execute(text("SHOW VARIABLES LIKE 'gtid_mode'")).fetchone()
-            result['gtid_mode'] = row and row[1].upper() == 'ON'
+            result['gtid_mode'] = bool(row and row[1].upper() == 'ON')
 
             grants = conn.execute(text("SHOW GRANTS FOR CURRENT_USER()")).fetchall()
             grants_text = ' '.join(str(g[0]).upper() for g in grants)
-            result['has_replication_slave'] = (
-                'ALL PRIVILEGES' in grants_text
-                or 'REPLICATION SLAVE' in grants_text
-            )
+            has_all = 'ALL PRIVILEGES' in grants_text
+            result['has_replication_slave'] = has_all or 'REPLICATION SLAVE' in grants_text
+            has_replication_client = has_all or 'REPLICATION CLIENT' in grants_text or 'SUPER' in grants_text
+            has_select = has_all or 'SELECT' in grants_text
+
         engine.dispose()
+
+        result['privileges'] = [
+            {'name': 'Binary logging (log_bin)', 'granted': result['log_bin'],
+             'note': 'Required for CDC to capture row changes'},
+            {'name': 'GTID mode', 'granted': result['gtid_mode'],
+             'note': 'Required for reliable replication position tracking'},
+            {'name': 'REPLICATION SLAVE', 'granted': result['has_replication_slave'],
+             'note': 'Required to stream binary log events'},
+            {'name': 'REPLICATION CLIENT', 'granted': has_replication_client,
+             'note': 'Required to read current binlog position'},
+            {'name': 'SELECT', 'granted': has_select,
+             'note': 'Required for initial snapshot of table data'},
+        ]
+        result['all_granted'] = all(p['granted'] for p in result['privileges'])
     except Exception as e:
         result['error'] = str(e)
     return result
@@ -52,19 +71,39 @@ def _check_mysql_replication(db_instance) -> dict:
 
 def _check_postgresql_replication(db_instance) -> dict:
     """
-    Quick replication readiness check for a PostgreSQL source.
-    Returns dict with: has_replication, error
+    Replication readiness check for a PostgreSQL source.
+    Returns dict with: has_replication, error,
+                       privileges [{name, granted, note}], all_granted
     """
-    result = {'has_replication': False, 'error': ''}
+    result = {
+        'has_replication': False, 'error': '',
+        'privileges': [], 'all_granted': False,
+    }
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(db_instance.get_connection_url(), pool_pre_ping=True)
         with engine.connect() as conn:
             row = conn.execute(text(
-                "SELECT rolreplication FROM pg_roles WHERE rolname = current_user"
+                "SELECT rolreplication, rolsuper FROM pg_roles WHERE rolname = current_user"
             )).fetchone()
-            result['has_replication'] = bool(row[0]) if row else False
+            has_replication = bool(row[0]) if row else False
+            is_super = bool(row[1]) if row else False
+            result['has_replication'] = has_replication
+
+            row = conn.execute(text(
+                "SELECT has_database_privilege(current_user, current_database(), 'CREATE')"
+            )).fetchone()
+            can_create_pub = is_super or (bool(row[0]) if row else False)
+
         engine.dispose()
+
+        result['privileges'] = [
+            {'name': 'REPLICATION role', 'granted': has_replication or is_super,
+             'note': 'Required for logical replication (CDC)'},
+            {'name': 'CREATE on database', 'granted': can_create_pub,
+             'note': 'Required to create publications (PostgreSQL 15+)'},
+        ]
+        result['all_granted'] = all(p['granted'] for p in result['privileges'])
     except Exception as e:
         result['error'] = str(e)
     return result
@@ -199,83 +238,49 @@ class ClientDatabaseUpdateView(UpdateView):
     def post(self, request, *args, **kwargs):
         self.object = self.get_object()
 
-        # Check if this is a test-only request
         if request.POST.get('test_only') == 'true':
-            # Test using the existing database object
+            # Build a temp instance from the saved object and apply any POST overrides.
+            # No form validation — we just want to test the connection.
+            import copy
+            temp = copy.copy(self.object)
+            for field in ('host', 'database_name', 'username', 'db_type', 'oracle_connection_mode'):
+                val = request.POST.get(field, '').strip()
+                if val:
+                    setattr(temp, field, val)
             try:
-                status = self.object.check_connection_status(save=False)
+                temp.port = int(request.POST.get('port') or self.object.port)
+            except (ValueError, TypeError):
+                pass
+            # Use submitted password only if the user typed a new one; otherwise keep encrypted stored value
+            submitted_password = request.POST.get('password', '').strip()
+            if submitted_password:
+                temp.password = submitted_password  # decrypt_password() has plaintext fallback
+            try:
+                status = temp.check_connection_status(save=False)
                 if status == 'success':
                     replication = None
-                    db_type = (self.object.db_type or '').lower()
+                    db_type = (temp.db_type or '').lower()
                     if db_type == 'mysql':
-                        replication = _check_mysql_replication(self.object)
+                        replication = _check_mysql_replication(temp)
                     elif db_type in ('postgresql', 'postgres'):
-                        replication = _check_postgresql_replication(self.object)
+                        replication = _check_postgresql_replication(temp)
                     return JsonResponse({
                         'success': True,
-                        'message': '✓ Connection test successful!',
+                        'message': '✓ Connection test successful! The database is reachable and credentials are valid.',
                         'replication': replication,
                     })
                 else:
-                    error_message = getattr(self.object, 'last_error', 'Connection failed')
                     return JsonResponse({
                         'success': False,
-                        'message': f'✗ Connection test failed: {error_message}'
+                        'message': '✗ Connection test failed. Please verify host, port, username, and password.'
                     })
             except Exception as e:
-                logger.error(f"Error testing connection: {e}")
                 return JsonResponse({
                     'success': False,
-                    'message': f'✗ Connection test error: {str(e)}'
+                    'message': f'✗ Connection test failed: {str(e)}'
                 })
 
-        # For normal updates, get and validate the form
         form = self.get_form()
-
-        # Check if this is a test-only request with form data (from form submission)
-        if request.POST.get('test_only') == 'true' and len(request.POST) > 2:
-            if form.is_valid():
-                # Create temporary instance without saving
-                temp_instance = form.save(commit=False)
-
-                # If password is empty in update mode, use the existing password for testing
-                if not form.cleaned_data.get('password'):
-                    temp_instance.password = self.object.password
-
-                try:
-                    status = temp_instance.check_connection_status(save=False)
-                    if status == 'success':
-                        replication = None
-                        db_type = (temp_instance.db_type or '').lower()
-                        if db_type == 'mysql':
-                            replication = _check_mysql_replication(temp_instance)
-                        elif db_type in ('postgresql', 'postgres'):
-                            replication = _check_postgresql_replication(temp_instance)
-                        return JsonResponse({
-                            'success': True,
-                            'message': '✓ Connection test successful! The database is reachable and credentials are valid.',
-                            'replication': replication,
-                        })
-                    else:
-                        return JsonResponse({
-                            'success': False,
-                            'message': '✗ Connection test failed. Unable to connect to the database. Please verify the host, port, username, and password are correct.'
-                        })
-                except Exception as e:
-                    error_message = str(e)
-                    return JsonResponse({
-                        'success': False,
-                        'message': f'✗ Connection test failed: {error_message}'
-                    })
-            else:
-                errors = []
-                for field, error_list in form.errors.items():
-                    for error in error_list:
-                        errors.append(f"{field}: {error}")
-                return JsonResponse({
-                    'success': False,
-                    'message': f'✗ Please fill in all required fields correctly. {", ".join(errors)}'
-                })
 
         # Normal save operation
         if form.is_valid():
@@ -380,31 +385,105 @@ def _render_databases_list(request, client):
     })
 
 
-def _test_sink_connection(form, client, existing_password=None):
-    """Helper to test sink connector connection from form data."""
-    temp_instance = form.save(commit=False)
-    temp_instance.client = client
-    temp_instance.is_target = True
+def _check_sink_privileges(db_instance) -> dict:
+    """
+    Check write privileges required for the sink connector user.
 
-    if existing_password and not form.cleaned_data.get('password'):
-        temp_instance.password = existing_password
+    MySQL  — checks: CREATE TABLE, ALTER TABLE, INSERT, UPDATE, DELETE
+    PostgreSQL — checks: CREATE on schema 'public', INSERT, UPDATE, DELETE
+
+    Returns dict with:
+        privileges  list[{name, granted, note}]  — one entry per required privilege
+        all_granted bool
+        error       str   — non-empty if the check itself failed
+    """
+    result = {'privileges': [], 'all_granted': False, 'error': ''}
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(db_instance.get_connection_url(), pool_pre_ping=True)
+        with engine.connect() as conn:
+            db_type = (db_instance.db_type or '').lower()
+
+            if db_type == 'mysql':
+                grants = conn.execute(text("SHOW GRANTS FOR CURRENT_USER()")).fetchall()
+                grants_text = ' '.join(str(g[0]).upper() for g in grants)
+                has_all = 'ALL PRIVILEGES' in grants_text
+
+                checks = [
+                    ('CREATE TABLE',  'CREATE',  'Required to auto-create target tables'),
+                    ('ALTER TABLE',   'ALTER',   'Required for schema evolution (DDL sync)'),
+                    ('INSERT',        'INSERT',  'Required to write replicated rows'),
+                    ('UPDATE',        'UPDATE',  'Required to apply row updates'),
+                    ('DELETE',        'DELETE',  'Required to apply row deletes'),
+                ]
+                for label, keyword, note in checks:
+                    granted = has_all or keyword in grants_text
+                    result['privileges'].append({'name': label, 'granted': granted, 'note': note})
+
+            elif db_type == 'postgresql':
+                is_super = bool(conn.execute(text(
+                    "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"
+                )).scalar())
+
+                has_schema_create = is_super or bool(conn.execute(text(
+                    "SELECT has_schema_privilege(current_user, 'public', 'CREATE')"
+                )).scalar())
+
+                priv_rows = conn.execute(text("""
+                    SELECT UPPER(privilege_type)
+                    FROM information_schema.role_table_grants
+                    WHERE grantee = current_user
+                      AND privilege_type IN ('INSERT','UPDATE','DELETE')
+                    GROUP BY privilege_type
+                """)).fetchall()
+                granted_table_privs = {r[0] for r in priv_rows}
+
+                checks = [
+                    ('CREATE on schema', has_schema_create,         'Required to auto-create target tables'),
+                    ('INSERT',          is_super or 'INSERT' in granted_table_privs, 'Required to write replicated rows'),
+                    ('UPDATE',          is_super or 'UPDATE' in granted_table_privs, 'Required to apply row updates'),
+                    ('DELETE',          is_super or 'DELETE' in granted_table_privs, 'Required to apply row deletes'),
+                ]
+                for label, granted, note in checks:
+                    result['privileges'].append({'name': label, 'granted': granted, 'note': note})
+
+        engine.dispose()
+        result['all_granted'] = all(p['granted'] for p in result['privileges'])
+    except Exception as e:
+        result['error'] = str(e)
+    return result
+
+
+def _test_sink_connection(instance):
+    """Helper to test sink connector connection from a pre-built (unsaved) instance."""
+    temp_instance = instance
 
     try:
         status = temp_instance.check_connection_status(save=False)
         if status == 'success':
+            privs = _check_sink_privileges(temp_instance)
             return JsonResponse({
                 'success': True,
-                'message': 'Connection test successful! The database is reachable and credentials are valid.'
+                'message': 'Connection test successful! The database is reachable and credentials are valid.',
+                'privileges': privs['privileges'],
+                'all_privileges_granted': privs['all_granted'],
+                'privilege_check_error': privs['error'],
             })
         else:
             return JsonResponse({
                 'success': False,
-                'message': 'Connection test failed. Please verify host, port, username, and password.'
+                'message': 'Connection test failed. Please verify host, port, username, and password.',
+                'privileges': [],
+                'all_privileges_granted': False,
+                'privilege_check_error': '',
             })
     except Exception as e:
         return JsonResponse({
             'success': False,
-            'message': f'Connection test failed: {str(e)}'
+            'message': f'Connection test failed: {str(e)}',
+            'privileges': [],
+            'all_privileges_granted': False,
+            'privilege_check_error': '',
         })
 
 
@@ -441,7 +520,10 @@ class SinkConnectorCreateView(CreateView):
 
         if request.POST.get('test_only') == 'true':
             if form.is_valid():
-                return _test_sink_connection(form, self.client)
+                temp = form.save(commit=False)
+                temp.client = self.client
+                temp.is_target = True
+                return _test_sink_connection(temp)
             else:
                 errors = [f"{f}: {e}" for f, el in form.errors.items() for e in el]
                 return JsonResponse({
@@ -502,18 +584,20 @@ class SinkConnectorUpdateView(UpdateView):
         self.object = self.get_object()
 
         if request.POST.get('test_only') == 'true':
-            form = self.get_form()
-            if form.is_valid():
-                return _test_sink_connection(
-                    form, self.object.client,
-                    existing_password=self.object.password
-                )
-            else:
-                errors = [f"{f}: {e}" for f, el in form.errors.items() for e in el]
-                return JsonResponse({
-                    'success': False,
-                    'message': f'Please fix form errors: {", ".join(errors)}'
-                })
+            import copy
+            temp = copy.copy(self.object)
+            for field in ('host', 'database_name', 'username', 'db_type'):
+                val = request.POST.get(field, '').strip()
+                if val:
+                    setattr(temp, field, val)
+            try:
+                temp.port = int(request.POST.get('port') or self.object.port)
+            except (ValueError, TypeError):
+                pass
+            submitted_password = request.POST.get('password', '').strip()
+            if submitted_password:
+                temp.password = submitted_password
+            return _test_sink_connection(temp)
 
         form = self.get_form()
         if form.is_valid():
