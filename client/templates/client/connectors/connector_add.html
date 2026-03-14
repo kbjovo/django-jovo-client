@@ -1030,7 +1030,10 @@ async function runCreateProvisionSteps(formData) {
 
     if (!res.success) {
         markLogError('step-topics', 'Failed to create Kafka topics', res.error);
-        showModalError(res.error);
+        const topicsError = res.error;
+        showModalCleaning();
+        await _doCreateCancel(true);
+        showModalError(topicsError, 'Cleaned Up — Close');
         return;
     }
 
@@ -1059,7 +1062,10 @@ async function runCreateProvisionSteps(formData) {
 
     if (!res.success) {
         markLogError('step-sink', 'Failed to configure sink connector', res.error);
-        showModalError(res.error);
+        const sinkError = res.error;
+        showModalCleaning();
+        await _doCreateCancel(true);
+        showModalError(sinkError, 'Cleaned Up — Close');
         return;
     }
 
@@ -1090,7 +1096,10 @@ async function runCreateProvisionSteps(formData) {
 
     if (!res.success) {
         markLogError('step-source', 'Failed to create source connector', res.error);
-        showModalError(res.error);
+        const sourceError = res.error;
+        showModalCleaning();
+        await _doCreateCancel(true);
+        showModalError(sourceError, 'Cleaned Up — Close');
         return;
     }
 
@@ -1123,13 +1132,18 @@ async function runCreateProvisionSteps(formData) {
             res = await r.json();
         } catch (err) {
             markLogError('step-finalize', 'Network error during batch finalization', err.message);
-            showModalError('Network error — check your connection');
+            showModalCleaning();
+            await _doCreateCancel(true);
+            showModalError('Network error — check your connection', 'Cleaned Up — Close');
             return;
         }
 
         if (!res.success) {
             markLogError('step-finalize', 'Batch finalization failed', res.error);
-            showModalError(res.error);
+            const finalizeError = res.error;
+            showModalCleaning();
+            await _doCreateCancel(true);
+            showModalError(finalizeError, 'Cleaned Up — Close');
             return;
         }
 
@@ -1194,13 +1208,15 @@ async function handleProvisionCancel() {
     await _doCreateCancel();
 }
 
-async function _doCreateCancel() {
+async function _doCreateCancel(silent = false) {
     const CSRF = document.querySelector('[name=csrfmiddlewaretoken]').value;
-    addLogEntry('step-cancel', 'Canceling and cleaning up...');
+    if (!silent) addLogEntry('step-cancel', 'Canceling and cleaning up...');
 
     if (!_createConfigPk) {
-        markLogSuccess('step-cancel', 'Nothing to clean up');
-        setTimeout(closeProvisionModal, 800);
+        if (!silent) {
+            markLogSuccess('step-cancel', 'Nothing to clean up');
+            setTimeout(closeProvisionModal, 800);
+        }
         return;
     }
 
@@ -1216,20 +1232,24 @@ async function _doCreateCancel() {
         });
         res = await r.json();
     } catch (err) {
-        markLogError('step-cancel', 'Cleanup request failed', err.message);
-        showModalError('Cleanup failed — some resources may need manual removal');
+        if (!silent) {
+            markLogError('step-cancel', 'Cleanup request failed', err.message);
+            showModalError('Cleanup failed — some resources may need manual removal');
+        }
         return;
     }
 
-    if (res.errors && res.errors.length) {
-        markLogError('step-cancel', 'Partial cleanup — some resources could not be removed', res.errors.join('; '));
-        showModalError('Partial cleanup — check Kafka and Debezium manually');
-    } else {
-        markLogSuccess('step-cancel', 'Cleanup complete — all resources removed');
-        setTimeout(() => {
-            closeProvisionModal();
-            showCreateFormBanner('Creation cancelled and cleaned up.', 'neutral');
-        }, 800);
+    if (!silent) {
+        if (res.errors && res.errors.length) {
+            markLogError('step-cancel', 'Partial cleanup — some resources could not be removed', res.errors.join('; '));
+            showModalError('Partial cleanup — check Kafka and Debezium manually');
+        } else {
+            markLogSuccess('step-cancel', 'Cleanup complete — all resources removed');
+            setTimeout(() => {
+                closeProvisionModal();
+                showCreateFormBanner('Creation cancelled and cleaned up.', 'neutral');
+            }, 800);
+        }
     }
 }
 

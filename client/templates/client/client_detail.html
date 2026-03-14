@@ -567,11 +567,12 @@
     x-show="showTestResultModal"
     x-cloak
     @keydown.escape.window="showTestResultModal = false"
-    class="fixed inset-0 z-50 overflow-y-auto"
-    role="dialog" 
+    class="fixed inset-0 z-50 flex items-center justify-center p-4"
+    role="dialog"
     aria-modal="true">
-    
-    <div 
+
+    <!-- Backdrop -->
+    <div
       x-show="showTestResultModal"
       x-transition:enter="ease-out duration-300"
       x-transition:enter-start="opacity-0"
@@ -583,130 +584,202 @@
       @click="showTestResultModal = false">
     </div>
 
-    <div class="flex min-h-full items-center justify-center p-4">
-      <div 
-        x-show="showTestResultModal"
-        x-transition:enter="ease-out duration-300"
-        x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-        x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
-        x-transition:leave="ease-in duration-200"
-        x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
-        x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-        class="relative transform overflow-hidden rounded-lg bg-white dark:bg-gray-800 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-lg"
-        @click.stop>
-        
-        <div class="bg-white dark:bg-gray-800 px-4 pb-4 pt-5 sm:p-6 sm:pb-4">
-          <div class="sm:flex sm:items-start">
-            <!-- Icon -->
-            <div 
-              :class="testResult.success ? 'bg-green-100 dark:bg-green-900/30' : 'bg-red-100 dark:bg-red-900/30'"
-              class="mx-auto flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full sm:mx-0 sm:h-10 sm:w-10">
-              <svg x-show="testResult.success" class="h-6 w-6 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <svg x-show="!testResult.success" class="h-6 w-6 text-red-600 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-              </svg>
-            </div>
-            
-            <!-- Content -->
-            <div class="mt-3 text-center sm:ml-4 sm:mt-0 sm:text-left flex-1">
-              <h3 class="text-lg font-semibold leading-6 text-gray-900 dark:text-white">
-                Connection Test <span x-text="testResult.success ? 'Successful' : 'Failed'"></span>
-              </h3>
-              <div class="mt-2">
-                <p class="text-sm text-gray-500 dark:text-gray-400" x-text="testResult.message"></p>
-              </div>
+    <!-- Modal panel -->
+    <div
+      x-show="showTestResultModal"
+      x-transition:enter="ease-out duration-300"
+      x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+      x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+      x-transition:leave="ease-in duration-200"
+      x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+      x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+      class="relative w-full flex flex-col rounded-xl bg-white dark:bg-gray-800 shadow-xl transition-all overflow-hidden"
+      style="max-width: 560px; max-height: min(600px, calc(100vh - 2rem));"
+      @click.stop>
 
-              <!-- Privilege / replication check (shown on success when privileges data is present) -->
-              <template x-if="testResult.success && testResult.privileges && testResult.privileges.length > 0">
-                <div class="mt-4">
-                  <div class="flex items-center justify-between mb-2">
-                    <p class="text-sm font-medium text-gray-700 dark:text-gray-300"
-                       x-text="testResult.privilege_section_title || 'Required Privileges'"></p>
-                    <template x-if="!testResult.privilege_check_error">
-                      <span
-                        :class="testResult.all_privileges_granted
-                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                          : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'"
-                        class="text-xs font-medium px-2 py-0.5 rounded">
-                        <span x-text="testResult.all_privileges_granted ? 'All granted' : 'Some missing'"></span>
-                      </span>
-                    </template>
-                  </div>
+      <!-- Header strip: green on success, red on failure -->
+      <div
+        :class="testResult.success
+          ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+          : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'"
+        class="flex items-center gap-4 px-6 py-4 border-b flex-shrink-0">
+        <!-- Circle icon -->
+        <div
+          :class="testResult.success ? 'bg-green-500' : 'bg-red-500'"
+          class="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0">
+          <svg x-show="testResult.success" class="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          <svg x-show="!testResult.success" class="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </div>
+        <!-- Title + message -->
+        <div class="flex-1 min-w-0">
+          <p
+            :class="testResult.success ? 'text-green-800 dark:text-green-300' : 'text-red-800 dark:text-red-300'"
+            class="text-sm font-semibold leading-snug"
+            x-text="'Connection test ' + (testResult.success ? 'successful' : 'failed')">
+          </p>
+          <p
+            :class="testResult.success ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'"
+            class="text-xs mt-1 opacity-90"
+            x-text="testResult.message">
+          </p>
+        </div>
+        <!-- Close X -->
+        <button
+          type="button"
+          @click="showTestResultModal = false; testResult.isSink ? (showSinkModal = true) : (showDatabaseModal = true);"
+          :class="testResult.success ? 'text-green-600 dark:text-green-400 hover:text-green-800 dark:hover:text-green-200' : 'text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200'"
+          class="flex-shrink-0 transition">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
 
-                  <!-- Privilege check failed to run -->
-                  <template x-if="testResult.privilege_check_error">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 italic">
-                      Could not verify privileges: <span x-text="testResult.privilege_check_error"></span>
-                    </p>
-                  </template>
+      <!-- Scrollable body -->
+      <div class="flex-1 overflow-y-auto min-h-0">
 
-                  <!-- Privilege rows -->
-                  <template x-if="!testResult.privilege_check_error">
-                    <ul class="space-y-1.5">
-                      <template x-for="priv in testResult.privileges" :key="priv.name">
-                        <li class="flex items-start gap-2">
-                          <span class="mt-0.5 flex-shrink-0">
-                            <svg x-show="priv.granted" class="w-4 h-4 text-green-500 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-                            </svg>
-                            <svg x-show="!priv.granted" class="w-4 h-4 text-red-500 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                            </svg>
-                          </span>
-                          <span class="flex-1 min-w-0">
-                            <span
-                              :class="priv.granted ? 'text-gray-800 dark:text-gray-200' : 'text-red-700 dark:text-red-400'"
-                              class="text-sm font-medium"
-                              x-text="priv.name"></span>
-                            <span class="text-xs text-gray-400 dark:text-gray-500 ml-1.5" x-text="'— ' + priv.note"></span>
-                          </span>
-                        </li>
-                      </template>
-                    </ul>
-                  </template>
+        <!-- Replication readiness section -->
+        <template x-if="testResult.privileges && testResult.privileges.length > 0">
+          <div class="px-6 pt-5 pb-4">
 
-                  <!-- Warning footer when something is missing -->
-                  <template x-if="!testResult.privilege_check_error && !testResult.all_privileges_granted">
-                    <p class="mt-3 text-xs text-amber-600 dark:text-amber-400"
-                       x-text="testResult.isSink
-                         ? 'Grant the missing privileges before creating the connector, otherwise the sink connector will fail to write data.'
-                         : 'Grant the missing privileges or enable the required server settings before creating a source connector.'">
-                    </p>
-                  </template>
-                </div>
+            <!-- Section label + badge -->
+            <div class="flex items-center justify-between mb-4">
+              <p class="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500"
+                 x-text="testResult.privilege_section_title || 'Replication readiness'"></p>
+              <template x-if="!testResult.privilege_check_error">
+                <span
+                  :class="testResult.all_privileges_granted
+                    ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'"
+                  class="text-xs font-medium px-2.5 py-0.5 rounded-full">
+                  <span x-text="testResult.all_privileges_granted ? 'All granted' : 'Some missing'"></span>
+                </span>
               </template>
             </div>
+
+            <!-- Privilege check error -->
+            <template x-if="testResult.privilege_check_error">
+              <p class="text-xs text-gray-400 dark:text-gray-500 italic">
+                Could not verify privileges: <span x-text="testResult.privilege_check_error"></span>
+              </p>
+            </template>
+
+            <!-- Privilege rows as cards -->
+            <template x-if="!testResult.privilege_check_error">
+              <ul class="space-y-3">
+                <template x-for="priv in testResult.privileges" :key="priv.name">
+                  <li
+                    :class="priv.granted
+                      ? 'bg-green-50 dark:bg-green-900/10 border-green-200 dark:border-green-800'
+                      : 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800'"
+                    class="flex items-start gap-3 border rounded-lg px-2 py-2">
+                    <span class="mt-0.5 flex-shrink-0">
+                      <svg x-show="priv.granted" class="w-4 h-4 text-green-500 dark:text-green-400" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                        <polyline points="20 6 9 17 4 12"/>
+                      </svg>
+                      <svg x-show="!priv.granted" class="w-4 h-4 text-red-500 dark:text-red-400" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                    </span>
+                    <div class="flex-1 min-w-0 flex flex-col gap-1.5">
+                      <p
+                        :class="priv.granted ? 'text-green-800 dark:text-green-300' : 'text-red-700 dark:text-red-400'"
+                        class="text-sm font-semibold leading-snug"
+                        x-text="priv.name">
+                      </p>
+                      <p class="text-xs text-gray-400 dark:text-gray-500" x-text="priv.note"></p>
+                    </div>
+                  </li>
+                </template>
+              </ul>
+            </template>
+
+            <!-- Warning callout when something is missing -->
+            <template x-if="!testResult.privilege_check_error && !testResult.all_privileges_granted">
+              <div class="mt-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-4 py-3">
+                <p class="text-xs text-amber-700 dark:text-amber-400"
+                   x-text="testResult.isSink
+                     ? 'Grant the missing privileges before creating the connector, otherwise the sink connector will fail to write data.'
+                     : 'Grant the missing privileges or enable the required server settings before creating a source connector.'">
+                </p>
+              </div>
+            </template>
           </div>
-        </div>
-        
-        <!-- Actions -->
-        <div class="bg-gray-50 dark:bg-gray-900 px-4 py-3 sm:flex sm:flex-row-reverse sm:px-6 gap-3">
-          <!-- For ADD mode: Show Save button after test -->
-          <template x-if="!testResult.isUpdateMode">
+        </template>
+
+        <!-- SQL Server setup script -->
+        <template x-if="testResult.success && testResult.signal_table_sql">
+          <div class="px-6 pb-6">
+            <div class="border border-gray-200 dark:border-gray-700 rounded-lg">
+              <!-- Script header -->
+              <div class="flex items-center justify-between px-4 py-2.5 bg-gray-50 dark:bg-gray-900/50 border-b border-gray-200 dark:border-gray-700 rounded-t-lg">
+                <p class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">SQL Server setup script</p>
+                <button
+                  type="button"
+                  @click="navigator.clipboard.writeText(testResult.signal_table_sql).then(() => { $el.textContent = 'Copied!'; setTimeout(() => $el.textContent = 'Copy', 2000) })"
+                  class="text-xs font-medium px-2.5 py-1 rounded-md bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition">
+                  Copy
+                </button>
+              </div>
+              <!-- Code block -->
+              <pre class="text-xs text-gray-700 dark:text-gray-300 font-mono bg-gray-950/5 dark:bg-gray-900 p-4 overflow-x-auto overflow-y-auto whitespace-pre leading-relaxed" style="max-height: 220px; min-height: 80px;" x-text="testResult.signal_table_sql"></pre>
+            </div>
+            <p class="mt-3 text-xs text-gray-400 dark:text-gray-500">Run as a DBA on the source SQL Server instance. The signal table is never auto-created by the connector.</p>
+          </div>
+        </template>
+
+      </div>
+
+      <!-- Footer actions -->
+      <div class="flex-shrink-0 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 px-6 py-4 flex items-center justify-between gap-3">
+
+        <!-- Back to form (left) -->
+        <button
+          type="button"
+          @click="showTestResultModal = false; testResult.isSink ? (showSinkModal = true) : (showDatabaseModal = true);"
+          :disabled="isSavingConnection"
+          class="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition disabled:opacity-50 disabled:cursor-not-allowed">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+          Back to form
+        </button>
+
+        <!-- Save actions (right) -->
+        <div class="flex items-center gap-2">
+          <!-- Save anyway (shown only in add mode when test failed) -->
+          <template x-if="!testResult.isUpdateMode && !testResult.success">
             <button
               @click="testResult.isSink ? saveSinkDatabase() : saveDatabase()"
               :disabled="isSavingConnection"
-              :class="testResult.success ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'"
-              class="inline-flex w-full justify-center items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm sm:w-auto transition disabled:opacity-50 disabled:cursor-not-allowed">
-              <svg x-show="isSavingConnection" class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+              <svg x-show="isSavingConnection" class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
-              <span x-text="isSavingConnection ? 'Saving...' : (testResult.success ? 'Save Connection' : 'Save Anyway')"></span>
+              <span x-text="isSavingConnection ? 'Saving...' : 'Save anyway'"></span>
             </button>
           </template>
 
-          <!-- Cancel button -->
-          <button
-            type="button"
-            @click="showTestResultModal = false; testResult.isSink ? (showSinkModal = true) : (showDatabaseModal = true);"
-            :disabled="isSavingConnection"
-            class="mt-3 inline-flex w-full justify-center rounded-lg bg-white dark:bg-gray-800 px-4 py-2 text-sm font-semibold text-gray-900 dark:text-gray-200 shadow-sm ring-1 ring-inset ring-gray-300 dark:ring-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 sm:mt-0 sm:w-auto transition disabled:opacity-50 disabled:cursor-not-allowed">
-            Cancel
-          </button>
+          <!-- Save connection (shown in add mode when test succeeded) -->
+          <template x-if="!testResult.isUpdateMode && testResult.success">
+            <button
+              @click="testResult.isSink ? saveSinkDatabase() : saveDatabase()"
+              :disabled="isSavingConnection"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-green-600 hover:bg-green-700 text-white transition disabled:opacity-50 disabled:cursor-not-allowed">
+              <svg x-show="isSavingConnection" class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span x-text="isSavingConnection ? 'Saving...' : 'Save connection'"></span>
+            </button>
+          </template>
         </div>
+
       </div>
     </div>
   </div>
@@ -1000,4 +1073,3 @@ document.addEventListener('alpine:init', () => {
 </script>
 
 {% endblock %}
-

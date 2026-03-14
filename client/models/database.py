@@ -260,6 +260,32 @@ class ClientDatabase(models.Model):
             self.connection_status = "failed"
             msg = str(e)
             
+            # SQL Server-specific error messages
+            if self.db_type == "mssql":
+                if "18456" in msg or "Login failed" in msg:
+                    raise Exception(
+                        f"Login failed for user '{self.username}'. "
+                        f"Check: (1) username/password are correct, "
+                        f"(2) SQL Server is in Mixed Mode authentication (not Windows-only), "
+                        f"(3) the user has permission to connect to '{self.database_name}'"
+                    )
+                elif "18452" in msg:
+                    raise Exception(
+                        f"Windows Authentication login attempted but SQL login expected. "
+                        f"Enable Mixed Mode authentication in SQL Server properties."
+                    )
+                elif "4060" in msg or "Cannot open database" in msg:
+                    raise Exception(
+                        f"Cannot open database '{self.database_name}'. "
+                        f"The database may not exist or the user has no access to it."
+                    )
+                elif "Adaptive Server connection failed" in msg or "20002" in msg:
+                    raise Exception(
+                        f"SQL Server connection refused at {self.host}:{self.port}. "
+                        f"Check that TCP/IP is enabled in SQL Server Configuration Manager "
+                        f"and the SQL Server Browser service is running."
+                    )
+
             # ✅ ENHANCED: Oracle-specific error messages with service/SID context
             if "Access denied" in msg or "authentication failed" in msg.lower():
                 raise Exception("Authentication failed - invalid username or password")

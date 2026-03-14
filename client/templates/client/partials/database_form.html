@@ -118,6 +118,13 @@
         {% if form.host.errors %}
           <p class="mt-1 text-xs text-red-600">{{ form.host.errors.0 }}</p>
         {% endif %}
+        <!-- SQL Server named instance hint -->
+        <div x-show="formData.db_type === 'mssql'" class="mt-1.5 flex items-start gap-1.5 text-xs text-blue-600 dark:text-blue-400">
+          <svg class="w-3.5 h-3.5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+          <span>For named instances (e.g. <strong>SQLEXPRESS</strong>), configure a static TCP port in SQL Server Configuration Manager → Protocols → TCP/IP → IPAll → TCP Port, then use that port here.</span>
+        </div>
       </div>
 
       <!-- Port -->
@@ -470,6 +477,12 @@
         } else if (dbType === 'postgresql' || dbType === 'postgres') {
           items.push({ label: 'REPLICATION role granted', ok: replication.has_replication });
           if (replication.error) items.push({ label: 'Check error: ' + replication.error, ok: false });
+        } else if (dbType === 'mssql') {
+          items.push({ label: 'CDC enabled on database', ok: replication.cdc_enabled });
+          items.push({ label: 'SQL Server Agent running', ok: replication.agent_running !== false });
+          items.push({ label: 'CDC schema SELECT access', ok: replication.has_cdc_access });
+          items.push({ label: 'Signal table (dbo.debezium_signal)', ok: replication.signal_table_exists });
+          if (replication.error) items.push({ label: 'Check error: ' + replication.error, ok: false });
         }
         return { items, allOk: items.length > 0 && items.every(i => i.ok) };
       },
@@ -501,6 +514,7 @@
             all_privileges_granted: (result.replication && result.replication.all_granted) ?? true,
             privilege_check_error: (result.replication && result.replication.error) || '',
             privilege_section_title: 'Replication Readiness',
+            signal_table_sql: (result.replication && result.replication.signal_table_sql) || null,
             formData: this.formData,
             url: url,
             isUpdateMode: this.isUpdateMode

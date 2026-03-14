@@ -140,7 +140,9 @@ def provision_source(request, config_pk):
             tables_whitelist=tables_list,
         )
 
-        connector_manager.create_connector(replication_config.connector_name, source_config)
+        source_success, source_error = connector_manager.create_connector(replication_config.connector_name, source_config)
+        if not source_success:
+            raise Exception(f"Failed to create source connector: {source_error}")
 
         replication_config.status = 'active'
         replication_config.is_active = True
@@ -199,7 +201,9 @@ def provision_sink(request, config_pk):
         exists, _ = connector_manager.get_connector_status(sink_connector_name)
 
         if not exists:
-            connector_manager.create_connector(sink_connector_name, sink_config)
+            sink_success, sink_error = connector_manager.create_connector(sink_connector_name, sink_config)
+            if not sink_success:
+                raise Exception(f"Failed to create sink connector: {sink_error}")
 
             database.replication_configs.update(
                 sink_connector_name=sink_connector_name,

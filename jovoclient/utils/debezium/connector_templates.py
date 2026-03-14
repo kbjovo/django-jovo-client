@@ -525,7 +525,7 @@ def get_sqlserver_connector_config(
     db_host = db_config.host
     if use_docker_internal_host:
         if db_host in ['localhost', '127.0.0.1']:
-            db_host = 'mssql2019'
+            db_host = 'host.docker.internal'
 
     # ✅ CRITICAL FIX: Use different values for server name and topic prefix
     # Include version to prevent JMX MBean conflicts between multiple connectors
@@ -630,8 +630,8 @@ def get_sqlserver_connector_config(
     # Format: "dbo.Customers,dbo.Orders" (NOT "AppDB.dbo.Customers")
     # Debezium will automatically prepend the database name
     if tables_whitelist:
-        logger.warning(f"⚠️  SQL Server is CASE-SENSITIVE for table filters!")
-        logger.warning(f"⚠️  Database name: {db_config.database_name}")
+        logger.info(f"SQL Server table.include.list is case-sensitive — using exact names from database")
+        logger.info(f"Database: {db_config.database_name}")
 
         tables_full = []
         for table in tables_whitelist:

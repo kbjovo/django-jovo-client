@@ -251,9 +251,14 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
             for schema_name in schemas:
                 try:
                     schema_tables = inspector.get_table_names(schema=schema_name)
-                    # Add schema prefix to table names
+                    # dbo is the default schema — omit the prefix so table names
+                    # match the bare names stored in TableMapping.source_table.
+                    # Non-dbo schemas keep the 'schema.table' format.
                     for table in schema_tables:
-                        tables.append(f"{schema_name}.{table}")
+                        if schema_name.lower() == 'dbo':
+                            tables.append(table)
+                        else:
+                            tables.append(f"{schema_name}.{table}")
                     logger.debug(f"Schema '{schema_name}': {len(schema_tables)} tables")
                 except Exception as e:
                     logger.warning(f"Could not get tables from schema '{schema_name}': {e}")

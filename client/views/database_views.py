@@ -109,6 +109,104 @@ def _check_postgresql_replication(db_instance) -> dict:
     return result
 
 
+def _check_mssql_replication(db_instance) -> dict:
+    """
+    Replication readiness check for a SQL Server source.
+    Returns dict with: cdc_enabled, agent_running, has_cdc_access, signal_table_exists,
+                       signal_table_sql, error, privileges [{name, granted, note}], all_granted
+    """
+    signal_table_sql = (
+        "-- Run this in the source database as a DBA:\n"
+        "USE [{database}];\n"
+        "GO\n\n"
+        "-- 1. Enable CDC on the database (requires sysadmin or db_owner)\n"
+        "EXEC sys.sp_cdc_enable_db;\n"
+        "GO\n\n"
+        "-- 2. Create the Debezium signal table\n"
+        "CREATE TABLE dbo.debezium_signal (\n"
+        "    id   NVARCHAR(42)   NOT NULL PRIMARY KEY,\n"
+        "    type NVARCHAR(32)   NOT NULL,\n"
+        "    data NVARCHAR(2048) NULL\n"
+        ");\n"
+        "GO\n\n"
+        "-- 3. Enable CDC on each table to replicate, e.g.:\n"
+        "-- EXEC sys.sp_cdc_enable_table\n"
+        "--     @source_schema = N'dbo',\n"
+        "--     @source_name   = N'YourTable',\n"
+        "--     @role_name     = NULL;"
+    ).replace('{database}', db_instance.database_name)
+
+    result = {
+        'cdc_enabled': False,
+        'agent_running': None,  # None = could not check (permissions)
+        'has_cdc_access': False,
+        'signal_table_exists': False,
+        'signal_table_sql': signal_table_sql,
+        'error': '',
+        'privileges': [],
+        'all_granted': False,
+    }
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(db_instance.get_connection_url(), pool_pre_ping=True)
+        with engine.connect() as conn:
+            # CDC enabled on this database
+            row = conn.execute(text(
+                "SELECT is_cdc_enabled FROM sys.databases WHERE name = DB_NAME()"
+            )).fetchone()
+            result['cdc_enabled'] = bool(row and row[0])
+
+            # SQL Server Agent running (needs VIEW SERVER STATE)
+            try:
+                row = conn.execute(text(
+                    "SELECT COUNT(*) FROM sys.dm_server_services "
+                    "WHERE servicename LIKE 'SQL Server Agent%' AND status_desc = 'Running'"
+                )).fetchone()
+                result['agent_running'] = bool(row and row[0] > 0)
+            except Exception:
+                result['agent_running'] = None  # insufficient permissions — skip
+
+            # SELECT access on cdc schema (only exists when CDC is enabled)
+            if result['cdc_enabled']:
+                try:
+                    row = conn.execute(text(
+                        "SELECT HAS_PERMS_BY_NAME('cdc', 'SCHEMA', 'SELECT')"
+                    )).fetchone()
+                    result['has_cdc_access'] = bool(row and row[0])
+                except Exception:
+                    result['has_cdc_access'] = False
+
+            # Signal table existence
+            row = conn.execute(text(
+                "SELECT OBJECT_ID('dbo.debezium_signal')"
+            )).fetchone()
+            result['signal_table_exists'] = bool(row and row[0] is not None)
+
+        engine.dispose()
+
+        if result['agent_running'] is None:
+            agent_granted = False
+            agent_note = 'Could not verify — grant VIEW SERVER STATE to check'
+        else:
+            agent_granted = result['agent_running']
+            agent_note = 'Required for CDC log cleanup jobs'
+
+        result['privileges'] = [
+            {'name': 'CDC enabled on database', 'granted': result['cdc_enabled'],
+             'note': 'Run: EXEC sys.sp_cdc_enable_db (requires sysadmin or db_owner)'},
+            {'name': 'SQL Server Agent running', 'granted': agent_granted,
+             'note': agent_note},
+            {'name': 'CDC schema SELECT access', 'granted': result['has_cdc_access'],
+             'note': 'Required to read CDC change tables'},
+            {'name': 'Signal table (dbo.debezium_signal)', 'granted': result['signal_table_exists'],
+             'note': 'Required for incremental snapshots — see setup SQL below'},
+        ]
+        result['all_granted'] = all(p['granted'] for p in result['privileges'])
+    except Exception as e:
+        result['error'] = str(e)
+    return result
+
+
 class ClientDatabaseCreateView(CreateView):
     """
     Create a new database connection for a client.
@@ -155,6 +253,8 @@ class ClientDatabaseCreateView(CreateView):
                             replication = _check_mysql_replication(temp_instance)
                         elif db_type in ('postgresql', 'postgres'):
                             replication = _check_postgresql_replication(temp_instance)
+                        elif db_type == 'mssql':
+                            replication = _check_mssql_replication(temp_instance)
                         return JsonResponse({
                             'success': True,
                             'message': '✓ Connection test successful! The database is reachable and credentials are valid.',
@@ -264,6 +364,8 @@ class ClientDatabaseUpdateView(UpdateView):
                         replication = _check_mysql_replication(temp)
                     elif db_type in ('postgresql', 'postgres'):
                         replication = _check_postgresql_replication(temp)
+                    elif db_type == 'mssql':
+                        replication = _check_mssql_replication(temp)
                     return JsonResponse({
                         'success': True,
                         'message': '✓ Connection test successful! The database is reachable and credentials are valid.',
