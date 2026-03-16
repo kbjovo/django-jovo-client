@@ -66,29 +66,43 @@ def build_connection_string(db_config: ClientDatabase) -> str:
     return connection_strings[db_type]
 
 
-def get_database_engine(db_config: ClientDatabase, pool_size: int = 5) -> Engine:
+def get_database_engine(db_config: ClientDatabase, pool_size: int = 5, connect_timeout: int = None) -> Engine:
     """
     Create SQLAlchemy engine for database connection
-    
+
     Args:
         db_config: ClientDatabase model instance
         pool_size: Connection pool size (default: 5)
-        
+        connect_timeout: Connection timeout in seconds (default: None = driver default)
+
     Returns:
         Engine: SQLAlchemy engine instance
-        
+
     Raises:
         DatabaseConnectionError: If connection fails
     """
     try:
         connection_string = build_connection_string(db_config)
-        
+
+        connect_args = {}
+        if connect_timeout is not None:
+            db_type = db_config.db_type.lower()
+            if db_type == 'mssql':
+                connect_args = {'login_timeout': connect_timeout, 'timeout': connect_timeout}
+            elif db_type == 'mysql':
+                connect_args = {'connect_timeout': connect_timeout}
+            elif db_type == 'postgresql':
+                connect_args = {'connect_timeout': connect_timeout}
+            elif db_type == 'oracle':
+                connect_args = {'tcp_connect_timeout': connect_timeout}
+
         engine = create_engine(
             connection_string,
             pool_size=pool_size,
             pool_pre_ping=True,  # Test connections before using
             pool_recycle=3600,   # Recycle connections after 1 hour
-            echo=False
+            echo=False,
+            connect_args=connect_args or {},
         )
         
         logger.info(f"Created database engine for {db_config.connection_name}")
@@ -133,25 +147,26 @@ def test_database_connection(db_config: ClientDatabase) -> Tuple[bool, Optional[
 
 
 @contextmanager
-def get_database_connection(db_config: ClientDatabase):
+def get_database_connection(db_config: ClientDatabase, connect_timeout: int = None):
     """
     Context manager for database connections
-    
+
     Args:
         db_config: ClientDatabase model instance
-        
+        connect_timeout: Connection timeout in seconds (default: None = driver default)
+
     Yields:
         Connection object
-        
+
     Example:
         with get_database_connection(db_config) as conn:
             result = conn.execute(text("SELECT * FROM users"))
     """
     engine = None
     connection = None
-    
+
     try:
-        engine = get_database_engine(db_config)
+        engine = get_database_engine(db_config, connect_timeout=connect_timeout)
         connection = engine.connect()
         yield connection
         
@@ -877,20 +892,21 @@ def get_database_size(db_config: ClientDatabase) -> Dict[str, Any]:
         return {'size_mb': 0, 'table_count': 0, 'error': str(e)}
 
 
-def get_row_count(db_config: ClientDatabase, table_name: str, schema: Optional[str] = None) -> int:
+def get_row_count(db_config: ClientDatabase, table_name: str, schema: Optional[str] = None, connect_timeout: int = None) -> int:
     """
     Get row count for a specific table
-    
+
     FIXED: Proper handling for all database types including Oracle
-    
+
     Args:
         db_config: ClientDatabase model instance
         table_name: Name of the table (may include schema prefix)
         schema: Schema name (optional)
-        
+        connect_timeout: Connection timeout in seconds (default: None = driver default)
+
     Returns:
         int: Number of rows in the table
-        
+
     Raises:
         DatabaseOperationError: If operation fails
     """
@@ -939,11 +955,11 @@ def get_row_count(db_config: ClientDatabase, table_name: str, schema: Optional[s
             # Generic fallback
             query = f"SELECT COUNT(*) as cnt FROM {actual_table_name}"
         
-        with get_database_connection(db_config) as conn:
+        with get_database_connection(db_config, connect_timeout=connect_timeout) as conn:
             result = conn.execute(text(query))
             row = result.fetchone()
             count = row[0] if row else 0
-            
+
         logger.debug(f"Row count for '{table_name}': {count}")
         return count
         

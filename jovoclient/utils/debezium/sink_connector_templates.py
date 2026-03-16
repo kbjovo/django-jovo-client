@@ -85,13 +85,23 @@ def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
             seen_names.add(transform_name)
 
             # Match the specific topic for this source db / schema / table across
-            # any connector version: client_{cid}_db_{db_id}_v_\d+.{schema}.{table}
+            # any connector version.
+            # MySQL/PostgreSQL: client_{cid}_db_{db_id}_v_\d+.{db_name}.{table}  (3 segments)
+            # SQL Server/Oracle: client_{cid}_db_{db_id}_v_\d+.{db_name}.{schema}.{table} (4 segments)
             # Use single backslash escaping: Python \\d+ -> string \d+ -> Java regex digit+
-            topic_regex = (
-                f"client_{client.id}_db_{db_id}_v_\\d+"
-                f"\\.{_re.escape(schema_in_topic)}"
-                f"\\.{_re.escape(source_table)}"
-            )
+            if db_type in ('mssql', 'sqlserver', 'oracle'):
+                topic_regex = (
+                    f"client_{client.id}_db_{db_id}_v_\\d+"
+                    f"\\.{_re.escape(source_db.database_name)}"
+                    f"\\.{_re.escape(schema_in_topic)}"
+                    f"\\.{_re.escape(source_table)}"
+                )
+            else:
+                topic_regex = (
+                    f"client_{client.id}_db_{db_id}_v_\\d+"
+                    f"\\.{_re.escape(schema_in_topic)}"
+                    f"\\.{_re.escape(source_table)}"
+                )
 
             config[f"transforms.{transform_name}.type"] = (
                 "org.apache.kafka.connect.transforms.RegexRouter"
@@ -237,7 +247,10 @@ def get_mysql_sink_connector_config(
     # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
     # Excludes: ddl_events and debezium_signal tables (DDL events are processed separately)
     # Note: signals topic (client_X_db_Y_v_Z.signals) is naturally excluded as it has only 2 parts
-    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?!ddl_events$|debezium_signal$)[^.]+"
+    # Matches both 3-segment topics (MySQL/PostgreSQL: prefix.db.table) and
+    # 4-segment topics (SQL Server/Oracle: prefix.db.schema.table).
+    # The middle optional group (?:[^.]+\.)? absorbs the extra schema segment.
+    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
@@ -387,7 +400,10 @@ def get_postgresql_sink_connector_config(
     # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
     # Excludes: ddl_events and debezium_signal tables (DDL events are processed separately)
     # Note: signals topic (client_X_db_Y_v_Z.signals) is naturally excluded as it has only 2 parts
-    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?!ddl_events$|debezium_signal$)[^.]+"
+    # Matches both 3-segment topics (MySQL/PostgreSQL: prefix.db.table) and
+    # 4-segment topics (SQL Server/Oracle: prefix.db.schema.table).
+    # The middle optional group (?:[^.]+\.)? absorbs the extra schema segment.
+    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 

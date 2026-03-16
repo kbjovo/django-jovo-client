@@ -193,87 +193,112 @@ def connector_table_rows_api(request, config_pk):
     """
     AJAX endpoint returning row counts for all enabled tables
     from both source and target databases.
+    Opens one connection per database and runs all queries through it.
     """
     from client.utils.database_utils import get_database_connection
+    from sqlalchemy import text as sa_text
+
+    def _count_query(db_config, table_name, schema=None):
+        """Build a COUNT(*) query string for the given db type."""
+        db_type = db_config.db_type.lower()
+        if db_type == 'mssql':
+            if '.' in table_name:
+                schema_name, tbl = table_name.split('.', 1)
+            else:
+                schema_name, tbl = (schema or 'dbo'), table_name
+            return f"SELECT COUNT(*) FROM [{schema_name}].[{tbl}]"
+        elif db_type == 'postgresql':
+            if '.' in table_name:
+                schema_name, tbl = table_name.rsplit('.', 1)
+            else:
+                schema_name, tbl = (schema or 'public'), table_name
+            return f'SELECT COUNT(*) FROM "{schema_name}"."{tbl}"'
+        elif db_type == 'oracle':
+            if '.' in table_name:
+                schema_name, tbl = table_name.rsplit('.', 1)
+                schema_name, tbl = schema_name.upper(), tbl.upper()
+            else:
+                schema_name = (schema or db_config.username).upper()
+                tbl = table_name.upper()
+            return f"SELECT COUNT(*) FROM {schema_name}.{tbl}"
+        else:  # mysql and generic
+            return f"SELECT COUNT(*) FROM `{table_name}`"
+
+    def _is_not_found_error(err_str):
+        keywords = ("doesn't exist", 'not exist', 'not found', 'unknown table', 'invalid object')
+        return any(k in err_str for k in keywords)
 
     try:
         config = get_object_or_404(ReplicationConfig, pk=config_pk)
         source_db = config.client_database
         target_db = source_db.client.get_target_database()
 
-        # Test source database connectivity
+        mappings = list(config.table_mappings.filter(is_enabled=True).order_by('source_table'))
+
+        # ── Source counts (single connection for all tables) ─────────────────
         source_reachable = True
+        source_counts = {}   # mapping.pk → (count, error)
         try:
-            with get_database_connection(source_db) as conn:
-                pass
+            with get_database_connection(source_db, connect_timeout=5) as conn:
+                for mapping in mappings:
+                    try:
+                        q = _count_query(source_db, mapping.source_table, schema=mapping.source_schema)
+                        row = conn.execute(sa_text(q)).fetchone()
+                        source_counts[mapping.pk] = (row[0] if row else 0, None)
+                    except Exception as e:
+                        err_str = str(e).lower()
+                        error = 'table_not_found' if _is_not_found_error(err_str) else 'error'
+                        source_counts[mapping.pk] = (None, error)
+                        logger.warning(f'Source row count failed for {mapping.source_table}: {e}')
         except Exception as e:
             source_reachable = False
             logger.warning(f'Source database unreachable ({source_db.connection_name}): {e}')
 
-        # Test target database connectivity
+        # ── Target counts (single connection for all tables) ─────────────────
         target_reachable = True
+        target_counts = {}   # mapping.pk → (count, error)
         if target_db:
             try:
-                with get_database_connection(target_db) as conn:
-                    pass
+                with get_database_connection(target_db, connect_timeout=5) as conn:
+                    for mapping in mappings:
+                        try:
+                            q = _count_query(target_db, mapping.target_table, schema=mapping.target_schema or None)
+                            row = conn.execute(sa_text(q)).fetchone()
+                            target_counts[mapping.pk] = (row[0] if row else 0, None)
+                        except Exception as e:
+                            err_str = str(e).lower()
+                            if _is_not_found_error(err_str):
+                                target_counts[mapping.pk] = (None, 'table_not_found')
+                                logger.debug(f'Target table not yet created: {mapping.target_table}')
+                            else:
+                                target_counts[mapping.pk] = (None, 'error')
+                                logger.warning(f'Target row count failed for {mapping.target_table}: {e}')
             except Exception as e:
                 target_reachable = False
                 logger.warning(f'Target database unreachable ({target_db.connection_name}): {e}')
 
-        mappings = config.table_mappings.filter(is_enabled=True).order_by('source_table')
+        # ── Build response rows ───────────────────────────────────────────────
         rows = []
-
         for mapping in mappings:
-            source_count = None
-            source_error = None
-            target_count = None
-            target_error = None
-
-            # Count source rows
             if not source_reachable:
-                source_error = 'db_unreachable'
+                src_count, src_error = None, 'db_unreachable'
             else:
-                try:
-                    source_count = get_row_count(
-                        source_db,
-                        mapping.source_table,
-                        schema=mapping.source_schema,
-                    )
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "doesn't exist" in err_str or 'not exist' in err_str or 'not found' in err_str or 'unknown table' in err_str or 'invalid object' in err_str:
-                        source_error = 'table_not_found'
-                    else:
-                        source_error = 'error'
-                    logger.warning(f'Source row count failed for {mapping.source_table}: {e}')
+                src_count, src_error = source_counts.get(mapping.pk, (None, 'error'))
 
-            # Count target rows
             if not target_db:
-                target_error = 'no_target_db'
+                tgt_count, tgt_error = None, 'no_target_db'
             elif not target_reachable:
-                target_error = 'db_unreachable'
+                tgt_count, tgt_error = None, 'db_unreachable'
             else:
-                try:
-                    target_count = get_row_count(
-                        target_db,
-                        mapping.target_table,
-                        schema=mapping.target_schema or None,
-                    )
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "doesn't exist" in err_str or 'not exist' in err_str or 'not found' in err_str or 'unknown table' in err_str or 'invalid object' in err_str:
-                        target_error = 'table_not_found'
-                    else:
-                        target_error = 'error'
-                    logger.warning(f'Target row count failed for {mapping.target_table}: {e}')
+                tgt_count, tgt_error = target_counts.get(mapping.pk, (None, 'error'))
 
             rows.append({
                 'source_table': mapping.source_table,
                 'target_table': mapping.target_table,
-                'source_rows': source_count,
-                'target_rows': target_count,
-                'source_error': source_error,
-                'target_error': target_error,
+                'source_rows': src_count,
+                'target_rows': tgt_count,
+                'source_error': src_error,
+                'target_error': tgt_error,
             })
 
         return JsonResponse({

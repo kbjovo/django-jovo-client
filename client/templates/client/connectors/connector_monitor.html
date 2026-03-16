@@ -464,12 +464,15 @@ const LIVE_METRICS_URL = '{% url "connector_live_metrics_api" replication_config
 function fmt(n) { return n !== undefined && n !== null ? Number(n).toLocaleString() : '--'; }
 
 function fetchLiveMetrics() {
-  document.getElementById('metrics-refresh-badge').classList.remove('hidden');
+  const _badge = document.getElementById('metrics-refresh-badge');
+  if (!_badge) return;
+  _badge.classList.remove('hidden');
   fetch(LIVE_METRICS_URL)
     .then(r => r.json())
     .then(data => {
-      document.getElementById('metrics-refresh-badge').classList.add('hidden');
-      document.getElementById('metrics-last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+      _badge.classList.add('hidden');
+      const _lastUpdated = document.getElementById('metrics-last-updated');
+      if (_lastUpdated) _lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
 
       const unavailEl = document.getElementById('metrics-unavailable');
 
@@ -515,7 +518,7 @@ function fetchLiveMetrics() {
       }
     })
     .catch(() => {
-      document.getElementById('metrics-refresh-badge').classList.add('hidden');
+      _badge.classList.add('hidden');
     });
 }
 
