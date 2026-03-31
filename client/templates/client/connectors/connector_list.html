@@ -216,6 +216,18 @@
                             <span class="text-gray-500 dark:text-gray-400">Max Duration:</span>
                             <span class="font-medium text-gray-900 dark:text-white">{{ config.batch_max_catchup_minutes }} min</span>
                         </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-gray-500 dark:text-gray-400">Last Run:</span>
+                            <span class="font-medium text-gray-900 dark:text-white">
+                                {% if config.last_batch_run %}{{ config.last_batch_run|timesince }} ago{% else %}-{% endif %}
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-gray-500 dark:text-gray-400">Next Run:</span>
+                            <span class="font-medium {% if config.next_batch_run %}text-purple-700 dark:text-purple-400{% else %}text-gray-900 dark:text-white{% endif %}">
+                                {% if config.next_batch_run %}{{ config.next_batch_run|date:"M d, g:i A" }}{% else %}-{% endif %}
+                            </span>
+                        </div>
                     </div>
                     {% endif %}
 

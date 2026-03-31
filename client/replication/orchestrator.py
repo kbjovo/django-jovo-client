@@ -6,6 +6,7 @@ from django.conf import settings
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from jovoclient.utils.debezium.jolokia_client import JolokiaClient
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager, format_topic_name
+from jovoclient.utils.debezium.schema_registry_utils import delete_schema_subject
 from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
 from client.utils.table_creator import drop_tables_for_mappings, truncate_tables_for_mappings
@@ -450,7 +451,7 @@ class ReplicationOrchestrator:
                     self._log_info("ℹ️ No other source connectors - deleting sink connector")
                     self._delete_sink_connector(sink_connector_name)
 
-            # Optionally delete Kafka topics
+            # Optionally delete Kafka topics and their schema registry subjects
             if delete_topics:
                 self._log_info("Deleting Kafka topics...")
                 success, message = self.delete_topics()
@@ -458,6 +459,23 @@ class ReplicationOrchestrator:
                     self._log_info(f"✓ {message}")
                 else:
                     self._log_warning(f"⚠️ {message}")
+
+                self._log_info("Deleting Schema Registry subjects...")
+                topic_prefix = self.config.kafka_topic_prefix
+                db_config = self.config.client_database
+                for tm in self.config.table_mappings.all():
+                    topic = format_topic_name(
+                        db_config=db_config,
+                        table_name=tm.source_table,
+                        topic_prefix=topic_prefix,
+                        schema=tm.source_schema,
+                    )
+                    try:
+                        delete_schema_subject(f"{topic}-key")
+                        delete_schema_subject(f"{topic}-value")
+                        self._log_info(f"  ✓ Deleted schema subjects for: {topic}")
+                    except Exception as e:
+                        self._log_warning(f"  ⚠️ Error deleting schema subjects for {topic}: {e}")
 
             # Optionally drop target database tables
             if drop_tables:
@@ -1156,6 +1174,14 @@ class ReplicationOrchestrator:
                 except Exception as e:
                     self._log_warning(f"  ⚠️ Error deleting topic {topic}: {e}")
 
+                # Delete schema registry subjects regardless of topic deletion outcome
+                try:
+                    delete_schema_subject(f"{topic}-key")
+                    delete_schema_subject(f"{topic}-value")
+                    self._log_info(f"  ✓ Deleted schema subjects for: {topic}")
+                except Exception as e:
+                    self._log_warning(f"  ⚠️ Error deleting schema subjects for {topic}: {e}")
+
             self._log_info(f"✓ Deleted {len(deleted_topics)}/{len(topics_to_delete)} topics")
             steps.append({
                 'id': 'topics',
@@ -1265,22 +1291,48 @@ class ReplicationOrchestrator:
             })
 
             # ========================================
-            # STEP 5: Restart sink connector
+            # STEP 5: Cycle sink connector (stop → resume)
             # ========================================
-            self._log_info("STEP 5/6: Restarting sink connector...")
+            # A plain restart leaves the consumer as a group member, so it can
+            # still try to commit in-flight offsets for the now-deleted topic
+            # partitions. stop() evicts the consumer from the group entirely;
+            # on resume Kafka re-assigns only partitions for topics that exist.
+            self._log_info("STEP 5/6: Cycling sink connector (stop → resume)...")
 
             if self.config.sink_connector_name:
-                sink_ok, sink_err = self.connector_manager.restart_connector(
+                # Stop (not pause) so the consumer leaves the group entirely
+                stop_ok, stop_err = self.connector_manager.stop_connector(
                     self.config.sink_connector_name
                 )
-                if sink_ok:
-                    self._log_info(f"✓ Sink connector restarted")
+                if stop_ok:
+                    self._log_info(f"✓ Sink connector stopped")
                 else:
-                    self._log_warning(f"⚠️ Sink connector restart failed: {sink_err}")
+                    self._log_warning(f"⚠️ Sink connector stop failed: {stop_err}")
+
+                # Purge stale consumer group offsets for the deleted topic-partitions.
+                # Without this, the consumer re-inherits the deleted partition's offset
+                # record on every rejoin and enters an endless rebalance loop.
+                offsets_ok, offsets_err = self.connector_manager.delete_connector_offsets(
+                    self.config.sink_connector_name
+                )
+                if offsets_ok:
+                    self._log_info(f"✓ Sink consumer group offsets cleared")
+                else:
+                    self._log_warning(f"⚠️ Could not clear sink offsets: {offsets_err}")
+
+                resume_ok, resume_err = self.connector_manager.resume_connector(
+                    self.config.sink_connector_name
+                )
+                sink_ok = stop_ok and resume_ok
+                if resume_ok:
+                    self._log_info(f"✓ Sink connector resumed")
+                else:
+                    self._log_warning(f"⚠️ Sink connector resume failed: {resume_err}")
+
                 steps.append({
                     'id': 'sink_restart',
                     'status': 'ok' if sink_ok else 'warn',
-                    'msg': 'Sink connector restarted' if sink_ok else f"Sink connector restart warning: {sink_err}",
+                    'msg': 'Sink connector cycled (stop → clear offsets → resume)' if sink_ok else f"Sink connector cycle warning: {stop_err or resume_err}",
                 })
 
             # ========================================
@@ -1375,8 +1427,7 @@ class ReplicationOrchestrator:
                     elif db_config.db_type == 'postgresql':
                         target_table_name = f"{db_config.database_name}_{actual_table_name}"
                     elif db_config.db_type == 'mssql':
-                        mssql_schema = source_schema or 'dbo'
-                        target_table_name = f"{mssql_schema}_{actual_table_name}"
+                        target_table_name = f"{db_config.database_name}_{actual_table_name}"
                     elif db_config.db_type == 'oracle':
                         oracle_schema = source_schema or db_config.username.upper()
                         target_table_name = f"{oracle_schema}_{actual_table_name}"
@@ -1479,48 +1530,41 @@ class ReplicationOrchestrator:
 
             self._log_info(f"✓ Source connector config updated with {len(all_tables)} tables")
 
-            # CRITICAL: Restart connector BEFORE sending signal
-            # The connector needs to restart and refresh schema from database
-            # before it can process incremental snapshot signals for new tables
-            import time
-
-            self._log_info("  → Restarting connector to apply new config...")
+            # Restart the connector so it reloads its table.include.list and
+            # replays the schema history from Kafka for the new table(s).
+            # We must NOT send the snapshot signal until schema replay is done —
+            # doing so causes a NullPointerException in Debezium because the
+            # in-memory schema cache doesn't yet know about the new table.
+            self._log_info("  → Restarting connector to reload schema history...")
             self.connector_manager.restart_connector(self.config.connector_name)
 
-            # Wait for connector to restart and refresh schema
-            # Schema refresh can take several seconds depending on database size
-            self._log_info("  → Waiting for connector to restart and refresh schema...")
-            time.sleep(3)  # Initial wait for restart
-
-            # Poll for RUNNING state with longer timeout
-            connector_ready = False
-            for i in range(20):  # Up to 10 seconds
-                time.sleep(0.5)
+            # Wait until the streaming MBean reports Connected=True.
+            # That is the authoritative signal that schema history replay is
+            # complete and the binlog connection is live — no hardcoded sleeps.
+            self._log_info("  → Waiting for connector to finish schema history replay...")
+            connector_ready = self._wait_for_connector_streaming(timeout=60)
+            if connector_ready:
+                self._log_info("✓ Connector streaming — schema ready for snapshot signal")
+            else:
+                # Check if at least RUNNING before giving up
                 exists, status_data = self.connector_manager.get_connector_status(self.config.connector_name)
-                if exists and status_data:
-                    state = status_data.get('connector', {}).get('state', '')
-                    if state == 'RUNNING':
-                        # Additional wait for schema refresh after RUNNING
-                        self._log_info("  → Connector RUNNING, waiting for schema refresh...")
-                        time.sleep(3)  # Extra time for schema history to be read
-                        self._log_info("✓ Connector ready with updated schema")
-                        connector_ready = True
-                        break
-                    elif state == 'FAILED':
-                        steps.append({
-                            'id': 'src_config',
-                            'status': 'error',
-                            'msg': "Connector failed after config update",
-                        })
-                        return False, "Connector failed after config update", steps
+                state = (status_data or {}).get('connector', {}).get('state', '') if exists else ''
+                if state == 'FAILED':
+                    steps.append({
+                        'id': 'src_config',
+                        'status': 'error',
+                        'msg': "Connector failed after config update",
+                    })
+                    return False, "Connector failed after config update", steps
+                self._log_warning("⚠️ Streaming MBean not yet Connected — proceeding anyway")
 
             steps.append({
                 'id': 'src_config',
                 'status': 'ok' if connector_ready else 'warn',
                 'msg': (
-                    f"Source connector updated ({len(all_tables)} table(s)), schema refreshed"
+                    f"Source connector updated ({len(all_tables)} table(s)), schema ready"
                     if connector_ready else
-                    f"Source connector updated ({len(all_tables)} table(s)) — schema refresh timed out"
+                    f"Source connector updated ({len(all_tables)} table(s)) — schema readiness timed out"
                 ),
             })
 
@@ -1587,8 +1631,10 @@ class ReplicationOrchestrator:
                 'msg': f"Snapshot signal sent via {method} (ID: {signal_id})",
             })
 
-            # Verify incremental snapshot started via Jolokia
-            recv_result = self._verify_incremental_snapshot_started(signal_id)
+            # Verify incremental snapshot started via Jolokia.
+            # grace_seconds is reduced from 10→3 because we already waited for
+            # the connector to be streaming before sending the signal.
+            recv_result = self._verify_incremental_snapshot_started(signal_id, grace_seconds=3)
             steps.append({
                 'id': 'signal_recv',
                 'status': 'ok' if recv_result['confirmed'] else 'warn',
@@ -1664,6 +1710,34 @@ class ReplicationOrchestrator:
     # ==========================================
     # Jolokia Snapshot Verification
     # ==========================================
+
+    def _wait_for_connector_streaming(self, timeout: int = 60) -> bool:
+        """
+        Wait until the source connector's streaming MBean reports Connected=True.
+
+        For MySQL this is the reliable indicator that schema history replay from
+        the Kafka schema-history topic is complete and the connector is actively
+        reading the binlog.  Sending an incremental snapshot signal before this
+        point causes a NullPointerException in Debezium because the in-memory
+        schema cache doesn't yet contain the newly-added table.
+
+        For other db types (PostgreSQL, MSSQL, Oracle) the streaming MBean also
+        becomes available once the connector has fully started, so this check is
+        safe to use universally.
+
+        Returns True if Connected within timeout, False if timed out.
+        """
+        import time
+        db_type = self.config.client_database.db_type.lower()
+        topic_prefix = self.config.kafka_topic_prefix
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            raw = self.jolokia.get_streaming_metrics(db_type, topic_prefix)
+            if raw and raw.get('Connected'):
+                return True
+            time.sleep(1)
+        return False
 
     def _verify_incremental_snapshot_started(
         self, signal_id: str, grace_seconds: int = 10, polls: int = 3
@@ -1750,9 +1824,53 @@ class ReplicationOrchestrator:
         is unreachable.
         """
         try:
-            db_type = self.config.client_database.db_type
+            db_config = self.config.client_database
+            db_type = db_config.db_type
             topic_prefix = self.config.kafka_topic_prefix
-            return self.jolokia.get_active_snapshot_progress(db_type, topic_prefix)
+
+            # SQL Server registers JMX MBeans under database.server.name
+            # (format: "sqlserver_{client_id}_{db_id}_v_{version}"), which is
+            # intentionally different from topic.prefix ("client_{id}_db_{id}_v_{version}").
+            # Try the database.server.name format first, fall back to topic.prefix
+            # to handle all Debezium versions.
+            if db_type == 'mssql' and self.config.connector_version:
+                server_name = (
+                    f"sqlserver_{db_config.client.id}_{db_config.id}"
+                    f"_v_{self.config.connector_version}"
+                )
+                result = self.jolokia.get_active_snapshot_progress(db_type, server_name)
+                if result is not None:
+                    return result
+
+            result = self.jolokia.get_active_snapshot_progress(db_type, topic_prefix)
+            if result is not None:
+                return result
+
+            # Jolokia returned nothing for all MBean contexts.  This happens for
+            # SQL Server (and occasionally other db types) when a fast snapshot
+            # finishes before the first poll and there is a brief gap before the
+            # streaming MBean registers.  As a last resort, check the Kafka
+            # Connect REST status: if the connector task is RUNNING and the
+            # snapshot_mode requires a snapshot, we can safely infer that the
+            # snapshot completed successfully.
+            if self.config.snapshot_mode and self.config.snapshot_mode != 'never':
+                connector_state = self._get_connector_status()
+                if connector_state.get('state') == 'RUNNING' and connector_state.get('healthy'):
+                    return {
+                        'type': 'initial',
+                        'running': False,
+                        'completed': True,
+                        'aborted': False,
+                        'total_tables': 0,
+                        'remaining_tables': 0,
+                        'completed_tables': 0,
+                        'rows_scanned': {},
+                        'total_rows_scanned': 0,
+                        'duration_seconds': 0,
+                        'current_table': None,
+                    }
+
+            return None
         except Exception:
             return None
 
@@ -1774,6 +1892,7 @@ class ReplicationOrchestrator:
         return {
             'next_batch_run': self.config.next_batch_run.isoformat() if self.config.next_batch_run else None,
             'last_batch_run': self.config.last_batch_run.isoformat() if self.config.last_batch_run else None,
+            'batch_sync_started_at': self.config.batch_sync_started_at.isoformat() if self.config.batch_sync_started_at else None,
             'batch_interval': self.config.batch_interval,
             'batch_interval_display': self.config.get_batch_interval_display() if self.config.batch_interval else None,
             'batch_max_catchup_minutes': self.config.batch_max_catchup_minutes,
@@ -1925,6 +2044,8 @@ class ReplicationOrchestrator:
 
             if success:
                 self.config.connector_state = 'RUNNING'
+                if self.config.processing_mode == 'batch':
+                    self.config.batch_sync_started_at = timezone.now()
                 self.config.save()
                 self._log_info(f"✓ Connector resumed: {self.config.connector_name}")
                 return True, "Connector resumed successfully"
@@ -1954,6 +2075,7 @@ class ReplicationOrchestrator:
 
             if success:
                 self.config.connector_state = 'PAUSED'
+                self.config.batch_sync_started_at = None
                 self.config.save()
                 self._log_info(f"✓ Connector paused: {self.config.connector_name}")
                 return True, "Connector paused successfully"
@@ -2276,8 +2398,17 @@ class ReplicationOrchestrator:
         poll_interval = 10  # Check every 10 seconds
         elapsed = 0
         jolokia_available = True  # Assume available; disable on first failure
-        db_type = self.config.client_database.db_type
+        db_config = self.config.client_database
+        db_type = db_config.db_type
         topic_prefix = self.config.kafka_topic_prefix
+
+        # SQL Server registers JMX MBeans under database.server.name, not topic.prefix.
+        # Use the server_name format for Jolokia queries; fall back to topic_prefix.
+        if db_type == 'mssql' and self.config.connector_version:
+            topic_prefix = (
+                f"sqlserver_{db_config.client.id}_{db_config.id}"
+                f"_v_{self.config.connector_version}"
+            )
 
         while elapsed < max_wait_seconds:
             # ---------------------------------------------------

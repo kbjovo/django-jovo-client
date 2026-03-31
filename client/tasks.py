@@ -980,6 +980,10 @@ def run_batch_sync(self, replication_config_id: int):
 
         logger.info(f"✓ Connector resumed: {config.connector_name}")
 
+        # Record sync start time so the monitor page timer survives page refreshes
+        config.batch_sync_started_at = timezone.now()
+        config.save(update_fields=['batch_sync_started_at'])
+
         # ========================================
         # STEP 2: Wait for Catch-up (with throttle)
         # ========================================
@@ -1043,6 +1047,7 @@ def run_batch_sync(self, replication_config_id: int):
         # Update timestamps
         # ========================================
         config.last_batch_run = timezone.now()
+        # batch_sync_started_at already cleared by pause_connector() above
 
         # Calculate next run based on interval
         interval_seconds = orchestrator._get_batch_interval_seconds()

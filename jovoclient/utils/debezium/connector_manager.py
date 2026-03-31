@@ -507,6 +507,72 @@ class DebeziumConnectorManager:
             logger.error(error_msg)
             return False, error_msg
 
+    def stop_connector(self, connector_name: str) -> Tuple[bool, Optional[str]]:
+        """
+        Stop a connector (Kafka Connect 3.5+).
+
+        Unlike pause, stop truly evicts the connector's consumer from its consumer group.
+        On resume, the consumer rejoins fresh and Kafka will only assign partitions for
+        topics that still exist — preventing stale offset commit errors for deleted topics.
+
+        Falls back to pause if the /stop endpoint is not available (older Kafka Connect).
+
+        Returns:
+            Tuple[bool, Optional[str]]: (success, error_message)
+        """
+        try:
+            url = f"{self.connectors_url}/{connector_name}/stop"
+            success, _, error = self._make_request('PUT', url)
+
+            if success:
+                logger.info(f"Successfully stopped connector: {connector_name}")
+                return True, None
+
+            # Kafka Connect < 3.5 returns 404 for /stop — fall back to pause
+            logger.warning(f"/stop not available for {connector_name} ({error}), falling back to pause")
+            return self.pause_connector(connector_name)
+
+        except Exception as e:
+            error_msg = f"Error stopping connector: {str(e)}"
+            logger.error(error_msg)
+            return False, error_msg
+
+    def delete_connector_offsets(self, connector_name: str) -> Tuple[bool, Optional[str]]:
+        """
+        Delete (reset) all stored consumer group offsets for a connector.
+
+        Requires the connector to be in a STOPPED state first (not just paused).
+        Available in Kafka Connect 3.6+. Returns (False, warning) on older versions
+        so the caller can decide whether to proceed anyway.
+
+        This is the only reliable way to clear stale offset records for deleted
+        topic-partitions without restarting the entire Kafka Connect cluster.
+
+        Returns:
+            Tuple[bool, Optional[str]]: (success, error_message)
+        """
+        try:
+            url = f"{self.connectors_url}/{connector_name}/offsets"
+            success, _, error = self._make_request('DELETE', url)
+
+            if success:
+                logger.info(f"Cleared consumer group offsets for connector: {connector_name}")
+                return True, None
+
+            # 404 = endpoint not available (Kafka Connect < 3.6)
+            if error and '404' in error:
+                msg = "DELETE /offsets not supported by this Kafka Connect version (need 3.6+) — stale offsets may linger"
+                logger.warning(msg)
+                return False, msg
+
+            logger.error(f"Failed to delete offsets for {connector_name}: {error}")
+            return False, error
+
+        except Exception as e:
+            error_msg = f"Error deleting connector offsets: {str(e)}"
+            logger.error(error_msg)
+            return False, error_msg
+
     def restart_task(self, connector_name: str, task_id: int) -> Tuple[bool, Optional[str]]:
         """
         Restart a specific task of a connector.

@@ -354,6 +354,12 @@ class ReplicationConfig(models.Model):
         help_text="Celery Beat periodic task name for batch scheduling"
     )
 
+    batch_sync_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the current (or most recent) batch sync window started"
+    )
+
     # Status
     status = models.CharField(
         max_length=20, 

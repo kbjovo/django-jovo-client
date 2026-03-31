@@ -227,8 +227,7 @@ def connector_add(request, database_pk):
                         elif database.db_type == 'postgresql':
                             default_target_table = f"{database.database_name}_{actual_table_name}"
                         elif database.db_type == 'mssql':
-                            mssql_schema = source_schema or 'dbo'
-                            default_target_table = f"{mssql_schema}_{actual_table_name}"
+                            default_target_table = f"{database.database_name}_{actual_table_name}"
                         elif database.db_type == 'oracle':
                             oracle_schema = source_schema or database.username.upper()
                             default_target_table = f"{oracle_schema}_{actual_table_name}"
@@ -524,7 +523,7 @@ def connector_edit_tables(request, config_pk):
             elif db_type == 'postgresql':
                 default_target = f"{database.database_name}_{table_name}"
             elif db_type in ('mssql', 'sqlserver'):
-                default_target = f"dbo_{table_name}"
+                default_target = f"{database.database_name}_{table_name}"
             elif db_type == 'oracle':
                 default_target = f"{database.username.upper()}_{table_name}"
             else:

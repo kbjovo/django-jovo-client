@@ -1164,6 +1164,15 @@ async function runCreateProvisionSteps(formData) {
 async function _pollUntilSnapshotComplete() {
     const MAX_POLLS = 540; // 90 min
     let hadData = false;
+    // Counter for consecutive polls where snap is null but the connector is
+    // already RUNNING.  This handles the SQL Server race where a fast snapshot
+    // finishes before the first 10-second poll fires: the snapshot MBean
+    // deregisters, the streaming MBean may not have registered yet, so Jolokia
+    // returns nothing — but the connector task is already streaming.
+    // Debezium registers snapshot MBeans at connector init (before data
+    // capture), so 3 consecutive null-snap + RUNNING polls (≥30 s) reliably
+    // means the snapshot completed before we could observe it.
+    let nullRunningCount = 0;
     for (let i = 0; i < MAX_POLLS; i++) {
         await new Promise(r => setTimeout(r, 10000));
         if (_provisionCancelRequested) return false;
@@ -1176,6 +1185,7 @@ async function _pollUntilSnapshotComplete() {
             const textEl = document.querySelector('#log-entry-step-snap .log-text');
             if (snap?.running) {
                 hadData = true;
+                nullRunningCount = 0;
                 const done  = snap.completed_tables ?? 0;
                 const total = snap.total_tables     ?? '?';
                 const rows  = (snap.total_rows_scanned || 0).toLocaleString();
@@ -1185,8 +1195,18 @@ async function _pollUntilSnapshotComplete() {
             } else if (!snap && hadData) {
                 // MBean deregistered after completion
                 return true;
-            } else if (textEl) {
-                textEl.textContent = 'Waiting for snapshot to start...';
+            } else if (!snap && data.status?.source_connector?.state === 'RUNNING') {
+                // No snapshot MBeans visible but connector is already RUNNING.
+                // Common for SQL Server: fast snapshot completes before the first
+                // poll, and there is a brief gap before the streaming MBean
+                // registers.  After 3 consecutive such polls (30 s) we can be
+                // confident the snapshot finished without being observed.
+                nullRunningCount++;
+                if (nullRunningCount >= 3) return true;
+                if (textEl) textEl.textContent = 'Waiting for snapshot to start...';
+            } else {
+                nullRunningCount = 0;
+                if (textEl) textEl.textContent = 'Waiting for snapshot to start...';
             }
         } catch (_) { /* ignore transient errors */ }
     }

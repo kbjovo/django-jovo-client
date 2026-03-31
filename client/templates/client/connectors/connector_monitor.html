@@ -242,7 +242,7 @@
   <div id="snapshot-panel" class="{% if not snapshot %}hidden{% endif %} mb-6">
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
       <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
-        <div id="snapshot-spinner" class="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+        <div id="snapshot-spinner" class="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full{% if not snapshot.running %} hidden{% endif %}"></div>
         <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
           <span id="snapshot-title">
             {% if snapshot %}
@@ -315,7 +315,7 @@
           </div>
           <div class="flex items-center gap-1">
             <span id="batch-countdown-label" class="text-sm text-gray-500 dark:text-gray-400">Next sync in</span>
-            <span id="batch-countdown" class="text-sm font-bold text-purple-600 dark:text-purple-400 font-mono">--:--:--</span>
+            <span id="batch-countdown" class="text-sm font-bold text-purple-600 dark:text-purple-400 font-mono">--:--</span>
           </div>
           <span class="text-xs text-gray-400 dark:text-gray-500">|</span>
           <div class="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
@@ -446,7 +446,8 @@ function connectorAction(url, loadingMsg) {
     } else {
       showToast('error', data.message || data.error || 'Failed');
     }
-    setTimeout(pollNow, 500);
+    // Single poll 1s after action to re-sync timestamps from server.
+    setTimeout(pollNow, 1000);
   })
   .catch(err => {
     showToast('error', 'Request failed');
@@ -618,18 +619,20 @@ fetchTableRows();
 
 (function() {
   const STATUS_URL = '{% url "connector_status_api" replication_config.pk %}';
-  const POLL_INTERVAL = 5000;
-  const IDLE_INTERVAL = 30000;
-  let currentInterval = POLL_INTERVAL;
+  const POLL_INTERVAL = 5000;   // used while snapshot is running
+  const IDLE_INTERVAL = 30000;  // verification poll — batch display is driven by timestamps, not polls
+  let currentInterval = IDLE_INTERVAL;
   let timer = null;
 
-  // Batch schedule state
-  let batchNextRun = null;   // Date object
-  let batchLastRun = null;   // Date object
-  let batchSyncing = false;  // true when source connector is RUNNING in batch mode
-  let batchSyncStart = null; // Date when sync started
-  let countdownTimer = null;
+  // Batch schedule — seeded from server on page load, re-synced every 30s.
+  // The display is computed purely from these timestamps every second,
+  // so no poll is needed to drive the UI (optimistic / schedule-driven approach).
   const isBatch = '{{ replication_config.processing_mode }}' === 'batch';
+  let batchNextRun      = {% if replication_config.next_batch_run %}new Date('{{ replication_config.next_batch_run|date:"c" }}'){% else %}null{% endif %};
+  let batchLastRun      = {% if replication_config.last_batch_run %}new Date('{{ replication_config.last_batch_run|date:"c" }}'){% else %}null{% endif %};
+  let batchSyncStartedAt = {% if replication_config.batch_sync_started_at %}new Date('{{ replication_config.batch_sync_started_at|date:"c" }}'){% else %}null{% endif %};
+  let batchMaxCatchupMs = {{ replication_config.batch_max_catchup_minutes }} * 60 * 1000;
+  let countdownTimer = null;
 
   function formatNumber(n) {
     return Number(n || 0).toLocaleString();
@@ -667,94 +670,67 @@ fetchTableRows();
     return days + 'd ago';
   }
 
-  function updateBatchCountdown() {
-    const label = document.getElementById('batch-countdown-label');
-    const display = document.getElementById('batch-countdown');
-    const badge = document.getElementById('batch-status-badge');
-    if (!label || !display) return;
+  // Pure render — called every second by the setInterval ticker.
+  // State is computed directly from timestamps; no separate batchSyncing variable.
+  function updateBatchDisplay() {
+    const label   = document.getElementById('batch-countdown-label');
+    const timerEl = document.getElementById('batch-countdown');
+    const badge   = document.getElementById('batch-status-badge');
+    const lastEl  = document.getElementById('batch-last-run');
+    if (!label || !timerEl) return;
 
-    if (batchSyncing) {
-      // Show elapsed sync time
+    const now = Date.now();
+
+    // Confirmed syncing: server recorded a start time (set by resume_connector).
+    const confirmedSyncing = !!batchSyncStartedAt;
+    // Predicted syncing: we're inside the expected sync window based on schedule.
+    const predictedSyncing = !confirmedSyncing && batchNextRun
+      && now >= batchNextRun.getTime()
+      && now < batchNextRun.getTime() + batchMaxCatchupMs;
+
+    if (confirmedSyncing || predictedSyncing) {
+      const startMs = batchSyncStartedAt ? batchSyncStartedAt.getTime() : batchNextRun.getTime();
+      const elapsed = Math.floor((now - startMs) / 1000);
       label.textContent = 'Syncing...';
-      const elapsed = Math.floor((Date.now() - (batchSyncStart || Date.now())) / 1000);
-      display.textContent = formatDuration(elapsed);
-      display.className = 'text-3xl font-bold text-green-600 dark:text-green-400 font-mono';
-      badge.textContent = 'Syncing';
-      badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
-    } else if (batchNextRun) {
-      // Show countdown to next run
-      const remaining = Math.max(0, Math.floor((batchNextRun.getTime() - Date.now()) / 1000));
+      timerEl.textContent = formatDuration(elapsed);
+      timerEl.className = 'text-sm font-bold text-green-600 dark:text-green-400 font-mono';
+      if (badge) { badge.textContent = 'Syncing'; badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'; }
+    } else if (batchNextRun && now < batchNextRun.getTime()) {
+      const remaining = Math.floor((batchNextRun.getTime() - now) / 1000);
       label.textContent = 'Next sync in';
-      display.textContent = formatDuration(remaining);
-      display.className = 'text-3xl font-bold text-purple-600 dark:text-purple-400 font-mono';
-      badge.textContent = 'Scheduled';
-      badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400';
-
-      if (remaining <= 0) {
-        display.textContent = '00:00';
-        label.textContent = 'Starting soon...';
-      }
+      timerEl.textContent = formatDuration(remaining);
+      timerEl.className = 'text-sm font-bold text-purple-600 dark:text-purple-400 font-mono';
+      if (badge) { badge.textContent = 'Scheduled'; badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400'; }
     } else {
       label.textContent = 'Next sync';
-      display.textContent = '--:--';
-      display.className = 'text-3xl font-bold text-gray-400 dark:text-gray-500 font-mono';
-      badge.textContent = 'No schedule';
-      badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400';
+      timerEl.textContent = '--:--';
+      timerEl.className = 'text-sm font-bold text-gray-400 dark:text-gray-500 font-mono';
+      if (badge) { badge.textContent = 'No schedule'; badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400'; }
     }
 
-    // Update last synced (keeps ticking)
-    const lastRunEl = document.getElementById('batch-last-run');
-    if (lastRunEl) lastRunEl.textContent = timeAgo(batchLastRun);
+    if (lastEl) lastEl.textContent = timeAgo(batchLastRun);
   }
 
+  // Verification update — called after each 30s poll to re-sync timestamps.
+  // Does not drive display state; just updates the variables updateBatchDisplay reads.
   function updateBatchSchedule(s) {
     const batch = s.batch_schedule;
     if (!batch) return;
 
-    // Determine if currently syncing (source connector RUNNING in batch mode = active sync)
-    const sourceState = s.source_connector.state;
-    const wasSyncing = batchSyncing;
-    batchSyncing = sourceState === 'RUNNING';
+    batchNextRun       = batch.next_batch_run       ? new Date(batch.next_batch_run)       : null;
+    batchLastRun       = batch.last_batch_run        ? new Date(batch.last_batch_run)        : null;
+    batchSyncStartedAt = batch.batch_sync_started_at ? new Date(batch.batch_sync_started_at) : null;
+    batchMaxCatchupMs  = (batch.batch_max_catchup_minutes || 5) * 60 * 1000;
 
-    if (batchSyncing && !wasSyncing) {
-      batchSyncStart = new Date();
-    } else if (!batchSyncing) {
-      batchSyncStart = null;
-    }
-
-    // Update schedule timestamps
-    batchNextRun = batch.next_batch_run ? new Date(batch.next_batch_run) : null;
-    batchLastRun = batch.last_batch_run ? new Date(batch.last_batch_run) : null;
-
-    // Update static fields
     const intervalEl = document.getElementById('batch-interval');
     if (intervalEl) intervalEl.textContent = batch.batch_interval_display || '--';
-
     const maxEl = document.getElementById('batch-max-duration');
-    if (maxEl) maxEl.textContent = batch.batch_max_catchup_minutes + ' min';
-
+    if (maxEl) maxEl.textContent = batch.batch_max_catchup_minutes + 'm';
     const nextRunEl = document.getElementById('batch-next-run');
     if (nextRunEl && batchNextRun) {
-      nextRunEl.textContent = batchNextRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ', ' +
-        batchNextRun.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      nextRunEl.textContent = batchNextRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'Asia/Kolkata' }) + ', ' +
+        batchNextRun.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' });
     }
-
-    // Update schedule status badge
-    const badge = document.getElementById('batch-status-badge');
-    if (badge) {
-      if (batchSyncing) {
-        badge.textContent = 'Syncing';
-        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
-      } else if (batch.is_on_schedule) {
-        badge.textContent = 'Scheduled';
-        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400';
-      } else {
-        badge.textContent = 'Off Schedule';
-        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400';
-      }
-    }
-
-    updateBatchCountdown();
   }
 
   function taskBgClass(state) {
@@ -838,7 +814,8 @@ fetchTableRows();
     }
 
     // Statistics
-    document.getElementById('stat-rows').textContent = formatNumber(s.statistics.total_rows_synced);
+    const statRowsEl = document.getElementById('stat-rows');
+    if (statRowsEl) statRowsEl.textContent = formatNumber(s.statistics.total_rows_synced);
 
     // Update action button visibility
     updateActionButtons(s);
@@ -889,7 +866,7 @@ fetchTableRows();
       if (!snap || (!snap.running && !snap.completed)) {
         panel.classList.add('hidden');
       }
-      currentInterval = batchSyncing ? POLL_INTERVAL : IDLE_INTERVAL;
+      currentInterval = IDLE_INTERVAL;
     }
   }
 
@@ -933,7 +910,7 @@ fetchTableRows();
   };
 
   function poll() {
-    fetch(STATUS_URL)
+    fetch(STATUS_URL, { cache: 'no-store' })
       .then(r => r.json())
       .then(data => {
         if (data.success) updateStatus(data);
@@ -947,9 +924,10 @@ fetchTableRows();
   // Start polling
   timer = setTimeout(poll, POLL_INTERVAL);
 
-  // Start 1-second countdown ticker for batch mode
+  // 1-second ticker: timer reacts to schedule state on every tick
   if (isBatch) {
-    countdownTimer = setInterval(updateBatchCountdown, 1000);
+    updateBatchDisplay();
+    countdownTimer = setInterval(updateBatchDisplay, 1000);
   }
 })();
 </script>

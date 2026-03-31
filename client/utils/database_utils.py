@@ -247,13 +247,14 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
             with engine.connect() as conn:
                 # Get all user schemas (exclude system schemas)
                 schema_query = text("""
-                    SELECT schema_name 
-                    FROM information_schema.schemata 
+                    SELECT schema_name
+                    FROM information_schema.schemata
                     WHERE schema_name NOT IN (
-                        'sys', 'INFORMATION_SCHEMA', 'guest', 
-                        'db_owner', 'db_accessadmin', 'db_securityadmin', 
-                        'db_ddladmin', 'db_backupoperator', 'db_datareader', 
-                        'db_datawriter', 'db_denydatareader', 'db_denydatawriter'
+                        'sys', 'INFORMATION_SCHEMA', 'guest',
+                        'db_owner', 'db_accessadmin', 'db_securityadmin',
+                        'db_ddladmin', 'db_backupoperator', 'db_datareader',
+                        'db_datawriter', 'db_denydatareader', 'db_denydatawriter',
+                        'cdc'
                     )
                     ORDER BY schema_name
                 """)

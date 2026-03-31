@@ -56,9 +56,6 @@ All behaviour is driven by provision_modal.js globals defined in the host templa
         <!-- Footer -->
         <div class="px-6 py-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between gap-3 shrink-0">
 
-            <!-- Left: status text (errors, cancel note) -->
-            <p id="modal-footer-note" class="text-xs text-gray-500 dark:text-gray-400 flex-1 hidden"></p>
-
             <!-- Right: action buttons -->
             <div class="flex gap-3 ml-auto">
 
@@ -110,7 +107,6 @@ function openProvisionModal(title) {
     document.getElementById('modal-cancel-btn').textContent = 'Cancel';
     document.getElementById('modal-monitor-btn').classList.add('hidden');
     document.getElementById('modal-close-btn').classList.add('hidden');
-    document.getElementById('modal-footer-note').classList.add('hidden');
     document.getElementById('provision-overlay').classList.remove('hidden');
     document.getElementById('provision-modal').classList.remove('hidden');
     document.body.classList.add('overflow-hidden');
@@ -163,7 +159,6 @@ function showModalCleaning() {
     document.getElementById('modal-header-error').classList.add('hidden');
     document.getElementById('modal-cancel-btn').classList.add('hidden');
     document.getElementById('modal-close-btn').classList.add('hidden');
-    document.getElementById('modal-footer-note').classList.add('hidden');
     document.getElementById('provision-modal-title').textContent = 'Cleaning up...';
 }
 
@@ -181,11 +176,6 @@ function showModalError(errorText, closeLabel) {
     const closeBtn = document.getElementById('modal-close-btn');
     closeBtn.textContent = closeLabel || 'Close';
     closeBtn.classList.remove('hidden');
-    if (errorText) {
-        const note = document.getElementById('modal-footer-note');
-        note.textContent = errorText;
-        note.classList.remove('hidden');
-    }
 }
 
 function showModalCanceling() {

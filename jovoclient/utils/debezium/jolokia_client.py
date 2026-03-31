@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 DB_TYPE_TO_MBEAN_TYPE = {
     'mysql': 'mysql',
     'postgresql': 'postgres',
-    'mssql': 'sqlserver',
+    'mssql': 'sql_server',
 }
 
 
@@ -177,17 +177,42 @@ class JolokiaClient:
         """Return progress of whichever snapshot type is currently active.
 
         Checks incremental first (more common after initial setup), then
-        falls back to initial snapshot. Returns None if neither is active.
+        falls back to initial snapshot. If neither snapshot MBean is present
+        but the streaming MBean exists, the initial snapshot has already
+        completed and the connector has transitioned to streaming — return a
+        synthetic completed-snapshot dict so callers can detect this case.
+        Returns None only when Jolokia is completely unreachable.
         """
         # Check incremental first
         inc = self.get_incremental_snapshot_progress(db_type, topic_prefix)
         if inc and inc.get('running'):
             return inc
 
-        # Fall back to initial snapshot
+        # Check initial snapshot
         snap = self.get_snapshot_progress(db_type, topic_prefix)
         if snap and (snap.get('running') or snap.get('completed')):
             return snap
+
+        # Fallback: streaming MBean present means the initial snapshot has
+        # already completed and Debezium has transitioned to streaming mode.
+        # This handles the case where the snapshot finishes before the first
+        # poll (fast snapshot / small table) and the snapshot MBean has already
+        # deregistered.  Mirrors the fallback in _wait_for_snapshot_completion.
+        streaming = self.get_streaming_metrics(db_type, topic_prefix)
+        if streaming is not None:
+            return {
+                'type': 'initial',
+                'running': False,
+                'completed': True,
+                'aborted': False,
+                'total_tables': 0,
+                'remaining_tables': 0,
+                'completed_tables': 0,
+                'rows_scanned': {},
+                'total_rows_scanned': 0,
+                'duration_seconds': 0,
+                'current_table': None,
+            }
 
         return None
 

@@ -26,6 +26,7 @@ from django.shortcuts import get_object_or_404
 
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, ConnectorHistory
+from client.utils.database_utils import get_table_cdc_status
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
@@ -103,22 +104,64 @@ def provision_source(request, config_pk):
     database = replication_config.client_database
 
     try:
+        connector_manager = DebeziumConnectorManager()
+
+        # ── SQL Server CDC pre-flight check ───────────────────────────────────
+        # Debezium silently skips tables that don't have CDC enabled, which
+        # means the target table is never created. Check up-front and fail with
+        # a clear message so the user can get their DBA to enable CDC first.
+        if database.db_type.lower() == 'mssql':
+            table_mappings_qs = replication_config.table_mappings.filter(is_enabled=True)
+            tables_to_check = [
+                f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
+                for tm in table_mappings_qs
+            ]
+            try:
+                cdc_status = get_table_cdc_status(database, tables_to_check)
+                missing_cdc = [t for t, enabled in cdc_status.items() if not enabled]
+                if missing_cdc:
+                    missing_list = ', '.join(missing_cdc)
+                    def cdc_line(t):
+                        schema, table = t.split(".")[0], t.split(".")[-1]
+                        return f"  EXEC sys.sp_cdc_enable_table @source_schema='{schema}', @source_name='{table}', @role_name=NULL;"
+                    fix_sql = '\n'.join(cdc_line(t) for t in missing_cdc)
+                    return JsonResponse({
+                        'success': False,
+                        'error': (
+                            f"CDC is not enabled on the following table(s): {missing_list}. "
+                            f"Debezium will silently skip them, so their target tables will never "
+                            f"be created. Please ask your DBA to run:\n\n{fix_sql}\n\nThen retry."
+                        ),
+                    }, status=400)
+            except Exception as cdc_err:
+                logger.warning(f'provision_source: CDC pre-flight check failed (skipping): {cdc_err}')
+
         # ── Batch mode ───────────────────────────────────────────────────────
         if replication_config.processing_mode == 'batch':
-            from client.replication.orchestrator import ReplicationOrchestrator
-            orchestrator = ReplicationOrchestrator(replication_config)
-            # Only create the connector — do NOT wait for snapshot here.
-            # Waiting inside a sync Gunicorn worker causes CRITICAL WORKER TIMEOUT
-            # for large databases (snapshot can take 10–60 min).
-            # The frontend polls /status/ until the snapshot completes, then calls
-            # /provision/batch-finalize/ to run the post-snapshot steps.
-            success, message = orchestrator.start_replication(skip_topic_conflict_check=True)
+            # Create the source connector directly — topics and sink are already
+            # provisioned by the earlier provision/topics/ and provision/sink/ steps.
+            # Do NOT call start_replication() here: that would bump the connector
+            # version to N+1 (creating a mismatch with the topics already created
+            # for version N), re-create topics, and update the sink redundantly.
+            table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+            tables_list = [tm.source_table for tm in table_mappings]
 
-            if not success:
-                replication_config.status = 'error'
-                replication_config.last_error_message = message
-                replication_config.save()
-                return JsonResponse({'success': False, 'error': message})
+            source_config = get_connector_config_for_database(
+                db_config=database,
+                replication_config=replication_config,
+                tables_whitelist=tables_list,
+            )
+
+            source_success, source_error = connector_manager.create_connector(
+                replication_config.connector_name, source_config
+            )
+            if not source_success:
+                raise Exception(f"Failed to create source connector: {source_error}")
+
+            replication_config.status = 'active'
+            replication_config.is_active = True
+            replication_config.connector_state = 'RUNNING'
+            replication_config.save()
 
             snapshot_pending = replication_config.snapshot_mode != 'never'
             return JsonResponse({
@@ -130,7 +173,6 @@ def provision_source(request, config_pk):
             })
 
         # ── CDC mode ─────────────────────────────────────────────────────────
-        connector_manager = DebeziumConnectorManager()
         table_mappings = replication_config.table_mappings.filter(is_enabled=True)
         tables_list = [tm.source_table for tm in table_mappings]
 

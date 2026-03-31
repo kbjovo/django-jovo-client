@@ -244,6 +244,102 @@ class KafkaSignalManager:
             logger.info("Kafka producer closed")
 
 
+def _ensure_mssql_signal_table(db_engine: Engine, schema: str = 'dbo') -> None:
+    """
+    Ensure the Debezium signal table exists in SQL Server and has CDC enabled.
+    - If the table is missing and can be created, creates it then enables CDC.
+    - If creation or CDC enabling fails due to insufficient permissions, raises a
+      clear ValueError directing the DBA to run the setup SQL manually.
+    - If the table already exists but CDC enabling fails (DBA pre-created the table),
+      logs a warning and continues — the DBA is assumed to have handled CDC setup.
+    """
+    table_name = 'debezium_signal'
+    full_name = f"{schema}.{table_name}"
+
+    # ── Step 1: ensure table exists ──────────────────────────────────────────
+    with db_engine.connect() as conn:
+        exists = conn.execute(text("""
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table
+        """), {"schema": schema, "table": table_name}).fetchone()
+
+    if not exists:
+        logger.info(f"Signal table missing, attempting to create: {full_name}")
+        try:
+            with db_engine.begin() as conn:
+                conn.execute(text(f"""
+                    CREATE TABLE {full_name} (
+                        id   NVARCHAR(42)   NOT NULL PRIMARY KEY,
+                        type NVARCHAR(32)   NOT NULL,
+                        data NVARCHAR(2048) NULL
+                    )
+                """))
+            logger.info(f"Signal table created: {full_name}")
+        except Exception as e:
+            raise ValueError(
+                f"The Debezium signal table '{full_name}' does not exist and could not be "
+                f"created automatically (permission denied). Please ask your DBA to run:\n\n"
+                f"  CREATE TABLE {full_name} (\n"
+                f"      id   NVARCHAR(42)   NOT NULL PRIMARY KEY,\n"
+                f"      type NVARCHAR(32)   NOT NULL,\n"
+                f"      data NVARCHAR(2048) NULL\n"
+                f"  );\n"
+                f"  EXEC sys.sp_cdc_enable_table @source_schema='{schema}', "
+                f"@source_name='debezium_signal', @role_name=NULL;\n\n"
+                f"Then retry adding the table."
+            ) from e
+    else:
+        logger.info(f"Signal table already exists: {full_name}")
+
+    # ── Step 2: ensure CDC is enabled on the signal table ────────────────────
+    # Split the check and the enable into separate try/except blocks so we can
+    # distinguish "can't verify" (unknown state → warn and proceed) from
+    # "confirmed NOT enabled, but can't enable" (hard failure → raise).
+    try:
+        with db_engine.connect() as conn:
+            cdc_enabled = conn.execute(text("""
+                SELECT 1 FROM sys.tables t
+                JOIN sys.schemas s ON t.schema_id = s.schema_id
+                WHERE s.name = :schema AND t.name = :table AND t.is_tracked_by_cdc = 1
+            """), {"schema": schema, "table": table_name}).fetchone()
+    except Exception as e:
+        # Cannot query sys.tables (unusual permission setup) — assume the DBA
+        # enabled CDC when they set up the connector and continue.
+        logger.warning(
+            f"Could not check CDC status on signal table '{full_name}' "
+            f"(query failed — DBA setup assumed): {e}"
+        )
+        return
+
+    if cdc_enabled:
+        logger.info(f"CDC already enabled on signal table: {full_name}")
+        return
+
+    # CDC is confirmed NOT enabled — try to enable it.
+    logger.info(f"Enabling CDC on signal table: {full_name}")
+    try:
+        with db_engine.begin() as conn:
+            conn.execute(text("""
+                EXEC sys.sp_cdc_enable_table
+                    @source_schema = :schema,
+                    @source_name   = :table,
+                    @role_name     = NULL
+            """), {"schema": schema, "table": table_name})
+        logger.info(f"CDC enabled on signal table: {full_name}")
+    except Exception as e:
+        raise ValueError(
+            f"CDC is not enabled on the Debezium signal table '{full_name}' and could not "
+            f"be enabled automatically (DBO privileges required). "
+            f"Without CDC on this table, Debezium cannot process incremental snapshot "
+            f"signals and the new table will not be replicated.\n\n"
+            f"Please ask your DBA to run the following and then retry:\n\n"
+            f"  EXEC sys.sp_cdc_enable_table\n"
+            f"      @source_schema = '{schema}',\n"
+            f"      @source_name   = 'debezium_signal',\n"
+            f"      @role_name     = NULL;\n"
+        ) from e
+
+
 def send_incremental_snapshot_signal(database, replication_config, tables: List[str]) -> tuple:
     """
     Send incremental snapshot signal via appropriate method based on db_type.
@@ -305,6 +401,10 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
             'oracle': f'{database.username.upper()}.DEBEZIUM_SIGNAL',
         }
         signal_table = signal_tables.get(db_type, 'debezium_signal')
+
+        # SQL Server: auto-create signal table and enable CDC if not already done
+        if db_type == 'mssql':
+            _ensure_mssql_signal_table(db_engine, schema='dbo')
 
         signal_manager = DebeziumSignalManager(
             db_engine=db_engine,
