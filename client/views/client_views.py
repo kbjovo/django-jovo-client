@@ -155,34 +155,36 @@ class ClientDetailView(DetailView):
             status__in=['configured', 'active', 'paused', 'error']
         ).select_related('client_database').prefetch_related('table_mappings').order_by('client_database__connection_name', 'connector_version')
 
-        # Get Debezium status for each connector
+        # Get Debezium status for each connector — skip stale DB records not found in Kafka
         connector_manager = DebeziumConnectorManager()
+        valid_connectors = []
         total_tables = 0
         running_count = 0
 
         for connector in all_connectors:
             try:
                 exists, status_data = connector_manager.get_connector_status(connector.connector_name)
-                if exists and status_data:
-                    connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-                    tasks = status_data.get('tasks', [])
-                    has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
-                    connector.debezium_status = {'state': connector_state, 'raw': status_data}
-                    if connector_state in ('RUNNING', 'PAUSED') and not has_failed_task:
-                        running_count += 1
-                else:
-                    connector.debezium_status = {'state': 'NOT_FOUND'}
+                if not exists or not status_data:
+                    logger.warning(f"Connector {connector.connector_name} not found in Kafka Connect — skipping from display")
+                    continue
+                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+                tasks = status_data.get('tasks', [])
+                has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
+                connector.debezium_status = {'state': connector_state, 'raw': status_data}
+                if connector_state in ('RUNNING', 'PAUSED') and not has_failed_task:
+                    running_count += 1
             except Exception:
                 connector.debezium_status = {'state': 'UNKNOWN'}
 
             # Get table count
             connector.table_count = connector.table_mappings.filter(is_enabled=True).count()
             total_tables += connector.table_count
+            valid_connectors.append(connector)
 
-        context['all_connectors'] = all_connectors
+        context['all_connectors'] = valid_connectors
 
-        # Calculate connector stats
-        total_count = all_connectors.count()
+        # Calculate connector stats from Kafka-confirmed connectors only
+        total_count = len(valid_connectors)
         if total_count == 0:
             health_status = 'none'
         elif running_count == total_count:

@@ -1106,7 +1106,7 @@ class ReplicationOrchestrator:
     # Table Management (Add/Remove)
     # ==========================================
 
-    def remove_tables(self, table_names: list, target_action: str = 'truncate') -> Tuple[bool, str, list]:
+    def remove_tables(self, table_names: list, target_action: str = 'truncate', allow_empty: bool = False) -> Tuple[bool, str, list]:
         """
         Remove tables from a connector with full cleanup.
 
@@ -1114,8 +1114,8 @@ class ReplicationOrchestrator:
         1. Delete Kafka topics for the removed tables
         2. Truncate or drop target tables in target database
         3. Disable table mappings in database
-        4. Update source connector config
-        5. Restart source connector
+        4. Update source connector config  (skipped when allow_empty=True and no tables remain)
+        5. Restart source connector        (skipped when allow_empty=True and no tables remain)
         6. Restart sink connector
 
         Args:
@@ -1242,7 +1242,40 @@ class ReplicationOrchestrator:
             )
 
             if not remaining_tables:
-                return False, "Cannot remove all tables. Delete the connector instead.", steps
+                if not allow_empty:
+                    return False, "Cannot remove all tables. Delete the connector instead.", steps
+                # Caller intends to add tables immediately after (e.g. simultaneous add+remove).
+                # Source connector update is deferred to add_tables (avoids empty table.include.list).
+                # BUT we must still cycle the sink NOW — stale consumer group offsets for the
+                # deleted topic-partitions cause an endless rebalance loop if not cleared here.
+                self._log_info("No remaining tables — cycling sink to clear stale offsets, deferring source update to add_tables...")
+                if self.config.sink_connector_name:
+                    stop_ok, stop_err = self.connector_manager.stop_connector(self.config.sink_connector_name)
+                    if stop_ok:
+                        self._log_info("✓ Sink connector stopped")
+                    else:
+                        self._log_warning(f"⚠️ Sink stop failed: {stop_err}")
+
+                    offsets_ok, offsets_err = self.connector_manager.delete_connector_offsets(self.config.sink_connector_name)
+                    if offsets_ok:
+                        self._log_info("✓ Sink consumer group offsets cleared")
+                    else:
+                        self._log_warning(f"⚠️ Could not clear sink offsets: {offsets_err}")
+
+                    resume_ok, resume_err = self.connector_manager.resume_connector(self.config.sink_connector_name)
+                    if resume_ok:
+                        self._log_info("✓ Sink connector resumed")
+                    else:
+                        self._log_warning(f"⚠️ Sink resume failed: {resume_err}")
+
+                    steps.append({
+                        'id': 'sink_restart',
+                        'status': 'ok' if (stop_ok and resume_ok) else 'warn',
+                        'msg': 'Sink cycled (stop → clear offsets → resume)' if (stop_ok and resume_ok) else f"Sink cycle warning: {stop_err or resume_err}",
+                    })
+
+                action_past = 'dropped' if target_action == 'drop' else 'truncated'
+                return True, f"Removed {len(table_names)} table(s) (topics deleted, target tables {action_past}) — source connector update deferred", steps
 
             # ========================================
             # STEP 4: Update and restart source connector
@@ -1507,6 +1540,18 @@ class ReplicationOrchestrator:
                 self.config.table_mappings.filter(is_enabled=True)
                 .values_list('source_table', flat=True)
             )
+
+            # Guard: never send an empty table list to the connector template.
+            # An empty tables_whitelist causes the template to omit table.include.list
+            # entirely, making Debezium capture every table in the database.
+            if not all_tables:
+                self._re_pause_if_batch_mode(was_paused)
+                steps.append({
+                    'id': 'src_config',
+                    'status': 'error',
+                    'msg': "No enabled table mappings found — cannot update connector with empty table list",
+                })
+                return False, "No enabled table mappings found — cannot update connector with empty table list", steps
 
             source_config = get_connector_config_for_database(
                 db_config=db_config,

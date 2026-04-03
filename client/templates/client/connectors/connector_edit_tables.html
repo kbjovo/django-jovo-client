@@ -891,7 +891,7 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
             const r = await fetch(`/connector/${_editConfigPk}/edit/remove-tables/`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
-                body: JSON.stringify({ tables: removeTables, target_action: targetAction }),
+                body: JSON.stringify({ tables: removeTables, target_action: targetAction, allow_empty: addTables.length > 0 }),
             });
             res = await r.json();
         } catch (err) {
@@ -1110,7 +1110,7 @@ function handleAddTableCheckboxChange(tableName) {
             toggleAddAccordion(tableName);
         }
     }
-    updateTableCountDisplay();
+    updateWarnings();
 }
 
 // Filter add tables by search input
@@ -1357,7 +1357,7 @@ function updateWarnings() {
     const warningsContainer = document.getElementById('warnings-container');
     const submitBtnTop = document.getElementById('submit-btn-top');
 
-    if (remainingTables === 0) {
+    if (remainingTables === 0 && addChecked === 0) {
         warningsContainer.innerHTML = `
             <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-4">
                 <p class="text-red-800 dark:text-red-200">
@@ -1369,6 +1369,17 @@ function updateWarnings() {
         `;
         submitBtnTop.disabled = true;
         submitBtnTop.classList.add('opacity-50', 'cursor-not-allowed');
+    } else if (remainingTables === 0 && addChecked > 0) {
+        warningsContainer.innerHTML = `
+            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
+                <p class="text-yellow-800 dark:text-yellow-200">
+                    <span class="font-semibold">Warning:</span> All current tables will be removed and replaced with ${addChecked} new table(s).
+                    Removed table topics will be deleted and target tables truncated before the new tables are snapshotted.
+                </p>
+            </div>
+        `;
+        submitBtnTop.disabled = false;
+        submitBtnTop.classList.remove('opacity-50', 'cursor-not-allowed');
     } else if (totalAfter > MAX_TABLES_PER_CONNECTOR) {
         warningsContainer.innerHTML = `
             <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-4">
@@ -1514,9 +1525,9 @@ document.getElementById('edit-connector-form').addEventListener('submit', async 
         return;
     }
 
-    // ── Guard: cannot remove all tables ───────────────────────────────
+    // ── Guard: cannot remove all tables unless new ones are being added ──
     const remainingTables = CURRENT_TABLE_COUNT - removeTables.length;
-    if (remainingTables === 0) {
+    if (remainingTables === 0 && addTables.length === 0) {
         alert('Cannot remove all tables. Connectors must have at least 1 table.');
         return;
     }

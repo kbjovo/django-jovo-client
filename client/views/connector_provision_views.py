@@ -497,17 +497,20 @@ def edit_remove_tables(request, config_pk):
 
     tables_to_remove = body.get('tables', [])
     target_action = body.get('target_action', 'truncate')
+    # allow_empty=True means the caller will immediately follow with an add-tables request,
+    # so removing all current tables is valid (connector update is deferred to add_tables).
+    allow_empty = bool(body.get('allow_empty', False))
     if target_action not in ('truncate', 'drop'):
         target_action = 'truncate'
 
     if not tables_to_remove:
         return JsonResponse({'success': False, 'error': 'No tables specified for removal'}, status=400)
 
-    # Guard: cannot remove all tables
+    # Guard: cannot remove all tables unless new ones are being added in the same operation
     remaining = replication_config.table_mappings.filter(is_enabled=True).exclude(
         source_table__in=tables_to_remove
     ).count()
-    if remaining == 0:
+    if remaining == 0 and not allow_empty:
         return JsonResponse({
             'success': False,
             'error': 'Cannot remove all tables. Delete the connector instead.',
@@ -516,7 +519,9 @@ def edit_remove_tables(request, config_pk):
     try:
         from client.replication.orchestrator import ReplicationOrchestrator
         orchestrator = ReplicationOrchestrator(replication_config)
-        success, message, steps = orchestrator.remove_tables(tables_to_remove, target_action=target_action)
+        success, message, steps = orchestrator.remove_tables(
+            tables_to_remove, target_action=target_action, allow_empty=allow_empty
+        )
 
         if not success:
             return JsonResponse({'success': False, 'error': message, 'steps': steps})

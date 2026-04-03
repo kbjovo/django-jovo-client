@@ -358,10 +358,6 @@ def get_postgresql_connector_config(
         # CRITICAL: Include version to prevent JMX MBean conflicts between multiple connectors
         "topic.prefix": f"client_{client.id}_db_{db_config.id}_v_{version or 0}",
 
-        # ✅ CRITICAL FIX: Replace schema with database name in topic
-        # Default format: {topic.prefix}.{schema}.{table} → client_1_db_3_v_1.public.my_table
-        # Fixed format:  {topic.prefix}.{database}.{table} → client_1_db_3_v_1.mydb.my_table
-        # This ensures sink connectors can properly subscribe to topics
         "transforms": "routeTopic",
         "transforms.routeTopic.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.routeTopic.regex": f"(client_{client.id}_db_{db_config.id}_v_{version or 0})\\.[^.]+\\.(.+)",
@@ -574,9 +570,6 @@ def get_sqlserver_connector_config(
         "signal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "signal.kafka.consumer.auto.offset.reset": "latest",  # Ignore stale signals from before restart
 
-        # ✅ CRITICAL: Signal table must include database name for watermarking queries
-        # For SQL Server incremental snapshots, the signal table requires full three-part name
-        # Format: database.schema.table (e.g., "AppDB.dbo.debezium_signal")
         "signal.data.collection": signal_table_full,
 
         # Disable encryption (for local development)

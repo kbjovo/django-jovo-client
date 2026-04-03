@@ -517,20 +517,40 @@ class DebeziumConnectorManager:
 
         Falls back to pause if the /stop endpoint is not available (older Kafka Connect).
 
+        PUT /stop returns 202 Accepted (asynchronous). This method polls the connector
+        status until it reaches STOPPED before returning, so callers can safely call
+        delete_connector_offsets() immediately after — that API requires STOPPED state.
+
         Returns:
             Tuple[bool, Optional[str]]: (success, error_message)
         """
+        import time
         try:
             url = f"{self.connectors_url}/{connector_name}/stop"
             success, _, error = self._make_request('PUT', url)
 
-            if success:
-                logger.info(f"Successfully stopped connector: {connector_name}")
-                return True, None
+            if not success:
+                # Kafka Connect < 3.5 returns 404 for /stop — fall back to pause
+                logger.warning(f"/stop not available for {connector_name} ({error}), falling back to pause")
+                return self.pause_connector(connector_name)
 
-            # Kafka Connect < 3.5 returns 404 for /stop — fall back to pause
-            logger.warning(f"/stop not available for {connector_name} ({error}), falling back to pause")
-            return self.pause_connector(connector_name)
+            # Poll until connector reaches STOPPED state (max 15 s).
+            # DELETE /offsets requires STOPPED — without this wait the delete
+            # races against the async stop and stale offsets are not cleared.
+            for _ in range(15):
+                time.sleep(1)
+                exists, status_data = self.get_connector_status(connector_name)
+                if exists and status_data:
+                    state = status_data.get('connector', {}).get('state', '')
+                    if state == 'STOPPED':
+                        logger.info(f"Connector {connector_name} reached STOPPED state")
+                        return True, None
+                    if state == 'FAILED':
+                        logger.warning(f"Connector {connector_name} entered FAILED state during stop")
+                        return True, None  # Still return True — offsets can still be cleared
+
+            logger.warning(f"Connector {connector_name} did not reach STOPPED within 15s — proceeding anyway")
+            return True, None
 
         except Exception as e:
             error_msg = f"Error stopping connector: {str(e)}"

@@ -633,11 +633,17 @@ def connector_edit_tables(request, config_pk):
                     is_enabled=True
                 ).exclude(source_table__in=tables_to_remove).count()
 
-                if remaining_count == 0:
+                # Only block if no tables remain AND none are being added in this same request
+                if remaining_count == 0 and not tables_to_add:
                     messages.error(request, "Cannot remove all tables. Delete the connector instead.")
                     return redirect('connector_edit_tables', config_pk=config_pk)
 
-                success, message, _ = orchestrator.remove_tables(tables_to_remove)
+                # allow_empty=True when tables_to_add follows: skip connector update after
+                # removal so add_tables can apply a single update with the final table list.
+                success, message, _ = orchestrator.remove_tables(
+                    tables_to_remove,
+                    allow_empty=bool(tables_to_add),
+                )
                 if success:
                     messages.success(request, message)
                 else:
@@ -646,6 +652,14 @@ def connector_edit_tables(request, config_pk):
 
             # Handle additions
             if tables_to_add:
+                # Refresh unassigned list — tables just removed are now unassigned and
+                # can be re-added in the same request without a false "already assigned" error.
+                if tables_to_remove:
+                    try:
+                        unassigned_table_names = get_unassigned_tables(database.id)
+                    except Exception:
+                        pass
+
                 # Validate tables are unassigned
                 invalid_tables = [t for t in tables_to_add if t not in unassigned_table_names]
                 if invalid_tables:

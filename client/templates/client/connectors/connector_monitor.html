@@ -238,68 +238,6 @@
   </button>
   {% endif %}
 
-  <!-- Snapshot Progress Panel (shown/hidden by JS) -->
-  <div id="snapshot-panel" class="{% if not snapshot %}hidden{% endif %} mb-6">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
-        <div id="snapshot-spinner" class="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full{% if not snapshot.running %} hidden{% endif %}"></div>
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
-          <span id="snapshot-title">
-            {% if snapshot %}
-              {% if snapshot.type == 'initial' %}Initial Snapshot{% else %}Incremental Snapshot{% endif %}
-            {% else %}
-              Snapshot
-            {% endif %}
-          </span>
-        </h3>
-        <span id="snapshot-badge" class="ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-          {% if snapshot.running %}bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400
-          {% elif snapshot.completed %}bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400
-          {% else %}bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400{% endif %}">
-          {% if snapshot.running %}Running{% elif snapshot.completed %}Complete{% else %}--{% endif %}
-        </span>
-      </div>
-      <div class="p-6">
-        <!-- Progress Bar -->
-        <div class="mb-4">
-          <div class="flex justify-between text-sm text-gray-600 dark:text-gray-400 mb-1">
-            <span>Tables: <span id="snap-done">{{ snapshot.completed_tables|default:"0" }}</span> / <span id="snap-total">{{ snapshot.total_tables|default:"0" }}</span></span>
-            <span id="snap-pct">
-              {% if snapshot and snapshot.total_tables %}
-                {{ snapshot.completed_tables|default:0 }}%
-              {% else %}
-                0%
-              {% endif %}
-            </span>
-          </div>
-          <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3">
-            <div id="snap-bar" class="bg-blue-600 h-3 rounded-full transition-all duration-500" style="width: {% if snapshot and snapshot.total_tables %}{% widthratio snapshot.completed_tables snapshot.total_tables 100 %}%{% else %}0%{% endif %}"></div>
-          </div>
-        </div>
-
-        <!-- Snapshot Details Grid -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Rows Scanned</p>
-            <p id="snap-rows" class="font-semibold text-gray-900 dark:text-white">{{ snapshot.total_rows_scanned|default:"0" }}</p>
-          </div>
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Duration</p>
-            <p id="snap-duration" class="font-semibold text-gray-900 dark:text-white">{{ snapshot.duration_seconds|default:"0" }}s</p>
-          </div>
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Current Table</p>
-            <p id="snap-current" class="font-semibold text-gray-900 dark:text-white font-mono truncate" title="{{ snapshot.current_table|default:'' }}">{{ snapshot.current_table|default:"--" }}</p>
-          </div>
-          <div>
-            <p class="text-gray-500 dark:text-gray-400">Remaining</p>
-            <p id="snap-remaining" class="font-semibold text-gray-900 dark:text-white"><span id="snap-remain-val">{{ snapshot.remaining_tables|default:"0" }}</span> tables</p>
-          </div>
-        </div>
-
-      </div>
-    </div>
-  </div>
 
   <!-- Batch Schedule Panel (only for batch connectors) -->
   {% if replication_config.processing_mode == 'batch' %}
@@ -825,49 +763,8 @@ fetchTableRows();
       updateBatchSchedule(s);
     }
 
-    // Snapshot panel
-    const panel = document.getElementById('snapshot-panel');
     const snap = s.snapshot;
-
-    if (snap && (snap.running || snap.completed)) {
-      panel.classList.remove('hidden');
-
-      const typeLabel = snap.type === 'initial' ? 'Initial Snapshot' : 'Incremental Snapshot';
-      document.getElementById('snapshot-title').textContent = typeLabel;
-
-      const badge = document.getElementById('snapshot-badge');
-      if (snap.running) {
-        badge.textContent = 'Running';
-        badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
-        document.getElementById('snapshot-spinner').classList.remove('hidden');
-      } else if (snap.completed) {
-        badge.textContent = 'Complete';
-        badge.className = 'ml-auto inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
-        document.getElementById('snapshot-spinner').classList.add('hidden');
-      }
-
-      const done = snap.completed_tables || 0;
-      const total = snap.total_tables || 0;
-      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-
-      document.getElementById('snap-done').textContent = done;
-      document.getElementById('snap-total').textContent = total;
-      document.getElementById('snap-pct').textContent = pct + '%';
-      document.getElementById('snap-bar').style.width = pct + '%';
-
-      document.getElementById('snap-rows').textContent = formatNumber(snap.total_rows_scanned);
-      document.getElementById('snap-duration').textContent = (snap.duration_seconds || 0) + 's';
-      document.getElementById('snap-current').textContent = snap.current_table || '--';
-      document.getElementById('snap-current').title = snap.current_table || '';
-      document.getElementById('snap-remain-val').textContent = snap.remaining_tables || 0;
-
-      currentInterval = snap.running ? POLL_INTERVAL : IDLE_INTERVAL;
-    } else {
-      if (!snap || (!snap.running && !snap.completed)) {
-        panel.classList.add('hidden');
-      }
-      currentInterval = IDLE_INTERVAL;
-    }
+    currentInterval = (snap && snap.running) ? POLL_INTERVAL : IDLE_INTERVAL;
   }
 
   function toggleBtn(id, show) {

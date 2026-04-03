@@ -167,28 +167,23 @@ def monitoring_dashboard(request):
         try:
             exists, status_data = manager.get_connector_status(config.connector_name)
 
-            if exists and status_data:
-                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-                tasks = status_data.get('tasks', [])
+            if not exists or not status_data:
+                logger.warning(f"Connector {config.connector_name} not found in Kafka Connect — skipping from monitoring")
+                continue
 
-                has_failed_task = any(task.get('state') == 'FAILED' for task in tasks)
-                connector_trace = status_data.get('connector', {}).get('trace', '')
-                monitoring_data.append({
-                    'config': config,
-                    'connector_state': connector_state,
-                    'connector_trace': connector_trace,
-                    'tasks': tasks,
-                    'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
-                    'error_count': sum(1 for task in tasks if task.get('state') == 'FAILED'),
-                })
-            else:
-                monitoring_data.append({
-                    'config': config,
-                    'connector_state': 'NOT_FOUND',
-                    'tasks': [],
-                    'is_healthy': False,
-                    'error_count': 1,
-                })
+            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            tasks = status_data.get('tasks', [])
+
+            has_failed_task = any(task.get('state') == 'FAILED' for task in tasks)
+            connector_trace = status_data.get('connector', {}).get('trace', '')
+            monitoring_data.append({
+                'config': config,
+                'connector_state': connector_state,
+                'connector_trace': connector_trace,
+                'tasks': tasks,
+                'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
+                'error_count': sum(1 for task in tasks if task.get('state') == 'FAILED'),
+            })
         except Exception as e:
             logger.error(f"Error fetching status for {config.connector_name}: {e}")
             monitoring_data.append({

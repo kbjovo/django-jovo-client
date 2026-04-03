@@ -272,6 +272,8 @@ def connector_list(request, database_pk):
                 config.debezium_status = {'state': connector_state, 'raw': status_data}
             else:
                 config.debezium_status = {'state': 'NOT_FOUND'}
+                logger.warning(f"Connector {config.connector_name} not found in Kafka Connect — skipping from display")
+                continue
         except Exception as e:
             logger.warning(f"Could not get status for {config.connector_name}: {e}")
             config.debezium_status = {'state': 'UNKNOWN'}
@@ -280,6 +282,16 @@ def connector_list(request, database_pk):
         config.table_count = config.get_table_count()
 
         connectors_with_status.append(config)
+
+    # Recompute health summary from connectors that actually exist in Kafka
+    health_summary['total_source_connectors'] = len(connectors_with_status)
+    health_summary['running_source_connectors'] = sum(
+        1 for c in connectors_with_status if c.debezium_status.get('state') == 'RUNNING'
+    )
+    health_summary['failed_source_connectors'] = sum(
+        1 for c in connectors_with_status if c.debezium_status.get('state') == 'FAILED'
+    )
+    health_summary['total_tables'] = sum(c.table_count for c in connectors_with_status)
 
     # Get sink connector status
     try:
@@ -298,9 +310,9 @@ def connector_list(request, database_pk):
         unassigned_count = 0
 
     # Get all tables across all connectors for combined view
+    active_config_pks = [c.pk for c in connectors_with_status]
     all_table_mappings = TableMapping.objects.filter(
-        replication_config__client_database=database,
-        replication_config__status__in=['configured', 'active', 'paused', 'error'],
+        replication_config__pk__in=active_config_pks,
         is_enabled=True
     ).select_related('replication_config').order_by('source_table')
 
