@@ -619,8 +619,14 @@ fetchTableRows();
 
     const now = Date.now();
 
-    // Confirmed syncing: server recorded a start time (set by resume_connector).
-    const confirmedSyncing = !!batchSyncStartedAt;
+    // Confirmed syncing: server recorded a start time (set by resume_connector),
+    // AND we are still within the max catchup window from that start.
+    // Without the time bound, a stale batchSyncStartedAt (not yet cleared by the
+    // next 30s poll) keeps the UI locked in "Syncing..." past the end of the sync,
+    // then falls through to the "No schedule" branch instead of showing the
+    // next-countdown — which is the resume→pause display bug.
+    const confirmedSyncing = !!batchSyncStartedAt
+      && now < batchSyncStartedAt.getTime() + batchMaxCatchupMs;
     // Predicted syncing: we're inside the expected sync window based on schedule.
     const predictedSyncing = !confirmedSyncing && batchNextRun
       && now >= batchNextRun.getTime()

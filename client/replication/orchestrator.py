@@ -2121,6 +2121,17 @@ class ReplicationOrchestrator:
             if success:
                 self.config.connector_state = 'PAUSED'
                 self.config.batch_sync_started_at = None
+
+                # Advance next_batch_run so the frontend countdown is always
+                # relative to NOW, not the original setup time.  Without this,
+                # next_batch_run stays in the past forever after the first cycle
+                # and the frontend predictedSyncing window fires on every tick,
+                # making the UI show "Syncing…" even when the connector is paused.
+                if self.config.processing_mode == 'batch' and self.config.batch_interval:
+                    interval_seconds = self._get_batch_interval_seconds()
+                    self.config.next_batch_run = timezone.now() + timezone.timedelta(seconds=interval_seconds)
+                    self._log_info(f"  → Next batch run scheduled: {self.config.next_batch_run}")
+
                 self.config.save()
                 self._log_info(f"✓ Connector paused: {self.config.connector_name}")
                 return True, "Connector paused successfully"
