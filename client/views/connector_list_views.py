@@ -272,8 +272,7 @@ def connector_list(request, database_pk):
                 config.debezium_status = {'state': connector_state, 'raw': status_data}
             else:
                 config.debezium_status = {'state': 'NOT_FOUND'}
-                logger.warning(f"Connector {config.connector_name} not found in Kafka Connect — skipping from display")
-                continue
+                logger.warning(f"Connector {config.connector_name} not found in Kafka Connect — showing as stale")
         except Exception as e:
             logger.warning(f"Could not get status for {config.connector_name}: {e}")
             config.debezium_status = {'state': 'UNKNOWN'}

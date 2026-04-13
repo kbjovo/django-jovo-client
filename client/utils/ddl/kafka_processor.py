@@ -85,7 +85,7 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         if self._table_name_map:
             logger.info(f"   Custom table name mappings: {self._table_name_map}")
 
-        # Initialize Kafka consumer
+        # Initialize Kafka consumer (schema history topic)
         group_id = consumer_group or f'ddl-processor-config-{replication_config.id}'
         self.consumer = Consumer({
             'bootstrap.servers': bootstrap_servers,
@@ -96,6 +96,14 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             'max.poll.interval.ms': 300000,
         })
         self.consumer.subscribe([self.schema_topic])
+
+        # Truncate watcher: subscribes to change topics for MySQL/Oracle to detect
+        # op="t" events emitted when TRUNCATE TABLE runs on the source.
+        # Requires connector config: skipped.operations="" (not the default "t").
+        self.truncate_consumer: Optional[Any] = None
+        self._truncate_deserializer: Optional[Any] = None
+        if self.source_db_type in ('mysql', 'oracle'):
+            self._init_truncate_watcher(replication_config, bootstrap_servers, group_id)
 
         # Cache for table schemas (used for detecting changes)
         self.schema_cache: Dict[str, Dict] = {}
@@ -168,6 +176,9 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         if errors > 0:
             logger.warning(f"DDL batch complete: {processed} processed, {errors} errors")
 
+        # Poll change topics for TRUNCATE events (MySQL/Oracle only)
+        self.poll_truncate_events(timeout_sec=2.0)
+
         return processed, errors
 
     def _process_message(self, message: Dict) -> bool:
@@ -212,6 +223,10 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 return self._process_mysql_ddl(ddl, table_changes)
             # MySQL message without raw DDL (e.g. initial schema metadata) — skip gracefully
             return True
+        elif self.source_db_type == 'oracle':
+            if ddl:
+                return self._process_oracle_ddl(ddl)
+            return True
         elif self.source_db_type in ('mssql', 'sqlserver'):
             # SQL Server: Use tableChanges metadata
             return self._process_mssql_schema_change(table_changes)
@@ -240,7 +255,6 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             'CREATE TRIGGER', 'DROP TRIGGER',
             'CREATE VIEW', 'DROP VIEW',
             'SET ', 'FLUSH ', 'ANALYZE ', 'OPTIMIZE ',
-            'TRUNCATE',  # Data operation, not schema
         ]
 
         for pattern in skip_patterns:
@@ -248,12 +262,13 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 logger.debug(f"Skipping non-table DDL: {ddl[:50]}...")
                 return True
 
-        # Parse DDL type — CREATE TABLE, DROP TABLE, TRUNCATE etc. are caught by
-        # skip_patterns above and never reach here.
+        # Parse DDL type — CREATE TABLE, DROP TABLE etc. are caught by skip_patterns above.
         if ddl_upper.startswith('ALTER TABLE'):
             return self._handle_alter_table(ddl, table_changes)
         elif ddl_upper.startswith('RENAME TABLE'):
             return self._handle_rename_table(ddl)
+        elif ddl_upper.startswith('TRUNCATE'):
+            return self._handle_truncate(ddl)
         else:
             logger.debug(f"Ignoring DDL: {ddl[:50]}...")
             return True
@@ -664,6 +679,94 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         self.schema_cache[table_name] = table_info
         return True
 
+    def _process_oracle_ddl(self, ddl: str) -> bool:
+        """
+        Process Oracle DDL captured by LogMiner from the schema history topic.
+
+        Oracle provides raw DDL strings (like MySQL), so we only need to handle
+        TRUNCATE here — other schema changes (ALTER, CREATE, DROP) are handled
+        by the sink connector's auto.create / auto.evolve settings.
+        """
+        ddl_upper = ddl.upper().strip()
+
+        if ddl_upper.startswith('TRUNCATE'):
+            return self._handle_truncate(ddl)
+
+        # All other Oracle DDL (ALTER TABLE, CREATE TABLE, etc.) — skip for now;
+        # the sink connector handles structural changes automatically.
+        logger.debug(f"Ignoring Oracle DDL: {ddl[:60]}...")
+        return True
+
+    def _handle_truncate(self, ddl: str) -> bool:
+        """
+        Handle TRUNCATE TABLE on a tracked source table (MySQL and Oracle).
+
+        MySQL and Oracle emit TRUNCATE as a DDL event in the schema history topic
+        — not as row-level deletes — so the sink connector never finds out.
+
+        This handler:
+          1. Truncates the corresponding target table (clears stale rows).
+          2. Sends an incremental snapshot signal so Debezium re-reads the source.
+
+        If the table is not in the active mappings the event is silently ignored.
+        """
+        match = re.search(
+            r'TRUNCATE\s+(?:TABLE\s+)?[`"\[]?(\w+)[`"\]]?',
+            ddl, re.IGNORECASE
+        )
+        if not match:
+            logger.warning(f"Could not parse table name from TRUNCATE DDL: {ddl[:80]}")
+            return True
+
+        source_table = match.group(1)
+
+        table_mapping = self.replication_config.table_mappings.filter(
+            source_table=source_table,
+            is_enabled=True
+        ).first()
+
+        if not table_mapping:
+            logger.debug(f"TRUNCATE on untracked table '{source_table}' — skipping")
+            return True
+
+        logger.info(f"TRUNCATE detected on tracked table '{source_table}' — triggering auto-resync")
+
+        # Step 1: truncate the target table
+        target_db = self.replication_config.client_database.client.client_databases.filter(
+            is_target=True
+        ).first()
+
+        if not target_db:
+            logger.error(f"No target database found — cannot resync after TRUNCATE on '{source_table}'")
+            return False
+
+        from client.utils.table_creator import truncate_tables_for_mappings
+        ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
+        if not ok:
+            logger.error(f"Failed to truncate target table '{table_mapping.target_table}': {msg}")
+            return False
+
+        logger.info(f"  ✓ Target table '{table_mapping.target_table}' truncated")
+
+        # Step 2: send incremental snapshot signal so Debezium re-reads the source
+        try:
+            from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
+            signal_id, method = send_incremental_snapshot_signal(
+                self.replication_config.client_database,
+                self.replication_config,
+                [source_table]
+            )
+            logger.info(f"  ✓ Snapshot signal sent (ID: {signal_id}, via {method})")
+        except Exception as e:
+            # Target is already truncated — log but don't fail the DDL batch.
+            # The user can trigger a manual resync from the UI if needed.
+            logger.error(
+                f"  ✗ Snapshot signal failed for '{source_table}': {e} "
+                f"— target is truncated, manual resync may be needed"
+            )
+
+        return True
+
     def _handle_drop_table(self, ddl: str) -> bool:
         """Handle DROP TABLE."""
         match = re.search(
@@ -948,8 +1051,124 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             logger.error(f"Failed to delete schema subjects: {e}")
             return False
 
+    def _init_truncate_watcher(self, replication_config, bootstrap_servers: str, schema_group_id: str) -> None:
+        """
+        Set up a second Kafka consumer that watches change topics for op="t" events.
+
+        MySQL (and Oracle) emit TRUNCATE as op="t" to the change topic when
+        skipped.operations="" is configured on the source connector.
+        The schema history topic never receives TRUNCATE events.
+
+        Uses a separate consumer group so it doesn't interfere with the sink.
+        """
+        try:
+            from confluent_kafka.schema_registry import SchemaRegistryClient
+            from confluent_kafka.schema_registry.avro import AvroDeserializer
+            from django.conf import settings as django_settings
+
+            schema_registry_url = django_settings.DEBEZIUM_CONFIG.get(
+                'SCHEMA_REGISTRY_URL', 'http://schema-registry:8081'
+            )
+            sr_client = SchemaRegistryClient({'url': schema_registry_url})
+            # Use generic Avro deserializer — returns a dict
+            self._truncate_deserializer = AvroDeserializer(sr_client)
+
+            # Build change topic list for all tracked tables
+            db_config = replication_config.client_database
+            topic_prefix = replication_config.kafka_topic_prefix or (
+                f"client_{db_config.client_id}_db_{db_config.id}_v_{replication_config.connector_version or 0}"
+            )
+            if self.source_db_type == 'mysql':
+                db_name = db_config.database_name
+                change_topics = [
+                    f"{topic_prefix}.{db_name}.{m.source_table}"
+                    for m in replication_config.table_mappings.filter(is_enabled=True)
+                ]
+            else:  # oracle
+                change_topics = [
+                    f"{topic_prefix}.{m.source_schema or db_config.username.upper()}.{m.source_table}"
+                    for m in replication_config.table_mappings.filter(is_enabled=True)
+                ]
+
+            if not change_topics:
+                return
+
+            self.truncate_consumer = Consumer({
+                'bootstrap.servers': bootstrap_servers,
+                'group.id': f'{schema_group_id}-truncate-watcher',
+                'auto.offset.reset': 'latest',  # only care about new events
+                'enable.auto.commit': False,
+                'session.timeout.ms': 30000,
+                'max.poll.interval.ms': 300000,
+            })
+            self.truncate_consumer.subscribe(change_topics)
+            logger.info(f"Truncate watcher initialized — watching {len(change_topics)} change topic(s)")
+
+        except Exception as e:
+            logger.warning(f"Could not init truncate watcher (non-fatal): {e}")
+            self.truncate_consumer = None
+            self._truncate_deserializer = None
+
+    def poll_truncate_events(self, timeout_sec: float = 2.0) -> int:
+        """
+        Poll change topics for op="t" (TRUNCATE) events and trigger resync.
+
+        Returns number of truncate events handled.
+        """
+        if not self.truncate_consumer or not self._truncate_deserializer:
+            return 0
+
+        from confluent_kafka.schema_registry.avro import AvroDeserializer
+        from confluent_kafka import SerializingProducer
+
+        handled = 0
+        try:
+            msgs = self.truncate_consumer.consume(num_messages=50, timeout=timeout_sec)
+            last_msg = None
+            for msg in msgs:
+                if msg.error():
+                    continue
+                if msg.value() is None:
+                    continue  # tombstone
+
+                try:
+                    # Avro deserialize — returns a dict with 'payload' key
+                    record = self._truncate_deserializer(msg.value(), None)
+                    if not record:
+                        continue
+
+                    op = record.get('op') or record.get('payload', {}).get('op')
+                    if op != 't':
+                        continue
+
+                    # Extract table name from topic: prefix.db.table
+                    topic = msg.topic()
+                    table_name = topic.rsplit('.', 1)[-1]
+
+                    logger.info(f"op=t detected on topic '{topic}' — triggering resync for '{table_name}'")
+                    self._handle_truncate(f"TRUNCATE TABLE `{table_name}`")
+                    handled += 1
+
+                except Exception as e:
+                    logger.debug(f"Could not decode change topic message: {e}")
+
+                last_msg = msg
+
+            if last_msg is not None:
+                self.truncate_consumer.commit(last_msg)
+
+        except Exception as e:
+            logger.error(f"Truncate watcher poll error: {e}")
+
+        return handled
+
     def close(self):
-        """Close Kafka consumer."""
+        """Close Kafka consumers."""
+        if self.truncate_consumer:
+            try:
+                self.truncate_consumer.close()
+            except Exception as e:
+                logger.error(f"Error closing truncate watcher: {e}")
         if self.consumer:
             try:
                 self.consumer.close()

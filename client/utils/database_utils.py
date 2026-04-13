@@ -294,25 +294,35 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
             logger.info(f"MySQL: Found {len(tables)} tables")
             
         elif db_type == 'oracle':
-            # ✅ Oracle: Get tables from user schema with SCHEMA.TABLE format
-            if schema:
-                schema_name = schema.upper().lstrip('C##')
-                print("User1", schema_name)
-
-            else:
-                schema_name = db_config.username.upper().removeprefix('C##')
-                print("User2", schema_name)
-
+            # Oracle: Query ALL_TABLES to find every table accessible to the connector
+            # user — this includes tables in other schemas granted via SELECT privilege,
+            # not just tables owned by the connector user's schema.
+            # Returns OWNER.TABLE_NAME (uppercase) as required by Debezium.
+            ORACLE_SYSTEM_OWNERS = (
+                'SYS', 'SYSTEM', 'OUTLN', 'XDB', 'CTXSYS', 'MDSYS', 'ORDSYS',
+                'ORDDATA', 'ORDPLUGINS', 'SI_INFORMTN_SCHEMA', 'DBSNMP', 'WMSYS',
+                'EXFSYS', 'DMSYS', 'LBACSYS', 'OLAPSYS', 'OWBSYS', 'APPQOSSYS',
+                'DVSYS', 'AUDSYS', 'GGSYS', 'DVF', 'DBSFWUSER', 'OJVMSYS',
+                'GSMADMIN_INTERNAL', 'REMOTE_SCHEDULER_AGENT', 'FLOWS_FILES',
+                'APEX_030200', 'APEX_040000',
+            )
+            # Debezium internal tables — never user-owned, must never appear in the UI
+            DEBEZIUM_INTERNAL_TABLES = ('DEBEZIUM_SIGNAL', 'LOG_MINING_FLUSH', 'DDL_EVENTS')
+            debezium_placeholders = ', '.join(f"'{t}'" for t in DEBEZIUM_INTERNAL_TABLES)
+            placeholders = ', '.join(f"'{o}'" for o in ORACLE_SYSTEM_OWNERS)
             try:
-                # Get tables from specified schema
-                oracle_tables = inspector.get_table_names(schema=schema_name)
-                # CRITICAL: Oracle table names must be uppercase for Debezium
-                # SQLAlchemy inspector returns lowercase, but Debezium expects uppercase
-                # Return in SCHEMA.TABLE format for consistency
-                tables = [f"{schema_name}.{table.upper()}" for table in oracle_tables]
-                logger.info(f"Oracle: Found {len(tables)} tables in schema '{schema_name}'")
+                with engine.connect() as conn:
+                    result = conn.execute(text(
+                        f"SELECT OWNER, TABLE_NAME FROM ALL_TABLES "
+                        f"WHERE OWNER NOT IN ({placeholders}) "
+                        f"AND TABLE_NAME NOT IN ({debezium_placeholders}) "
+                        f"ORDER BY OWNER, TABLE_NAME"
+                    ))
+                    rows = result.fetchall()
+                tables = [f"{row[0]}.{row[1]}" for row in rows]
+                logger.info(f"Oracle: Found {len(tables)} accessible tables across all schemas")
             except Exception as e:
-                logger.error(f"Oracle: Failed to get tables from schema '{schema_name}': {e}")
+                logger.error(f"Oracle: Failed to query ALL_TABLES: {e}")
                 tables = []
             
         elif db_type == 'sqlite':
@@ -332,6 +342,135 @@ def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> L
         error_msg = f"Failed to get table list: {str(e)}"
         logger.error(error_msg)
         raise DatabaseOperationError(error_msg) from e
+
+
+def check_table_cdc_status(db_config: ClientDatabase, table_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Per-table CDC readiness check. Returns None for DB types with no per-table requirements.
+
+    Oracle  — checks SELECT privilege + supplemental logging on this table.
+    MSSQL   — checks CDC enabled on this specific table.
+    MySQL / PostgreSQL — return None (no per-table checks needed).
+    """
+    db_type = db_config.db_type.lower()
+    if db_type == 'oracle':
+        return _check_oracle_table_cdc(db_config, table_name)
+    elif db_type == 'mssql':
+        return _check_mssql_table_cdc(db_config, table_name)
+    return None
+
+
+def _check_oracle_table_cdc(db_config: ClientDatabase, table_name: str) -> Dict[str, Any]:
+    if '.' in table_name:
+        owner, actual_table = table_name.split('.', 1)
+    else:
+        owner = db_config.username.upper().removeprefix('C##')
+        actual_table = table_name
+
+    result: Dict[str, Any] = {
+        'db_type': 'oracle',
+        'checks': [],
+        'all_ok': False,
+        'fix_sql': '',
+        'error': '',
+    }
+    try:
+        engine = get_database_engine(db_config)
+        with engine.connect() as conn:
+            # SELECT privilege: SELECT ANY TABLE or explicit per-table grant
+            row = conn.execute(text(
+                "SELECT COUNT(*) FROM SESSION_PRIVS WHERE PRIVILEGE = 'SELECT ANY TABLE'"
+            )).fetchone()
+            has_select_any = bool(row and row[0] > 0)
+
+            if has_select_any:
+                has_select = True
+            else:
+                row = conn.execute(text(
+                    "SELECT COUNT(*) FROM ALL_TAB_PRIVS "
+                    "WHERE GRANTEE = USER AND PRIVILEGE = 'SELECT' "
+                    "AND TABLE_NAME = :tbl AND TABLE_SCHEMA = :own"
+                ), {'tbl': actual_table, 'own': owner}).fetchone()
+                has_select = bool(row and row[0] > 0)
+
+            # Supplemental logging at table level
+            try:
+                row = conn.execute(text(
+                    "SELECT COUNT(*) FROM ALL_LOG_GROUPS "
+                    "WHERE OWNER = :own AND TABLE_NAME = :tbl"
+                ), {'own': owner, 'tbl': actual_table}).fetchone()
+                has_suplog = bool(row and row[0] > 0)
+            except Exception:
+                has_suplog = False
+
+        engine.dispose()
+
+        connector_user = db_config.username.upper()
+        result['checks'] = [
+            {
+                'name': 'SELECT privilege',
+                'ok': has_select,
+                'note': 'Via SELECT ANY TABLE' if has_select_any else (
+                    '' if has_select else f"GRANT SELECT ON {owner}.{actual_table} TO {connector_user};"
+                ),
+            },
+            {
+                'name': 'Supplemental logging',
+                'ok': has_suplog,
+                'note': '' if has_suplog else (
+                    f"ALTER TABLE {owner}.{actual_table} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;"
+                ),
+            },
+        ]
+        result['all_ok'] = has_select and has_suplog
+        fixes = [c['note'] for c in result['checks'] if not c['ok'] and c['note']]
+        result['fix_sql'] = '\n'.join(fixes)
+
+    except Exception as e:
+        result['error'] = str(e)
+
+    return result
+
+
+def _check_mssql_table_cdc(db_config: ClientDatabase, table_name: str) -> Dict[str, Any]:
+    if '.' in table_name:
+        schema_name, actual_table = table_name.split('.', 1)
+    else:
+        schema_name, actual_table = 'dbo', table_name
+
+    result: Dict[str, Any] = {
+        'db_type': 'mssql',
+        'checks': [],
+        'all_ok': False,
+        'fix_sql': '',
+        'error': '',
+    }
+    try:
+        engine = get_database_engine(db_config)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT is_tracked_by_cdc FROM sys.tables t "
+                "JOIN sys.schemas s ON t.schema_id = s.schema_id "
+                "WHERE t.name = :tbl AND s.name = :sch"
+            ), {'tbl': actual_table, 'sch': schema_name}).fetchone()
+            cdc_enabled = bool(row and row[0])
+        engine.dispose()
+
+        fix = (
+            f"EXEC sys.sp_cdc_enable_table\n"
+            f"    @source_schema = N'{schema_name}',\n"
+            f"    @source_name   = N'{actual_table}',\n"
+            f"    @role_name     = NULL;"
+        ) if not cdc_enabled else ''
+
+        result['checks'] = [{'name': 'CDC enabled on table', 'ok': cdc_enabled, 'note': fix}]
+        result['all_ok'] = cdc_enabled
+        result['fix_sql'] = fix
+
+    except Exception as e:
+        result['error'] = str(e)
+
+    return result
 
 
 def _get_non_empty_tables_bulk(db_config: ClientDatabase, table_names: List[str], schema: Optional[str] = None) -> set:
@@ -408,13 +547,20 @@ def get_unassigned_tables(client_database_id: int, schema: Optional[str] = None,
 
         # Get all assigned tables from active replication configs
         # Include 'error' status to prevent showing tables from failed connectors as unassigned
-        assigned_tables = TableMapping.objects.filter(
+        assigned_mappings = TableMapping.objects.filter(
             replication_config__client_database_id=client_database_id,
             replication_config__status__in=['configured', 'active', 'paused', 'error'],
             is_enabled=True
-        ).values_list('source_table', flat=True)
+        ).values_list('source_schema', 'source_table')
 
-        assigned_set = set(assigned_tables)
+        # Build a set that matches both bare names ('ORDERS') and schema-qualified
+        # names ('APPUSER.ORDERS') — Oracle and SQL Server return schema-qualified
+        # names from get_table_list but store the bare table name in source_table.
+        assigned_set = set()
+        for src_schema, src_table in assigned_mappings:
+            assigned_set.add(src_table)
+            if src_schema:
+                assigned_set.add(f"{src_schema}.{src_table}")
 
         logger.info(f"Found {len(assigned_set)} assigned tables for database {db_config.connection_name}")
 

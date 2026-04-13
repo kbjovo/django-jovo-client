@@ -235,6 +235,11 @@ def get_mysql_connector_config(
         # Tombstones on delete
         "tombstones.on.delete": "true",
 
+        # Emit truncate events (op="t") to change topics so the system can detect
+        # TRUNCATE TABLE and trigger an automatic resync on the target.
+        # Default is "t" (skip truncate) — "none" means skip nothing.
+        "skipped.operations": "none",
+
         # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
         # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
         "snapshot.fetch.size": str(replication_config.snapshot_fetch_size) if replication_config and hasattr(replication_config, 'snapshot_fetch_size') else "10000",
@@ -708,52 +713,53 @@ def get_oracle_connector_config(
         connector_name = generate_connector_name(client, db_config, version=version)
 
     connection_username = db_config.username.upper()
-    schema_name = connection_username[3:] if connection_username.startswith('C##') else connection_username
+    is_cdb_user = connection_username.startswith('C##')
+    schema_name = connection_username[3:] if is_cdb_user else connection_username
 
-    # ✅ FIXED: Use service_name from frontend (stored in database_name field)
     # For Oracle, database_name contains either:
     # - Service Name (e.g., XEPDB1) when oracle_connection_mode = 'service'
     # - SID (e.g., XE) when oracle_connection_mode = 'sid'
     pdb_name = db_config.database_name.upper()
 
-    # ✅ FIXED: Use the service name from frontend instead of hardcoded 'XE'
-    # The service_name/SID is stored in db_config.database_name
     oracle_connection_mode = getattr(db_config, 'oracle_connection_mode', 'service')
 
     if oracle_connection_mode == 'sid':
-        # SID mode: Use database_name as SID directly
-        cdb_service = pdb_name  # e.g., 'XE', 'ORCL'
+        cdb_service = pdb_name
     else:
-        # Service Name mode: Use database_name as service name
-        # For JDBC URL with service name, extract CDB from PDB name or use as-is
-        if 'PDB' in pdb_name:
-            # If it's a PDB name (e.g., XEPDB1), extract the CDB part (XE)
-            # But for service name connection, we use the full service name
-            cdb_service = pdb_name  # e.g., 'XEPDB1', 'ORCLPDB1'
-        else:
-            # Not a PDB, use as-is (e.g., 'XE' used as service name)
-            cdb_service = pdb_name
+        cdb_service = pdb_name
+
+    # CDB common users (C## prefix) support container switching — set database.pdb.name
+    # so Debezium can switch to CDB$ROOT for LogMiner and back.
+    # PDB-local users cannot run ALTER SESSION SET CONTAINER, so we connect directly
+    # to the PDB service and omit database.pdb.name entirely.
+    use_pdb_mode = is_cdb_user
 
     logger.info(f"🔧 Oracle CDC Configuration")
     logger.info(f"   Connector: {connector_name}")
     logger.info(f"   Snapshot Mode: {snapshot_mode}")
     logger.info(f"   Schema: {schema_name}")
+    logger.info(f"   CDB common user: {is_cdb_user} → pdb.name={'set' if use_pdb_mode else 'omitted'}")
 
-    # ✅ CRITICAL: Create signal table BEFORE connector starts
-    signal_table = f"{pdb_name}.{schema_name}.DEBEZIUM_SIGNAL"
+    # signal.data.collection is resolved later inside the tables_whitelist block
+    # once we know the data schema (e.g. APPUSER). Set a placeholder here; the
+    # correct value is written below after formatted_tables is built.
+    signal_table = None  # resolved after tables are formatted
 
     jdbc_url = f"jdbc:oracle:thin:@//{db_config.host}:{db_config.port}/{cdb_service}"
 
     config = {
         "connector.class": "io.debezium.connector.oracle.OracleConnector",
-        
+
         "database.hostname": db_config.host,
         "database.port": str(db_config.port),
         "database.user": connection_username,
         "database.password": db_config.get_decrypted_password(),
         "database.dbname": cdb_service,
         "database.url": jdbc_url,
-        "database.pdb.name": pdb_name,
+        # database.pdb.name only for CDB common users — PDB-local users must not set this
+        # because Debezium will try ALTER SESSION SET CONTAINER = CDB$ROOT which requires
+        # container-switching privileges only available to CDB common users.
+        **( {"database.pdb.name": pdb_name} if use_pdb_mode else {} ),
 
         "database.server.name": connector_name.replace('_connector', ''),
         # CRITICAL: Include version to prevent JMX MBean conflicts between multiple connectors
@@ -867,14 +873,26 @@ def get_oracle_connector_config(
             raise ValueError("No valid tables after formatting")
 
         # ✅ CRITICAL FIX: Add signal table to table.include.list
-        # This is required for incremental snapshots via signals
-        signal_table_name = f"{schema_name}.DEBEZIUM_SIGNAL"
+        # This is required for incremental snapshots via signals.
+        # Use the first data table's schema (e.g. APPUSER) — the signal table lives
+        # in the same schema as the data tables, not in the connector user's schema.
+        data_schema = formatted_tables[0].split('.')[0]
+        signal_table_name = f"{data_schema}.DEBEZIUM_SIGNAL"
         if signal_table_name not in formatted_tables:
             formatted_tables.append(signal_table_name)
             logger.info(f"✅ Added signal table for incremental snapshots: {signal_table_name}")
 
         config["table.include.list"] = ",".join(formatted_tables)
         logger.info(f"📋 Tables: {len(formatted_tables)}")
+
+        # schema.include.list must cover all schemas where selected tables live.
+        schemas_in_use = {t.split('.')[0] for t in formatted_tables}
+        config["schema.include.list"] = ",".join(sorted(schemas_in_use))
+
+        # Set signal.data.collection now that data_schema is known.
+        # Format: <database>.<schema>.<table> — database must match database.dbname exactly.
+        config["signal.data.collection"] = f"{cdb_service}.{data_schema}.DEBEZIUM_SIGNAL"
+        logger.info(f"✅ signal.data.collection = {config['signal.data.collection']}")
 
     # Apply custom config
     if replication_config:

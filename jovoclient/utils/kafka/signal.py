@@ -390,15 +390,13 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
     logger.info(f"Sending incremental snapshot signal for {len(formatted_tables)} tables")
     logger.debug(f"Formatted tables: {formatted_tables}")
 
-    # Database-based signaling (PostgreSQL, MS SQL, Oracle)
-    if db_type in ['postgresql', 'mssql', 'oracle']:
+    # Database-based signaling (PostgreSQL, MS SQL)
+    if db_type in ['postgresql', 'mssql']:
         db_engine = get_database_engine(database)
 
-        # Signal table names by db_type
         signal_tables = {
             'postgresql': 'public.debezium_signal',
             'mssql': 'dbo.debezium_signal',
-            'oracle': f'{database.username.upper()}.DEBEZIUM_SIGNAL',
         }
         signal_table = signal_tables.get(db_type, 'debezium_signal')
 
@@ -416,7 +414,10 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
 
         return signal_id, 'database'
 
-    # Kafka-based signaling (MySQL)
+    # Kafka-based signaling (MySQL + Oracle)
+    # Oracle uses Kafka channel to avoid needing INSERT on the data schema's signal table.
+    # The connector has signal.enabled.channels=source,kafka so both channels work,
+    # but writing to the Kafka signal topic requires no DB privileges.
     else:
         kafka_bootstrap = settings.DEBEZIUM_CONFIG.get(
             'KAFKA_BOOTSTRAP_SERVERS',

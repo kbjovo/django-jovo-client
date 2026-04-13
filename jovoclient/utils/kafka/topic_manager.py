@@ -57,7 +57,7 @@ def format_topic_name(db_config, table_name: str, topic_prefix: str, schema: str
         return f"{topic_prefix}.{db_config.database_name}.{table_name}"
 
 
-def format_signal_topic_name(db_config, topic_prefix: str) -> str:
+def format_signal_topic_name(db_config, topic_prefix: str, schema: str = None) -> str:
     """
     Get the debezium_signal table CDC topic name for a database.
 
@@ -80,10 +80,14 @@ def format_signal_topic_name(db_config, topic_prefix: str) -> str:
         return f"{topic_prefix}.{db_config.database_name}.dbo.debezium_signal"
 
     elif db_type == 'oracle':
-        schema = db_config.username.upper()
-        if schema.startswith('C##'):
-            schema = schema[3:]
-        return f"{topic_prefix}.{schema}.DEBEZIUM_SIGNAL"
+        # Use provided schema (data schema, e.g. APPUSER) if given,
+        # otherwise fall back to the connector username (stripped of C##).
+        if schema:
+            return f"{topic_prefix}.{schema.upper()}.DEBEZIUM_SIGNAL"
+        fallback = db_config.username.upper()
+        if fallback.startswith('C##'):
+            fallback = fallback[3:]
+        return f"{topic_prefix}.{fallback}.DEBEZIUM_SIGNAL"
 
     else:
         return f"{topic_prefix}.{db_config.database_name}.debezium_signal"
@@ -492,8 +496,14 @@ class KafkaTopicManager:
         # Add signal topic for incremental snapshots (Kafka-based signaling)
         topics.append(f"{topic_prefix}.signals")
 
-        # Add debezium_signal table CDC topic (for source-based signaling)
-        signal_data_topic = format_signal_topic_name(db_config, topic_prefix)
+        # Add debezium_signal table CDC topic (for source-based signaling).
+        # For Oracle: use the data schema (e.g. APPUSER) from table mappings, not the username.
+        oracle_data_schema = None
+        if db_config.db_type.lower() == 'oracle':
+            first_mapping = enabled_tables.first()
+            if first_mapping and first_mapping.source_schema:
+                oracle_data_schema = first_mapping.source_schema
+        signal_data_topic = format_signal_topic_name(db_config, topic_prefix, schema=oracle_data_schema)
         topics.append(signal_data_topic)
         logger.info(f"Added debezium_signal data topic: {signal_data_topic}")
 

@@ -109,6 +109,80 @@ def _check_postgresql_replication(db_instance) -> dict:
     return result
 
 
+def _check_oracle_replication(db_instance) -> dict:
+    """
+    Replication readiness check for an Oracle source (Debezium LogMiner CDC).
+    Delegates to oracle_setup.check_oracle_privileges and normalises the result
+    into the shared {privileges, all_granted, signal_table_sql, error} shape.
+    """
+    from client.utils.ddl.oracle_setup import check_oracle_privileges
+
+    raw = check_oracle_privileges(db_instance)
+
+    setup_sql = (
+        "-- Run as DBA (SYSDBA) on the Oracle source:\n\n"
+        "-- 1. Enable ARCHIVELOG mode (requires a DB restart):\n"
+        "--    SHUTDOWN IMMEDIATE;\n"
+        "--    STARTUP MOUNT;\n"
+        "--    ALTER DATABASE ARCHIVELOG;\n"
+        "--    ALTER DATABASE OPEN;\n\n"
+        "-- 2. Enable supplemental logging:\n"
+        "ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;\n\n"
+        "-- 3. Grant LogMiner privileges to the connector user:\n"
+        "GRANT CREATE SESSION TO {user};\n"
+        "GRANT LOGMINING TO {user};\n"
+        "GRANT SELECT ANY TABLE TO {user};\n"
+        "GRANT SELECT ANY TRANSACTION TO {user};\n"
+        "GRANT SELECT_CATALOG_ROLE TO {user};\n"
+        "GRANT EXECUTE_CATALOG_ROLE TO {user};\n"
+        "GRANT CREATE TABLE TO {user};\n\n"
+        "-- 3b. Explicit V$ view grants (required if SELECT_CATALOG_ROLE is not enough\n"
+        "--     for PDB-local users — Debezium queries V$DATABASE at startup):\n"
+        "GRANT SELECT ON SYS.V_$DATABASE TO {user};\n"
+        "GRANT SELECT ON SYS.V_$LOGFILE TO {user};\n"
+        "GRANT SELECT ON SYS.V_$ARCHIVED_LOG TO {user};\n"
+        "GRANT SELECT ON SYS.V_$TRANSACTION TO {user};\n\n"
+        "-- 4. Create the Debezium signal table in the connector user's schema:\n"
+        "CREATE TABLE {user}.DEBEZIUM_SIGNAL (\n"
+        "    ID   VARCHAR2(42)   NOT NULL PRIMARY KEY,\n"
+        "    TYPE VARCHAR2(32)   NOT NULL,\n"
+        "    DATA VARCHAR2(2048) NULL\n"
+        ");"
+    ).replace('{user}', (db_instance.username or 'connector_user').upper())
+
+    privileges = [
+        {'name': 'ARCHIVELOG mode enabled',
+         'granted': raw['archivelog_mode'],
+         'note': 'Database must be in ARCHIVELOG mode for LogMiner CDC'},
+        {'name': 'Supplemental logging enabled',
+         'granted': raw['supplemental_logging'],
+         'note': 'Run: ALTER DATABASE ADD SUPPLEMENTAL LOG DATA'},
+        {'name': 'LOGMINING privilege',
+         'granted': raw['has_logmining'],
+         'note': 'Run: GRANT LOGMINING TO {user}'.replace('{user}', (db_instance.username or '').upper())},
+        {'name': 'SELECT ANY TABLE',
+         'granted': raw['has_select_any_table'],
+         'note': 'Required to read source tables during snapshot and CDC'},
+        {'name': 'SELECT_CATALOG_ROLE',
+         'granted': raw['has_select_catalog'],
+         'note': 'Required to access V$ dynamic performance views'},
+        {'name': 'DEBEZIUM_SIGNAL table exists',
+         'granted': raw['signal_table_exists'],
+         'note': 'Required for incremental snapshots — see setup SQL below'},
+    ]
+
+    all_granted = all(p['granted'] for p in privileges)
+    is_cdb_user = (db_instance.username or '').upper().startswith('C##')
+
+    return {
+        'privileges': privileges,
+        'all_granted': all_granted,
+        'signal_table_sql': setup_sql,
+        'is_cdb_user': is_cdb_user,
+        'error': raw.get('error', ''),
+    }
+
+
 def _check_mssql_replication(db_instance) -> dict:
     """
     Replication readiness check for a SQL Server source.
@@ -255,6 +329,8 @@ class ClientDatabaseCreateView(CreateView):
                             replication = _check_postgresql_replication(temp_instance)
                         elif db_type == 'mssql':
                             replication = _check_mssql_replication(temp_instance)
+                        elif db_type == 'oracle':
+                            replication = _check_oracle_replication(temp_instance)
                         return JsonResponse({
                             'success': True,
                             'message': '✓ Connection test successful! The database is reachable and credentials are valid.',
@@ -366,6 +442,8 @@ class ClientDatabaseUpdateView(UpdateView):
                         replication = _check_postgresql_replication(temp)
                     elif db_type == 'mssql':
                         replication = _check_mssql_replication(temp)
+                    elif db_type == 'oracle':
+                        replication = _check_oracle_replication(temp)
                     return JsonResponse({
                         'success': True,
                         'message': '✓ Connection test successful! The database is reachable and credentials are valid.',

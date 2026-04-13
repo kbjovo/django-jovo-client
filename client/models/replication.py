@@ -279,6 +279,7 @@ class ReplicationConfig(models.Model):
     ]
 
     BATCH_INTERVAL_CHOICES = [
+        ('2m', 'Every 2 minutes'),
         ('5m', 'Every 5 minutes'),
         ('30m', 'Every 30 minutes'),
         ('2h', 'Every 2 hours'),

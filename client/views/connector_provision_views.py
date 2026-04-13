@@ -144,7 +144,13 @@ def provision_source(request, config_pk):
             # version to N+1 (creating a mismatch with the topics already created
             # for version N), re-create topics, and update the sink redundantly.
             table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-            tables_list = [tm.source_table for tm in table_mappings]
+            if database.db_type == 'oracle':
+                tables_list = [
+                    f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
+                    for tm in table_mappings
+                ]
+            else:
+                tables_list = [tm.source_table for tm in table_mappings]
 
             source_config = get_connector_config_for_database(
                 db_config=database,
@@ -174,7 +180,13 @@ def provision_source(request, config_pk):
 
         # ── CDC mode ─────────────────────────────────────────────────────────
         table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-        tables_list = [tm.source_table for tm in table_mappings]
+        if database.db_type == 'oracle':
+            tables_list = [
+                f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
+                for tm in table_mappings
+            ]
+        else:
+            tables_list = [tm.source_table for tm in table_mappings]
 
         source_config = get_connector_config_for_database(
             db_config=database,

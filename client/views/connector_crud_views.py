@@ -17,7 +17,7 @@ from django.contrib import messages
 from django.db import transaction
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, TableMapping, ConnectorHistory
-from client.utils.database_utils import get_table_schema, get_unassigned_tables
+from client.utils.database_utils import get_table_schema, get_unassigned_tables, check_table_cdc_status
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from jovoclient.utils.debezium.connector_templates import (
     generate_connector_name,
@@ -58,11 +58,14 @@ def ajax_get_table_schema(request, database_pk, table_name):
             }
             serializable_columns.append(serializable_col)
 
+        cdc_status = check_table_cdc_status(database, table_name)
+
         return JsonResponse({
             'success': True,
             'table_name': table_name,
             'columns': serializable_columns,
             'row_count': schema.get('row_count', 0),
+            'cdc_status': cdc_status,
         })
 
     except Exception as e:
@@ -98,7 +101,25 @@ def connector_add(request, database_pk):
     # Get unassigned tables (row counts loaded lazily via AJAX on accordion expand)
     try:
         unassigned_tables = get_unassigned_tables(database_pk)
-        tables_with_info = [{'name': t} for t in unassigned_tables]
+        db_type = database.db_type.lower()
+        tables_with_info = []
+        for t in unassigned_tables:
+            if db_type == 'oracle' and '.' in t:
+                schema_part, table_part = t.split('.', 1)
+                default_target = f"{schema_part}_{table_part}"
+                display_name = table_part
+            elif db_type in ('mssql', 'sqlserver') and '.' in t:
+                schema_part, table_part = t.split('.', 1)
+                default_target = f"{database.database_name}_{table_part}"
+                display_name = table_part
+            elif db_type == 'postgresql' and '.' in t:
+                _, table_part = t.split('.', 1)
+                default_target = f"{database.database_name}_{table_part}"
+                display_name = table_part
+            else:
+                default_target = f"{database.database_name}_{t}"
+                display_name = t
+            tables_with_info.append({'name': t, 'display_name': display_name, 'default_target': default_target})
 
     except Exception as e:
         logger.error(f"Error getting unassigned tables: {e}")
@@ -368,7 +389,16 @@ def connector_create_debezium(request, config_pk):
 
         # Get table list for this connector
         table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-        tables_list = [tm.source_table for tm in table_mappings]
+        # For Oracle, include source_schema so the connector gets SCHEMA.TABLE
+        # (e.g. APPUSER.CUSTOMERS) rather than bare table names that would be
+        # incorrectly prefixed with the connector user's schema (e.g. DEBEZIUM).
+        if database.db_type == 'oracle':
+            tables_list = [
+                f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
+                for tm in table_mappings
+            ]
+        else:
+            tables_list = [tm.source_table for tm in table_mappings]
 
         # Generate source connector config
         source_config = get_connector_config_for_database(
@@ -520,15 +550,33 @@ def connector_edit_tables(request, config_pk):
         for table_name in unassigned_table_names:
             if db_type == 'mysql':
                 default_target = f"{database.database_name}_{table_name}"
+                display_name = table_name
             elif db_type == 'postgresql':
-                default_target = f"{database.database_name}_{table_name}"
+                if '.' in table_name:
+                    _, tpart = table_name.split('.', 1)
+                    display_name = tpart
+                else:
+                    display_name = table_name
+                default_target = f"{database.database_name}_{display_name}"
             elif db_type in ('mssql', 'sqlserver'):
-                default_target = f"{database.database_name}_{table_name}"
+                if '.' in table_name:
+                    _, tpart = table_name.split('.', 1)
+                    display_name = tpart
+                else:
+                    display_name = table_name
+                default_target = f"{database.database_name}_{display_name}"
             elif db_type == 'oracle':
-                default_target = f"{database.username.upper()}_{table_name}"
+                if '.' in table_name:
+                    schema_part, table_part = table_name.split('.', 1)
+                    default_target = f"{schema_part}_{table_part}"
+                    display_name = table_part
+                else:
+                    default_target = f"{database.username.upper()}_{table_name}"
+                    display_name = table_name
             else:
                 default_target = table_name
-            unassigned_tables.append({'name': table_name, 'default_target': default_target})
+                display_name = table_name
+            unassigned_tables.append({'name': table_name, 'display_name': display_name, 'default_target': default_target})
 
     except Exception as e:
         logger.error(f"Error getting unassigned tables: {e}")

@@ -264,6 +264,7 @@
                                 id="batch_interval"
                                 class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
                             <option value="">Select interval...</option>
+                            <option value="2m" {% if replication_config.batch_interval == '2m' %}selected{% endif %}>Every 2 minutes</option>
                             <option value="5m" {% if replication_config.batch_interval == '5m' %}selected{% endif %}>Every 5 minutes</option>
                             <option value="15m" {% if replication_config.batch_interval == '15m' %}selected{% endif %}>Every 15 minutes</option>
                             <option value="30m" {% if replication_config.batch_interval == '30m' %}selected{% endif %}>Every 30 minutes</option>
@@ -526,12 +527,14 @@
 
                         <!-- Table Info -->
                         <div class="flex-1 min-w-0">
-                            <span class="font-semibold text-gray-900 dark:text-white">{{ table.name }}</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">{{ table.display_name }}</span>
                             <span class="ml-2 text-xs text-gray-500 dark:text-gray-400" id="add-row-count-{{ escaped_name }}"></span>
                         </div>
 
                         <!-- Column count indicator -->
                         <span class="text-xs text-gray-500 dark:text-gray-400" id="add-column-count-{{ escaped_name }}"></span>
+                        <!-- CDC status badge (Oracle / SQL Server) -->
+                        <span class="ml-2 text-xs font-medium hidden" id="add-cdc-badge-{{ escaped_name }}"></span>
                         {% endwith %}
                     </div>
 
@@ -575,6 +578,9 @@
                                 <!-- Columns populated via JavaScript -->
                             </div>
                         </div>
+
+                        <!-- CDC Status (Oracle / SQL Server — populated via JS) -->
+                        <div id="add-cdc-status-{{ escaped_name }}" class="hidden mt-3 pt-3 border-t border-gray-200 dark:border-gray-700"></div>
                     </div>
                     {% endwith %}
                 </div>
@@ -594,6 +600,57 @@
 </form>
 
 {% include "client/connectors/_provision_modal.html" %}
+
+<!-- Warning Modal (replaces alert()) -->
+<div id="warn-modal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4" onclick="document.getElementById('warn-modal').classList.add('hidden')">
+  <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden" style="width:100%;max-width:24rem;" onclick="event.stopPropagation()">
+    <div class="bg-yellow-500 px-5 py-3 flex items-center gap-3">
+      <svg class="w-5 h-5 text-white shrink-0" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+      </svg>
+      <h3 class="text-sm font-semibold text-white" id="warn-modal-title">Warning</h3>
+    </div>
+    <div class="px-5 py-4">
+      <p class="text-sm text-gray-700 dark:text-gray-300" id="warn-modal-message"></p>
+    </div>
+    <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900 flex justify-end">
+      <button type="button" onclick="document.getElementById('warn-modal').classList.add('hidden')"
+              class="px-4 py-1.5 text-xs font-semibold text-white bg-yellow-500 rounded-lg hover:bg-yellow-600 transition">
+        OK
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- CDC Issues Modal -->
+<div id="cdc-issues-modal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4" onclick="document.getElementById('cdc-issues-modal').classList.add('hidden')">
+  <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden" style="width:100%;max-width:32rem;" onclick="event.stopPropagation()">
+
+    <!-- Header -->
+    <div class="bg-red-600 px-5 py-3 flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-semibold text-white">CDC Requirements Not Met</h3>
+        <p class="text-red-100 text-xs mt-0.5">These tables cannot be added until issues are resolved</p>
+      </div>
+      <svg class="w-5 h-5 text-red-100 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+      </svg>
+    </div>
+
+    <!-- Body -->
+    <div class="px-5 py-4 space-y-3 max-h-96 overflow-y-auto" id="cdc-issues-modal-body">
+      <!-- Populated via JS -->
+    </div>
+
+    <!-- Footer -->
+    <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 flex justify-end">
+      <button type="button" onclick="document.getElementById('cdc-issues-modal').classList.add('hidden')"
+              class="px-4 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition">
+        Got it — I'll fix these first
+      </button>
+    </div>
+  </div>
+</div>
 
 <!-- Remove Tables Confirmation Modal -->
 <div id="remove-tables-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -754,6 +811,9 @@ function renderPrivilegeError(msg) {
 }
 {% endif %}
 // ── End PostgreSQL Privilege Check ────────────────────────────────────────────
+
+// ── End Oracle Privilege Check ────────────────────────────────────────────────
+
 let loadedAddTables = new Set();
 let allAddTablesSelected = false;
 
@@ -1005,6 +1065,113 @@ function escapeTableName(name) {
     return name.replace(/[.]/g, '');
 }
 
+// ── Per-table CDC status (add-tables accordion) ───────────────────────────────
+const addTableCdcStatus = {};
+
+function escapeHtmlEdit(str) {
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderAddCdcStatus(tableName, cdcStatus) {
+    if (!cdcStatus) return;
+    const escapedName = escapeTableName(tableName);
+    const container = document.getElementById(`add-cdc-status-${escapedName}`);
+    const badge     = document.getElementById(`add-cdc-badge-${escapedName}`);
+    const item      = document.querySelector(`.add-table-item[data-table-name="${tableName}"]`);
+    if (!container) return;
+
+    const allOk = cdcStatus.all_ok;
+    addTableCdcStatus[tableName] = { all_ok: allOk, checked: true };
+
+    // Update accordion border colour
+    if (item) {
+        item.classList.remove('border-gray-200', 'border-green-400', 'border-red-400');
+        item.classList.add(allOk ? 'border-green-400' : 'border-red-400');
+    }
+
+    // Show badge in header
+    if (badge) {
+        badge.classList.remove('hidden');
+        if (allOk) {
+            badge.className = 'ml-2 text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
+            badge.textContent = '✓ CDC ready';
+        } else {
+            badge.className = 'ml-2 text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+            badge.textContent = '✗ CDC issues';
+        }
+    }
+
+    container.classList.remove('hidden');
+    const title = cdcStatus.db_type === 'oracle' ? 'Per-table CDC requirements' : 'SQL Server CDC';
+
+    const checksHtml = cdcStatus.checks.map(c => {
+        const color = c.ok ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+        const icon  = c.ok ? '✓' : '✗';
+        const noteHtml = (!c.ok && c.note)
+            ? `<span class="block text-xs text-gray-500 dark:text-gray-400 ml-5 mt-0.5 font-mono">${escapeHtmlEdit(c.note)}</span>`
+            : (c.ok && c.note ? `<span class="block text-xs text-gray-400 ml-5 mt-0.5">${escapeHtmlEdit(c.note)}</span>` : '');
+        return `<div class="flex flex-col">
+            <div class="flex items-center gap-2 text-sm ${color}">
+                <span class="w-4 shrink-0">${icon}</span>
+                <span>${escapeHtmlEdit(c.name)}</span>
+            </div>${noteHtml}</div>`;
+    }).join('');
+
+    let fixBlock = '';
+    if (!allOk && cdcStatus.fix_sql) {
+        fixBlock = `
+        <div class="mt-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded p-2">
+            <p class="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Run as DBA to fix:</p>
+            <pre class="text-xs text-gray-700 dark:text-gray-300 font-mono whitespace-pre-wrap">${escapeHtmlEdit(cdcStatus.fix_sql)}</pre>
+        </div>`;
+    }
+
+    container.innerHTML = `
+        <p class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">${title}</p>
+        <div class="space-y-1">${checksHtml}</div>
+        ${fixBlock}`;
+}
+function showWarning(title, message) {
+    document.getElementById('warn-modal-title').textContent = title;
+    document.getElementById('warn-modal-message').textContent = message;
+    document.getElementById('warn-modal').classList.remove('hidden');
+}
+
+function showCdcIssuesModal(failedTableNames) {
+    const body = document.getElementById('cdc-issues-modal-body');
+    body.innerHTML = failedTableNames.map(tableName => {
+        const status = addTableCdcStatus[tableName];
+        const checksHtml = (status && status.checks)
+            ? status.checks.filter(c => !c.ok).map(c => {
+                const fixHtml = c.note
+                    ? `<pre class="mt-1 ml-5 text-xs text-gray-600 dark:text-gray-400 font-mono whitespace-pre-wrap bg-gray-100 dark:bg-gray-900 rounded px-2 py-1">${escapeHtmlEdit(c.note)}</pre>`
+                    : '';
+                return `<li class="flex flex-col gap-0.5">
+                    <span class="flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+                        <svg class="w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+                        ${escapeHtmlEdit(c.name)}
+                    </span>${fixHtml}
+                </li>`;
+              }).join('')
+            : '<li class="text-xs text-gray-500">Expand the table row to see details.</li>';
+
+        return `<div class="border border-red-200 dark:border-red-800 rounded-lg overflow-hidden">
+            <div class="bg-red-50 dark:bg-red-900/20 px-3 py-2 flex items-center gap-2">
+                <svg class="w-4 h-4 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 6h18M3 14h18M3 18h18"/>
+                </svg>
+                <span class="text-sm font-semibold text-red-700 dark:text-red-300">${escapeHtmlEdit(tableName)}</span>
+            </div>
+            <ul class="px-3 py-2 space-y-2">${checksHtml}</ul>
+        </div>`;
+    }).join('');
+
+    document.getElementById('cdc-issues-modal').classList.remove('hidden');
+}
+// ── End per-table CDC status ──────────────────────────────────────────────────
+
 // Toggle connector settings visibility
 function toggleConnectorSettings() {
     const content = document.getElementById('connector-settings-content');
@@ -1248,6 +1415,9 @@ async function loadAddTableSchema(tableName) {
 
         // Render columns
         renderAddColumns(tableName, data.columns);
+
+        // Render per-table CDC status (Oracle / SQL Server)
+        if (data.cdc_status) renderAddCdcStatus(tableName, data.cdc_status);
 
         // Mark as loaded
         loadedAddTables.add(tableName);
@@ -1525,16 +1695,25 @@ document.getElementById('edit-connector-form').addEventListener('submit', async 
         return;
     }
 
+    // ── Block if any table being added has CDC failures ───────────────
+    const cdcFailed = addChecked
+        .map(cb => cb.dataset.tableName)
+        .filter(n => { const s = addTableCdcStatus[n]; return s && s.checked && !s.all_ok; });
+    if (cdcFailed.length > 0) {
+        showCdcIssuesModal(cdcFailed);
+        return;
+    }
+
     // ── Guard: cannot remove all tables unless new ones are being added ──
     const remainingTables = CURRENT_TABLE_COUNT - removeTables.length;
     if (remainingTables === 0 && addTables.length === 0) {
-        alert('Cannot remove all tables. Connectors must have at least 1 table.');
+        showWarning('Cannot remove all tables', 'A connector must have at least one table. Delete the connector instead.');
         return;
     }
 
     const totalAfter = remainingTables + addTables.length;
     if (totalAfter > MAX_TABLES_PER_CONNECTOR) {
-        alert(`Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector. After changes you'd have ${totalAfter}.`);
+        showWarning('Too many tables', `Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector. After these changes you'd have ${totalAfter}. Please reduce the selection.`);
         return;
     }
 

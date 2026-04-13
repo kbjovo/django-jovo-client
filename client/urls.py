@@ -58,6 +58,9 @@ from .views.connector_action_views import (
     sink_restart_failed_tasks,
     sink_restart_all_tasks,
     check_postgresql_privileges_api,
+    check_oracle_privileges_api,
+    apply_oracle_privileges_api,
+    resync_table,
 )
 
 # Import provision/edit step endpoints (modal AJAX flow)
@@ -209,10 +212,24 @@ urlpatterns = [
          sink_restart_all_tasks,
          name='sink_restart_all_tasks'),
 
+    path('connector/<int:config_pk>/resync-table/',
+         resync_table,
+         name='resync_table'),
+
     # AJAX: PostgreSQL privilege check (used by connector_add form)
     path('database/<int:database_pk>/check-postgresql-privileges/',
          check_postgresql_privileges_api,
          name='check_postgresql_privileges'),
+
+    # AJAX: Oracle privilege check (used by connector_add form)
+    path('database/<int:database_pk>/check-oracle-privileges/',
+         check_oracle_privileges_api,
+         name='check_oracle_privileges'),
+
+    # AJAX: Oracle privilege apply (connects as SYSDBA and runs grants)
+    path('database/<int:database_pk>/apply-oracle-privileges/',
+         apply_oracle_privileges_api,
+         name='apply_oracle_privileges'),
 
     # AJAX: Table row counts (source + target)
     path('connector/<int:config_pk>/table-rows/',

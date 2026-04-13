@@ -19,6 +19,7 @@ DB_TYPE_TO_MBEAN_TYPE = {
     'mysql': 'mysql',
     'postgresql': 'postgres',
     'mssql': 'sql_server',
+    'oracle': 'oracle',
 }
 
 
@@ -47,7 +48,7 @@ class JolokiaClient:
         """Build a Debezium MBean object name.
 
         Args:
-            db_type: Database type key (mysql, postgresql, mssql).
+            db_type: Database type key (mysql, postgresql, mssql, oracle).
             context: MBean context (snapshot, incremental-snapshot, streaming).
             server: The topic.prefix / server name of the connector.
 

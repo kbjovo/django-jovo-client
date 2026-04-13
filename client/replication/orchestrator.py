@@ -195,6 +195,20 @@ class ReplicationOrchestrator:
             elif db_config.db_type.lower() in ('postgresql', 'postgres'):
                 self._log_info("ℹ️ DDL sync disabled for this connector")
 
+            # For Oracle: ensure signal table exists BEFORE connector starts
+            if db_config.db_type.lower() == 'oracle':
+                try:
+                    from client.utils.ddl.oracle_setup import create_signal_table
+                    created, msg = create_signal_table(db_config)
+                    if created:
+                        self._log_info(f"✓ Oracle signal table created: {msg}")
+                    elif "already exists" in msg:
+                        self._log_info("✓ Oracle signal table already exists")
+                    else:
+                        self._log_warning(f"⚠️ Could not create Oracle signal table: {msg}")
+                except Exception as e:
+                    self._log_warning(f"⚠️ Oracle signal table setup error: {e}")
+
             self._log_info("STEP 5/5: Creating fresh source connector...")
             self._log_info("  → Snapshot mode: 'initial' (full snapshot + CDC streaming)")
             self._log_info("  → Source: {}.{}".format(
@@ -997,9 +1011,14 @@ class ReplicationOrchestrator:
                 next_version = self.config.connector_version
 
             # Generate configuration
-            enabled_tables = list(
-                self.config.table_mappings.filter(is_enabled=True).values_list('source_table', flat=True)
-            )
+            enabled_mappings_qs = self.config.table_mappings.filter(is_enabled=True)
+            if db_config.db_type == 'oracle':
+                enabled_tables = [
+                    f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
+                    for tm in enabled_mappings_qs
+                ]
+            else:
+                enabled_tables = list(enabled_mappings_qs.values_list('source_table', flat=True))
 
             if not enabled_tables:
                 return False, "No tables enabled for replication"
@@ -1103,8 +1122,61 @@ class ReplicationOrchestrator:
             return False, error_msg
 
     # ==========================================
-    # Table Management (Add/Remove)
+    # Table Management (Add/Remove/Resync)
     # ==========================================
+
+    def resync_table(self, table_name: str) -> Tuple[bool, str]:
+        """
+        Manually resync a single table after a source TRUNCATE + repopulate.
+
+        Use this for PostgreSQL and SQL Server sources where TRUNCATE events are
+        not automatically detected by the DDL processor (MySQL and Oracle handle
+        this automatically via the schema history topic).
+
+        Steps:
+          1. Truncate target table (clears stale rows, keeps schema).
+          2. Send incremental snapshot signal so Debezium re-reads the source.
+
+        Args:
+            table_name: Source table name (unqualified, e.g. 'orders')
+
+        Returns:
+            Tuple[bool, str]: (success, message)
+        """
+        from client.utils.table_creator import truncate_tables_for_mappings
+        from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
+
+        table_mapping = self.config.table_mappings.filter(
+            source_table=table_name,
+            is_enabled=True
+        ).first()
+        if not table_mapping:
+            return False, f"No enabled mapping found for table '{table_name}'"
+
+        target_db = self.config.client_database.client.client_databases.filter(
+            is_target=True
+        ).first()
+        if not target_db:
+            return False, "No target database configured"
+
+        # Step 1: truncate target
+        self._log_info(f"Resync '{table_name}': truncating target table '{table_mapping.target_table}'")
+        ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
+        if not ok:
+            return False, f"Failed to truncate target table: {msg}"
+
+        # Step 2: incremental snapshot signal
+        self._log_info(f"Resync '{table_name}': sending incremental snapshot signal")
+        try:
+            signal_id, method = send_incremental_snapshot_signal(
+                self.config.client_database,
+                self.config,
+                [table_name]
+            )
+        except Exception as e:
+            return False, f"Target truncated but snapshot signal failed: {e}"
+
+        return True, f"Resync triggered for '{table_name}' (signal {signal_id} via {method})"
 
     def remove_tables(self, table_names: list, target_action: str = 'truncate', allow_empty: bool = False) -> Tuple[bool, str, list]:
         """
@@ -1236,10 +1308,14 @@ class ReplicationOrchestrator:
             })
 
             # Check if any tables remain
-            remaining_tables = list(
-                self.config.table_mappings.filter(is_enabled=True)
-                .values_list('source_table', flat=True)
-            )
+            remaining_mappings = self.config.table_mappings.filter(is_enabled=True)
+            if db_config.db_type == 'oracle':
+                remaining_tables = [
+                    f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
+                    for tm in remaining_mappings
+                ]
+            else:
+                remaining_tables = list(remaining_mappings.values_list('source_table', flat=True))
 
             if not remaining_tables:
                 if not allow_empty:
@@ -1536,10 +1612,14 @@ class ReplicationOrchestrator:
             # For batch mode: check if connector is paused and resume it first
             was_paused = self._resume_if_paused()
 
-            all_tables = list(
-                self.config.table_mappings.filter(is_enabled=True)
-                .values_list('source_table', flat=True)
-            )
+            enabled_mappings = self.config.table_mappings.filter(is_enabled=True)
+            if db_config.db_type == 'oracle':
+                all_tables = [
+                    f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
+                    for tm in enabled_mappings
+                ]
+            else:
+                all_tables = list(enabled_mappings.values_list('source_table', flat=True))
 
             # Guard: never send an empty table list to the connector template.
             # An empty tables_whitelist causes the template to omit table.include.list
@@ -1837,6 +1917,17 @@ class ReplicationOrchestrator:
         overall_health = self._calculate_overall_health(connector_status, sink_status)
         snapshot_progress = self._get_snapshot_progress()
 
+        # Lazy cleanup: if the connector is PAUSED but batch_sync_started_at is still
+        # set (e.g. pause_connector() failed to save, or a crash left it stale), clear
+        # it now so the UI doesn't keep showing "Syncing" for a paused connector.
+        if (
+            self.config.processing_mode == 'batch'
+            and self.config.batch_sync_started_at
+            and connector_status.get('state') == 'PAUSED'
+        ):
+            self.config.batch_sync_started_at = None
+            self.config.save(update_fields=['batch_sync_started_at'])
+
         return {
             'overall': overall_health,
             'source_connector': connector_status,
@@ -2090,7 +2181,18 @@ class ReplicationOrchestrator:
             if success:
                 self.config.connector_state = 'RUNNING'
                 if self.config.processing_mode == 'batch':
-                    self.config.batch_sync_started_at = timezone.now()
+                    now = timezone.now()
+                    self.config.batch_sync_started_at = now
+                    # Advance next_batch_run to estimated next cycle:
+                    # sync_start + max_catchup + interval, so the UI shows
+                    # when the *next* sync will happen rather than the current
+                    # run's scheduled time.
+                    if self.config.batch_max_catchup_minutes and self.config.batch_interval:
+                        max_seconds = self.config.batch_max_catchup_minutes * 60
+                        interval_seconds = self._get_batch_interval_seconds()
+                        self.config.next_batch_run = now + timezone.timedelta(
+                            seconds=max_seconds + interval_seconds
+                        )
                 self.config.save()
                 self._log_info(f"✓ Connector resumed: {self.config.connector_name}")
                 return True, "Connector resumed successfully"
@@ -2302,6 +2404,7 @@ class ReplicationOrchestrator:
             Interval in seconds
         """
         interval_map = {
+            '2m': 2 * 60,         # 2 minutes
             '5m': 5 * 60,         # 5 minutes
             '15m': 15 * 60,       # 15 minutes
             '30m': 30 * 60,       # 30 minutes
@@ -2702,3 +2805,5 @@ class ReplicationOrchestrator:
             self._log_error(error_msg)
             self._update_status('error', error_msg)
             return False, error_msg
+
+

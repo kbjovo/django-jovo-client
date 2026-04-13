@@ -4,7 +4,11 @@
 {% block title %}Monitor - {{ replication_config.connector_name }}{% endblock %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto" x-data="{ deleteModal: { open: false, pk: null, name: '', tables: 0, confirmed: false, truncate: false, drop: false, loading: false } }">
+<div class="max-w-7xl mx-auto"
+     x-data="{ deleteModal: { open: false, pk: null, name: '', tables: 0, confirmed: false, truncate: false, drop: false, loading: false }, resyncModal: { open: false, tables: [], loading: false } }"
+     @open-resync-modal.window="resyncModal = { open: true, tables: $event.detail.tables, loading: false }"
+     @close-resync-modal.window="resyncModal.open = false"
+     @resync-loading.window="resyncModal.loading = $event.detail"
 
   <!-- Header -->
   <div class="flex justify-between items-center mb-6">
@@ -281,6 +285,14 @@
           <span id="table-rows-count" class="text-xs text-gray-500 dark:text-gray-400"></span>
         </div>
         <div class="flex items-center gap-2">
+          <button id="btn-resync-selected" @click.stop="openResyncModal()" disabled
+            title="Resync selected tables"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-blue-400 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-40 disabled:cursor-not-allowed transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            Resync Selected
+          </button>
           <button id="btn-refresh-rows" @click.stop="fetchTableRows()" title="Refresh row counts"
             class="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition">
             <svg id="refresh-rows-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -362,6 +374,72 @@
 
   <!-- Delete Modal -->
   {% include "client/connectors/_delete_modal.html" %}
+
+  <!-- Resync Table Modal -->
+  <div x-show="resyncModal.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4"
+       @keydown.escape.window="if (!resyncModal.loading) resyncModal.open = false">
+    <div x-show="resyncModal.open" x-transition.opacity class="fixed inset-0 bg-black/50"
+         @click="if (!resyncModal.loading) resyncModal.open = false"></div>
+
+    <div x-show="resyncModal.open" x-transition @click.stop
+         class="relative w-full max-w-md bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden">
+
+      <!-- Header -->
+      <div class="bg-blue-600 px-5 py-3 flex items-center justify-between">
+        <div>
+          <h3 class="text-sm font-semibold text-white" x-text="resyncModal.tables.length === 1 ? 'Resync Table' : 'Resync ' + resyncModal.tables.length + ' Tables'"></h3>
+          <p class="text-blue-100 text-xs" x-show="resyncModal.tables.length === 1" x-text="resyncModal.tables[0]" class="font-mono"></p>
+        </div>
+        <button @click="resyncModal.open = false" :disabled="resyncModal.loading"
+                class="text-blue-200 hover:text-white disabled:opacity-50">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="px-5 py-4 space-y-3 text-xs text-gray-700 dark:text-gray-300">
+        <p x-show="resyncModal.tables.length === 1">
+          This will perform two steps on table <span class="font-mono font-semibold text-gray-900 dark:text-white" x-text="resyncModal.tables[0]"></span>:
+        </p>
+        <p x-show="resyncModal.tables.length > 1">
+          This will perform two steps on each of the <strong x-text="resyncModal.tables.length"></strong> selected tables:
+        </p>
+        <!-- Multi-table list -->
+        <ul x-show="resyncModal.tables.length > 1" class="max-h-32 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 divide-y divide-gray-100 dark:divide-gray-700">
+          <template x-for="(t, i) in resyncModal.tables" :key="i">
+            <li class="px-3 py-1.5 font-mono text-gray-700 dark:text-gray-300 text-xs" x-text="(i+1) + '. ' + t"></li>
+          </template>
+        </ul>
+        <ol class="list-decimal list-inside space-y-1 text-gray-600 dark:text-gray-400">
+          <li><strong class="text-gray-800 dark:text-gray-200">Truncate</strong> the target table — clears stale rows, keeps structure.</li>
+          <li><strong class="text-gray-800 dark:text-gray-200">Re-snapshot</strong> from source — Debezium re-reads all current rows.</li>
+        </ol>
+        <div class="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400">
+          <svg class="w-3.5 h-3.5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+          </svg>
+          <span x-text="resyncModal.tables.length === 1 ? 'The target table will be empty until the snapshot completes.' : 'Each target table will be empty until its snapshot completes.'"></span>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 flex justify-end gap-2">
+        <button type="button" @click="resyncModal.open = false" :disabled="resyncModal.loading"
+                class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+          Cancel
+        </button>
+        <button type="button" @click="confirmResync(resyncModal.tables)" :disabled="resyncModal.loading"
+                class="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+          <svg x-show="resyncModal.loading" class="animate-spin w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          <span x-text="resyncModal.loading ? 'Resyncing...' : (resyncModal.tables.length === 1 ? 'Resync Table' : 'Resync ' + resyncModal.tables.length + ' Tables')"></span>
+        </button>
+      </div>
+    </div>
+  </div>
 
 </div>
 
@@ -523,8 +601,19 @@ function fetchTableRows() {
           + 'No target database configured for this client</div>';
       }
 
+      const showResync = ['postgresql', 'postgres', 'mssql', 'sqlserver', 'mysql', 'oracle'].includes('{{ database.db_type|lower }}');
+
+      // Reset selection when table is refreshed
+      _selectedTables = [];
+      updateResyncBtn();
+
+      const selectAllCheckbox = showResync
+        ? '<th class="py-2 pr-2 text-left w-6"><input type="checkbox" id="select-all-tables" onchange="toggleSelectAll(this)" class="w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-blue-600 cursor-pointer"></th>'
+        : '';
+
       let html = warnings + '<table class="w-full text-sm">'
         + '<thead><tr class="text-xs text-gray-500 dark:text-gray-400 uppercase border-b border-gray-200 dark:border-gray-700">'
+        + selectAllCheckbox
         + '<th class="py-2 pr-2 text-left w-8">#</th>'
         + '<th class="py-2 pr-2 text-left">Source Table</th>'
         + '<th class="py-2 pr-2 text-left">Target Table</th>'
@@ -533,7 +622,15 @@ function fetchTableRows() {
         + '</tr></thead><tbody>';
 
       tables.forEach((t, i) => {
+        const escapedTable = t.source_table.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const checkboxCell = showResync
+          ? '<td class="py-2 pr-2">'
+            + '<input type="checkbox" class="table-row-checkbox w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-blue-600 cursor-pointer"'
+            + ' data-table=\'' + escapedTable + '\' onchange="toggleTableSelect(this)">'
+            + '</td>'
+          : '';
         html += '<tr style="border-bottom:1px solid rgba(107,114,128,0.2)" onmouseover="this.style.background=\'rgba(107,114,128,0.15)\'" onmouseout="this.style.background=\'\'">'
+          + checkboxCell
           + '<td class="py-2 pr-2 text-gray-400 dark:text-gray-500">' + (i + 1) + '</td>'
           + '<td class="py-2 pr-2 font-mono text-gray-900 dark:text-white truncate max-w-[200px]" title="' + t.source_table + '">' + t.source_table + '</td>'
           + '<td class="py-2 pr-2 font-mono text-gray-600 dark:text-gray-400 truncate max-w-[200px]" title="' + t.target_table + '">' + t.target_table + '</td>'
@@ -554,6 +651,69 @@ function fetchTableRows() {
 
 // Auto-load row counts on page load
 fetchTableRows();
+
+// --- Table selection state ---
+let _selectedTables = [];
+
+function updateResyncBtn() {
+  const btn = document.getElementById('btn-resync-selected');
+  if (btn) btn.disabled = _selectedTables.length === 0;
+}
+
+function toggleSelectAll(checkbox) {
+  const checkboxes = document.querySelectorAll('.table-row-checkbox');
+  checkboxes.forEach(cb => { cb.checked = checkbox.checked; });
+  _selectedTables = checkbox.checked ? Array.from(checkboxes).map(cb => cb.dataset.table) : [];
+  updateResyncBtn();
+}
+
+function toggleTableSelect(checkbox) {
+  const table = checkbox.dataset.table;
+  if (checkbox.checked) {
+    if (!_selectedTables.includes(table)) _selectedTables.push(table);
+  } else {
+    _selectedTables = _selectedTables.filter(t => t !== table);
+  }
+  const allCbs = document.querySelectorAll('.table-row-checkbox');
+  const selectAll = document.getElementById('select-all-tables');
+  if (selectAll) {
+    selectAll.checked = allCbs.length > 0 && _selectedTables.length === allCbs.length;
+    selectAll.indeterminate = _selectedTables.length > 0 && _selectedTables.length < allCbs.length;
+  }
+  updateResyncBtn();
+}
+
+function openResyncModal() {
+  if (_selectedTables.length === 0) return;
+  window.dispatchEvent(new CustomEvent('open-resync-modal', { detail: { tables: [..._selectedTables] } }));
+}
+
+async function confirmResync(tables) {
+  window.dispatchEvent(new CustomEvent('resync-loading', { detail: true }));
+  const errors = [];
+  for (const tableName of tables) {
+    try {
+      const r = await fetch('{% url "resync_table" replication_config.pk %}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}'},
+        body: JSON.stringify({table: tableName}),
+      });
+      const data = await r.json();
+      if (!data.success) errors.push(tableName + ': ' + (data.error || data.message || 'Unknown error'));
+    } catch (err) {
+      errors.push(tableName + ': ' + String(err));
+    }
+  }
+  window.dispatchEvent(new CustomEvent('resync-loading', { detail: false }));
+  window.dispatchEvent(new CustomEvent('close-resync-modal'));
+  if (errors.length) {
+    showErrorModal('Resync failed', errors.join('\n'));
+  } else {
+    _selectedTables = [];
+    updateResyncBtn();
+    setTimeout(fetchTableRows, 3000);
+  }
+}
 
 (function() {
   const STATUS_URL = '{% url "connector_status_api" replication_config.pk %}';
@@ -619,16 +779,19 @@ fetchTableRows();
 
     const now = Date.now();
 
-    // Confirmed syncing: server recorded a start time (set by resume_connector),
-    // AND we are still within the max catchup window from that start.
-    // Without the time bound, a stale batchSyncStartedAt (not yet cleared by the
-    // next 30s poll) keeps the UI locked in "Syncing..." past the end of the sync,
-    // then falls through to the "No schedule" branch instead of showing the
-    // next-countdown — which is the resume→pause display bug.
-    const confirmedSyncing = !!batchSyncStartedAt
-      && now < batchSyncStartedAt.getTime() + batchMaxCatchupMs;
-    // Predicted syncing: we're inside the expected sync window based on schedule.
-    const predictedSyncing = !confirmedSyncing && batchNextRun
+    // Connector state is the ground truth (sourced from Debezium via the DOM element
+    // that is seeded by the Django template on page load and updated by every poll).
+    const sourceStateEl = document.getElementById('source-state');
+    const isConnectorRunning = sourceStateEl?.textContent?.trim() === 'RUNNING';
+
+    // Confirmed syncing: connector is RUNNING (Debezium) AND server recorded a start time.
+    // Connector state is the sole arbiter — if PAUSED, the sync is over regardless of
+    // what batch_sync_started_at says (stale DB value cleared lazily by the backend).
+    const confirmedSyncing = isConnectorRunning && !!batchSyncStartedAt;
+
+    // Predicted syncing: no confirmed start time yet but connector is RUNNING and we're
+    // inside the expected window (e.g. very first moment of a new sync cycle).
+    const predictedSyncing = !confirmedSyncing && isConnectorRunning && batchNextRun
       && now >= batchNextRun.getTime()
       && now < batchNextRun.getTime() + batchMaxCatchupMs;
 

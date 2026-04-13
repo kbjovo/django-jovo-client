@@ -147,7 +147,7 @@
                     Sink Required
                   </button>
                 {% elif db.connection_status == 'success' %}
-                  {% with connector_count=db.replication_configs.count %}
+                  {% with connector_count=db.get_source_connectors.count %}
                     {% if connector_count > 0 %}
                       <a
                         href="{% url 'connector_list' db.pk %}"

@@ -123,6 +123,7 @@
                                 id="batch_interval"
                                 class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
                             <option value="">Select interval...</option>
+                            <option value="2m">Every 2 minutes</option>
                             <option value="5m">Every 5 minutes</option>
                             <option value="15m">Every 15 minutes</option>
                             <option value="30m">Every 30 minutes</option>
@@ -219,6 +220,21 @@
                 <p class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">Ask your DBA to run one of:</p>
                 <pre class="text-xs text-gray-600 dark:text-gray-400 font-mono whitespace-pre-wrap" id="pg-grant-sql"></pre>
             </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if database.db_type|lower == 'oracle' %}
+    <!-- Oracle DDL Sync note (replaces the full Oracle CDC requirements panel — per-table checks are now inline) -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden" id="oracle-feature-panel">
+        <div class="bg-orange-700 text-white px-4 py-2">
+            <h5 class="text-base font-semibold">Oracle CDC — LogMiner</h5>
+        </div>
+        <div class="p-3">
+            <p class="text-sm text-blue-900 dark:text-blue-100 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg px-3 py-2">
+                <strong>DDL Sync:</strong> Oracle schema changes (ALTER TABLE, ADD/DROP COLUMN) are captured automatically via the LogMiner DDL processor — no extra configuration needed.
+                Per-table SELECT privilege and supplemental logging are checked inline when you expand each table below.
+            </p>
         </div>
     </div>
     {% endif %}
@@ -500,13 +516,15 @@
 
                         <!-- Table Info -->
                         <div class="flex-1">
-                            <span class="font-semibold text-gray-900 dark:text-white">{{ table.name }}</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">{{ table.display_name }}</span>
                             <span class="ml-3 text-xs text-gray-400 dark:text-gray-500"
                                   id="row-count-{{ escaped_name }}">—</span>
                         </div>
 
                         <!-- Column count indicator (loaded dynamically) -->
                         <span class="text-xs text-gray-500 dark:text-gray-400" id="column-count-{{ escaped_name }}"></span>
+                        <!-- CDC status badge (Oracle / SQL Server) -->
+                        <span class="ml-2 text-xs font-medium hidden" id="cdc-badge-{{ escaped_name }}"></span>
                     </div>
 
                     <!-- Accordion Content (Columns Configuration) -->
@@ -521,10 +539,10 @@
                                 </label>
                                 <input type="text"
                                        name="target_table_{{ table.name }}"
-                                       value="{{ database.database_name }}_{{ table.name }}"
+                                       value="{{ table.default_target }}"
                                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
                                        placeholder="Target table name">
-                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Default: {database}_{table}</p>
+                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Default: {{ table.default_target }}</p>
                             </div>
                         </div>
 
@@ -553,6 +571,10 @@
                                 <!-- Columns populated via JavaScript -->
                             </div>
                         </div>
+
+                        <!-- CDC Status (Oracle / SQL Server — populated via JS after AJAX) -->
+                        <div id="cdc-status-{{ escaped_name }}" class="hidden mt-3 pt-3 border-t border-gray-200 dark:border-gray-700"></div>
+
                         {% endwith %}
                     </div>
                 </div>
@@ -571,6 +593,57 @@
 </form>
 
 {% include "client/connectors/_provision_modal.html" %}
+
+<!-- Warning Modal (replaces alert()) -->
+<div id="warn-modal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4" onclick="document.getElementById('warn-modal').classList.add('hidden')">
+  <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden" style="width:100%;max-width:24rem;" onclick="event.stopPropagation()">
+    <div class="bg-yellow-500 px-5 py-3 flex items-center gap-3">
+      <svg class="w-5 h-5 text-white shrink-0" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+      </svg>
+      <h3 class="text-sm font-semibold text-white" id="warn-modal-title">Warning</h3>
+    </div>
+    <div class="px-5 py-4">
+      <p class="text-sm text-gray-700 dark:text-gray-300" id="warn-modal-message"></p>
+    </div>
+    <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900 flex justify-end">
+      <button type="button" onclick="document.getElementById('warn-modal').classList.add('hidden')"
+              class="px-4 py-1.5 text-xs font-semibold text-white bg-yellow-500 rounded-lg hover:bg-yellow-600 transition">
+        OK
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- CDC Issues Modal -->
+<div id="cdc-issues-modal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4" onclick="document.getElementById('cdc-issues-modal').classList.add('hidden')">
+  <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden" style="width:100%;max-width:32rem;" onclick="event.stopPropagation()">
+
+    <!-- Header -->
+    <div class="bg-red-600 px-5 py-3 flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-semibold text-white">CDC Requirements Not Met</h3>
+        <p class="text-red-100 text-xs mt-0.5">Connector cannot be created until these are resolved</p>
+      </div>
+      <svg class="w-5 h-5 text-red-100 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+      </svg>
+    </div>
+
+    <!-- Body -->
+    <div class="px-5 py-4 space-y-3 max-h-96 overflow-y-auto" id="cdc-issues-modal-body">
+      <!-- Populated via JS -->
+    </div>
+
+    <!-- Footer -->
+    <div class="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 flex justify-end">
+      <button type="button" onclick="document.getElementById('cdc-issues-modal').classList.add('hidden')"
+              class="px-4 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition">
+        Got it — I'll fix these first
+      </button>
+    </div>
+  </div>
+</div>
 
 <script>
 const DATABASE_ID = {{ database.pk }};
@@ -663,6 +736,122 @@ function renderPrivilegeError(msg) {
 }
 {% endif %}
 // ── End PostgreSQL Privilege Check ────────────────────────────────────────────
+
+// ── Per-table CDC status ──────────────────────────────────────────────────────
+// Tracks {tableName: {all_ok, checked}} so submit validation can block on failures.
+const tableCdcStatus = {};
+
+function renderCdcStatus(tableName, cdcStatus) {
+    if (!cdcStatus) return;  // MySQL / PostgreSQL — no per-table checks
+    const escapedName = escapeTableName(tableName);
+    const container = document.getElementById(`cdc-status-${escapedName}`);
+    const badge     = document.getElementById(`cdc-badge-${escapedName}`);
+    const item      = document.querySelector(`.table-accordion-item[data-table-name="${tableName}"]`);
+    if (!container) return;
+
+    const allOk = cdcStatus.all_ok;
+    tableCdcStatus[tableName] = { all_ok: allOk, checked: true };
+
+    // Update accordion border colour
+    if (item) {
+        item.classList.remove('border-gray-200', 'border-green-400', 'border-red-400');
+        item.classList.add(allOk ? 'border-green-400' : 'border-red-400');
+    }
+
+    // Show badge in header
+    if (badge) {
+        badge.classList.remove('hidden');
+        if (allOk) {
+            badge.className = 'ml-2 text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
+            badge.textContent = '✓ CDC ready';
+        } else {
+            badge.className = 'ml-2 text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+            badge.textContent = '✗ CDC issues';
+        }
+    }
+
+    // Render checks inside accordion
+    container.classList.remove('hidden');
+    const dbType = cdcStatus.db_type;
+    const title  = dbType === 'oracle' ? 'Per-table CDC requirements' : 'SQL Server CDC';
+
+    let checksHtml = cdcStatus.checks.map(c => {
+        const color = c.ok ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+        const icon  = c.ok ? '✓' : '✗';
+        const noteHtml = (!c.ok && c.note)
+            ? `<span class="block text-xs text-gray-500 dark:text-gray-400 ml-5 mt-0.5 font-mono">${escapeHtml(c.note)}</span>`
+            : (c.ok && c.note ? `<span class="block text-xs text-gray-400 ml-5 mt-0.5">${escapeHtml(c.note)}</span>` : '');
+        return `<div class="flex flex-col">
+            <div class="flex items-center gap-2 text-sm ${color}">
+                <span class="w-4 shrink-0">${icon}</span>
+                <span>${escapeHtml(c.name)}</span>
+            </div>${noteHtml}</div>`;
+    }).join('');
+
+    let fixBlock = '';
+    if (!allOk && cdcStatus.fix_sql) {
+        fixBlock = `
+        <div class="mt-2 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded p-2">
+            <p class="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Run as DBA to fix:</p>
+            <pre class="text-xs text-gray-700 dark:text-gray-300 font-mono whitespace-pre-wrap">${escapeHtml(cdcStatus.fix_sql)}</pre>
+        </div>`;
+    }
+
+    let errorHtml = '';
+    if (cdcStatus.error) {
+        errorHtml = `<p class="text-xs text-amber-600 dark:text-amber-400 mt-1">Check error: ${escapeHtml(cdcStatus.error)}</p>`;
+    }
+
+    container.innerHTML = `
+        <p class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">${title}</p>
+        <div class="space-y-1">${checksHtml}</div>
+        ${fixBlock}${errorHtml}`;
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function showWarning(title, message) {
+    document.getElementById('warn-modal-title').textContent = title;
+    document.getElementById('warn-modal-message').textContent = message;
+    document.getElementById('warn-modal').classList.remove('hidden');
+}
+
+function showCdcIssuesModal(failedTableNames) {
+    const body = document.getElementById('cdc-issues-modal-body');
+    body.innerHTML = failedTableNames.map(tableName => {
+        const status = tableCdcStatus[tableName];
+        const escapedName = escapeTableName(tableName);
+        const checksHtml = (status && status.checks)
+            ? status.checks.filter(c => !c.ok).map(c => {
+                const fixHtml = c.note
+                    ? `<pre class="mt-1 ml-5 text-xs text-gray-600 dark:text-gray-400 font-mono whitespace-pre-wrap bg-gray-100 dark:bg-gray-900 rounded px-2 py-1">${escapeHtml(c.note)}</pre>`
+                    : '';
+                return `<li class="flex flex-col gap-0.5">
+                    <span class="flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+                        <svg class="w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+                        ${escapeHtml(c.name)}
+                    </span>${fixHtml}
+                </li>`;
+              }).join('')
+            : '<li class="text-xs text-gray-500">Expand the table row to see details.</li>';
+
+        return `<div class="border border-red-200 dark:border-red-800 rounded-lg overflow-hidden">
+            <div class="bg-red-50 dark:bg-red-900/20 px-3 py-2 flex items-center gap-2">
+                <svg class="w-4 h-4 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 6h18M3 14h18M3 18h18"/>
+                </svg>
+                <span class="text-sm font-semibold text-red-700 dark:text-red-300">${escapeHtml(tableName)}</span>
+            </div>
+            <ul class="px-3 py-2 space-y-2">${checksHtml}</ul>
+        </div>`;
+    }).join('');
+
+    document.getElementById('cdc-issues-modal').classList.remove('hidden');
+}
+// ── End per-table CDC status ──────────────────────────────────────────────────
 
 // Escape table names for use in IDs
 function escapeTableName(name) {
@@ -809,6 +998,9 @@ async function loadTableSchema(tableName) {
         // Render columns
         renderColumns(tableName, data.columns);
 
+        // Render per-table CDC status (Oracle / SQL Server)
+        if (data.cdc_status) renderCdcStatus(tableName, data.cdc_status);
+
         // Mark as loaded
         loadedTables.add(tableName);
 
@@ -940,12 +1132,23 @@ function validateCreateForm() {
     }
 
     if (checkedTables.length === 0) {
-        alert('⚠️ Please select at least one table');
+        showWarning('No tables selected', 'Please select at least one table before creating the connector.');
+        return false;
+    }
+
+    // Block if any selected table has CDC failures (Oracle / SQL Server)
+    const cdcFailed = [];
+    checkedTables.forEach(cb => {
+        const s = tableCdcStatus[cb.dataset.tableName];
+        if (s && s.checked && !s.all_ok) cdcFailed.push(cb.dataset.tableName);
+    });
+    if (cdcFailed.length > 0) {
+        showCdcIssuesModal(cdcFailed);
         return false;
     }
 
     if (checkedTables.length > MAX_TABLES_PER_CONNECTOR) {
-        alert(`⚠️ Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector allowed. You selected ${checkedTables.length}.`);
+        showWarning('Too many tables', `Maximum ${MAX_TABLES_PER_CONNECTOR} tables per connector allowed. You selected ${checkedTables.length}. Please deselect some tables.`);
         return false;
     }
 
@@ -953,7 +1156,7 @@ function validateCreateForm() {
     if (processingMode === 'batch') {
         const batchInterval = document.getElementById('batch_interval').value;
         if (!batchInterval) {
-            alert('⚠️ Please select a sync interval for batch processing');
+            showWarning('Batch interval required', 'Please select a sync interval for batch processing.');
             return false;
         }
     }

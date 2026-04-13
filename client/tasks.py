@@ -243,8 +243,8 @@ def process_ddl_changes(self, config_id: int, auto_destructive: bool = True):
             'localhost:9092,localhost:9094,localhost:9096'
         )
 
-        if source_type in ('mysql', 'mssql', 'sqlserver'):
-            # Kafka-based processor for MySQL/MSSQL
+        if source_type in ('mysql', 'mssql', 'sqlserver', 'oracle'):
+            # Kafka-based processor for MySQL/MSSQL/Oracle (schema history topic)
             processor = KafkaDDLProcessor(
                 replication_config=config,
                 target_engine=target_engine,
@@ -927,24 +927,17 @@ def check_replication_health():
 # BATCH PROCESSING TASKS
 # ============================================================================
 
-@shared_task(bind=True, max_retries=2)
+@shared_task(bind=True, max_retries=0)
 def run_batch_sync(self, replication_config_id: int):
     """
     Execute a batch sync cycle for a connector in batch processing mode.
 
-    This task is scheduled by Celery Beat based on the batch_interval setting.
-
     Cycle:
-    1. Resume connector (starts catching up with accumulated changes)
-    2. Wait until lag is cleared OR max duration reached (throttle)
-    3. Pause connector
-    4. Record completion time and schedule next run
-
-    Args:
-        replication_config_id: ID of the ReplicationConfig to sync
-
-    Returns:
-        Dict with success status and details
+    1. Guard checks — skip if already running or ran too recently
+    2. Resume connector (starts catching up with accumulated changes)
+    3. Wait up to batch_max_catchup_minutes for lag to clear
+    4. Pause connector
+    5. Record last_batch_run and reset Celery Beat timing
     """
     import time
 
@@ -953,20 +946,47 @@ def run_batch_sync(self, replication_config_id: int):
         logger.info(f"BATCH SYNC STARTING - Config ID: {replication_config_id}")
         logger.info(f"=" * 60)
 
-        config = ReplicationConfig.objects.get(id=replication_config_id)
+        # ── Atomic guard + slot claim ──────────────────────────────────────────
+        # Use select_for_update() so two Celery workers that fire simultaneously
+        # cannot both pass the guards and both resume the connector.
+        from django.db import transaction
 
-        # Validate batch mode
-        if config.processing_mode != 'batch':
-            logger.warning(f"Config {replication_config_id} is not in batch mode, skipping")
-            return {'success': False, 'error': 'Not in batch mode'}
+        skip_reason = None
+        with transaction.atomic():
+            config = ReplicationConfig.objects.select_for_update().get(id=replication_config_id)
 
-        # Validate connector exists
-        if not config.connector_name:
-            logger.error(f"No connector configured for config {replication_config_id}")
-            return {'success': False, 'error': 'No connector configured'}
+            if config.processing_mode != 'batch':
+                return {'success': False, 'error': 'Not in batch mode'}
 
-        from client.replication.orchestrator import ReplicationOrchestrator
-        orchestrator = ReplicationOrchestrator(config)
+            if not config.connector_name:
+                return {'success': False, 'error': 'No connector configured'}
+
+            from client.replication.orchestrator import ReplicationOrchestrator
+            orchestrator = ReplicationOrchestrator(config)
+            interval_seconds = orchestrator._get_batch_interval_seconds()
+            max_secs = (config.batch_max_catchup_minutes or 30) * 60
+
+            # Guard 1: skip if a sync is already in progress
+            if config.batch_sync_started_at:
+                in_progress_for = (timezone.now() - config.batch_sync_started_at).total_seconds()
+                if in_progress_for < max_secs:
+                    skip_reason = f'Skipped (sync in progress for {in_progress_for:.0f}s)'
+
+            # Guard 2: skip if ran too recently
+            elif config.last_batch_run:
+                since_last = (timezone.now() - config.last_batch_run).total_seconds()
+                if since_last < interval_seconds:
+                    skip_reason = f'Skipped (ran {since_last:.0f}s ago, interval={interval_seconds}s)'
+
+            if not skip_reason:
+                # Claim the slot atomically — prevents a second worker from passing
+                # the guards while this task proceeds to resume the connector.
+                config.batch_sync_started_at = timezone.now()
+                config.save(update_fields=['batch_sync_started_at'])
+
+        if skip_reason:
+            logger.info(skip_reason)
+            return {'success': True, 'message': skip_reason}
 
         # ========================================
         # STEP 1: Resume Connector
@@ -976,32 +996,33 @@ def run_batch_sync(self, replication_config_id: int):
         success, message = orchestrator.resume_connector()
         if not success:
             logger.error(f"Failed to resume connector: {message}")
+            # Clear the slot claim we set above
+            config.batch_sync_started_at = None
+            config.save(update_fields=['batch_sync_started_at'])
             return {'success': False, 'error': message}
 
         logger.info(f"✓ Connector resumed: {config.connector_name}")
-
-        # Record sync start time so the monitor page timer survives page refreshes
-        config.batch_sync_started_at = timezone.now()
-        config.save(update_fields=['batch_sync_started_at'])
+        # resume_connector() overwrites batch_sync_started_at (same value) and sets
+        # next_batch_run = start + max + interval as a display estimate.
 
         # ========================================
-        # STEP 2: Wait for Catch-up (with throttle)
+        # STEP 2: Wait for Catch-up (throttled)
         # ========================================
         logger.info("Step 2/3: Waiting for catch-up (throttled)...")
 
-        max_duration_minutes = config.batch_max_catchup_minutes or 30
-        max_duration_seconds = max_duration_minutes * 60
-        poll_interval_seconds = 30  # Check every 30 seconds
-
+        max_duration_seconds = (config.batch_max_catchup_minutes or 30) * 60
         start_time = time.time()
-        elapsed = 0
-
         manager = DebeziumConnectorManager()
 
-        while elapsed < max_duration_seconds:
-            # Check connector status
-            exists, status_data = manager.get_connector_status(config.connector_name)
+        while True:
+            elapsed = time.time() - start_time
+            remaining = max_duration_seconds - elapsed
 
+            if remaining <= 0:
+                logger.info("  Max duration reached (throttle limit)")
+                break
+
+            exists, status_data = manager.get_connector_status(config.connector_name)
             if not exists:
                 logger.error("Connector disappeared during batch sync")
                 break
@@ -1012,21 +1033,11 @@ def run_batch_sync(self, replication_config_id: int):
                     logger.error("Connector failed during batch sync")
                     config.status = 'error'
                     config.last_error_message = "Connector failed during batch sync"
-                    config.save()
+                    config.save(update_fields=['status', 'last_error_message'])
                     return {'success': False, 'error': 'Connector failed'}
 
-            # Log progress
-            elapsed = time.time() - start_time
-            remaining = max_duration_seconds - elapsed
             logger.info(f"  Batch sync running... {int(elapsed)}s elapsed, {int(remaining)}s remaining")
-
-            if remaining <= 0:
-                logger.info("  Max duration reached (throttle limit)")
-                break
-
-            # Wait before next check
-            time.sleep(min(poll_interval_seconds, remaining))
-            elapsed = time.time() - start_time
+            time.sleep(min(30, remaining))
 
         total_elapsed = time.time() - start_time
         logger.info(f"✓ Batch window completed after {int(total_elapsed)} seconds")
@@ -1039,27 +1050,34 @@ def run_batch_sync(self, replication_config_id: int):
         success, message = orchestrator.pause_connector()
         if not success:
             logger.warning(f"Failed to pause connector: {message}")
-            # Continue anyway - we'll try to pause next time
+            # Continue — next cycle will retry
 
         logger.info(f"✓ Connector paused: {config.connector_name}")
 
         # ========================================
-        # Update timestamps
+        # Record completion + reset Celery timing
         # ========================================
         config.last_batch_run = timezone.now()
-        # batch_sync_started_at already cleared by pause_connector() above
+        config.save(update_fields=['last_batch_run'])
+        # pause_connector() already set next_batch_run = now + interval and saved.
 
-        # Calculate next run based on interval
-        interval_seconds = orchestrator._get_batch_interval_seconds()
-        config.next_batch_run = timezone.now() + timedelta(seconds=interval_seconds)
-        config.save()
+        # Reset Celery Beat's last_run_at to NOW so the next firing is exactly
+        # interval seconds from the END of this sync (not from the original schedule).
+        # This prevents queued-up firings from running back-to-back on the next cycle.
+        if config.batch_celery_task_name:
+            try:
+                from django_celery_beat.models import PeriodicTask
+                PeriodicTask.objects.filter(
+                    name=config.batch_celery_task_name
+                ).update(last_run_at=timezone.now())
+            except Exception as e:
+                logger.warning(f"Could not reset Celery Beat timing: {e}")
 
-        # Resolve any open missed-schedule alert now that the batch ran successfully
         resolve_alert(config, 'batch_missed', connector_name=config.connector_name or '')
 
         logger.info(f"=" * 60)
         logger.info(f"✓ BATCH SYNC COMPLETED")
-        logger.info(f"  Duration: {int(total_elapsed)} seconds")
+        logger.info(f"  Duration: {int(total_elapsed)}s")
         logger.info(f"  Next run: {config.next_batch_run}")
         logger.info(f"=" * 60)
 
