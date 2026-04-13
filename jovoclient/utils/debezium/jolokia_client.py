@@ -184,9 +184,11 @@ class JolokiaClient:
         synthetic completed-snapshot dict so callers can detect this case.
         Returns None only when Jolokia is completely unreachable.
         """
-        # Check incremental first
+        # Check incremental first — return if running OR recently completed.
+        # Fast snapshots (e.g. Oracle small tables) complete in < 3 s, so the
+        # MBean already shows running=False/completed=True on the first poll.
         inc = self.get_incremental_snapshot_progress(db_type, topic_prefix)
-        if inc and inc.get('running'):
+        if inc and (inc.get('running') or inc.get('completed')):
             return inc
 
         # Check initial snapshot

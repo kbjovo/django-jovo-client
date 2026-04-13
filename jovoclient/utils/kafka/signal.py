@@ -244,6 +244,37 @@ class KafkaSignalManager:
             logger.info("Kafka producer closed")
 
 
+def _ensure_postgres_signal_table(db_engine: Engine, schema: str = 'public') -> None:
+    """
+    Ensure the Debezium signal table exists in PostgreSQL.
+    Creates it with CREATE TABLE IF NOT EXISTS — safe to call repeatedly.
+    If creation fails (insufficient privileges), raises a clear ValueError.
+    """
+    full_name = f"{schema}.debezium_signal"
+
+    try:
+        with db_engine.begin() as conn:
+            conn.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS {full_name} (
+                    id   VARCHAR(42)   NOT NULL PRIMARY KEY,
+                    type VARCHAR(32)   NOT NULL,
+                    data VARCHAR(2048) NULL
+                )
+            """))
+        logger.info(f"Signal table ready: {full_name}")
+    except Exception as e:
+        raise ValueError(
+            f"The Debezium signal table '{full_name}' does not exist and could not be "
+            f"created automatically (permission denied). Please ask your DBA to run:\n\n"
+            f"  CREATE TABLE {full_name} (\n"
+            f"      id   VARCHAR(42)   NOT NULL PRIMARY KEY,\n"
+            f"      type VARCHAR(32)   NOT NULL,\n"
+            f"      data VARCHAR(2048) NULL\n"
+            f"  );\n\n"
+            f"Then retry adding the table."
+        ) from e
+
+
 def _ensure_mssql_signal_table(db_engine: Engine, schema: str = 'dbo') -> None:
     """
     Ensure the Debezium signal table exists in SQL Server and has CDC enabled.
@@ -384,6 +415,18 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
                 formatted_tables.append(f"{database.database_name}.{table_name}")
             else:
                 formatted_tables.append(table_name)
+        elif db_type == 'oracle':
+            # Oracle incremental snapshot signals require the full 3-part name:
+            # {cdb_service}.{schema}.{table}  (e.g. XEPDB1.APPUSER.ORDERS)
+            # The connector indexes its schema registry with this 3-part key, so a
+            # 2-part SCHEMA.TABLE signal causes "Schema not found" and aborts the snapshot.
+            two_part = format_table_for_connector(database, table_name, schema_name)
+            if two_part.count('.') == 1:
+                # Prepend CDB service name (stored as database_name on the ClientDatabase)
+                formatted_tables.append(f"{database.database_name.upper()}.{two_part}")
+            else:
+                # Already 3-part — leave as-is
+                formatted_tables.append(two_part)
         else:
             formatted_tables.append(format_table_for_connector(database, table_name, schema_name))
 
@@ -400,9 +443,11 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
         }
         signal_table = signal_tables.get(db_type, 'debezium_signal')
 
-        # SQL Server: auto-create signal table and enable CDC if not already done
+        # Auto-create signal table if it doesn't exist yet
         if db_type == 'mssql':
             _ensure_mssql_signal_table(db_engine, schema='dbo')
+        elif db_type == 'postgresql':
+            _ensure_postgres_signal_table(db_engine, schema='public')
 
         signal_manager = DebeziumSignalManager(
             db_engine=db_engine,

@@ -14,6 +14,51 @@ from client.utils.database_utils import get_database_engine, get_table_schema
 logger = logging.getLogger(__name__)
 
 
+def _resolve_referred_table(referred_table, referred_schema, table_name_map, source_db_type, source_db_name):
+    """
+    Resolve a FK's referred_table to the correct target table name.
+
+    SQLAlchemy's Oracle dialect normalises identifiers to lowercase, so referred_table
+    arrives as e.g. 'orders' while table_name_map keys are uppercase ('ORDERS').
+    Several strategies are tried in order so all Oracle setups are covered:
+      1. Direct lookup (fast path, also covers MySQL/PostgreSQL/MSSQL)
+      2. Uppercase lookup (Oracle: SQLAlchemy lowercases identifiers)
+      3. SCHEMA.TABLE via referred_schema (Oracle inter-schema FKs)
+      4. Suffix scan (Oracle: source_table stored as SCHEMA.TABLE in map)
+    """
+    # 1. Direct lookup
+    if referred_table in table_name_map:
+        return table_name_map[referred_table]
+
+    if source_db_type == 'oracle':
+        referred_upper = referred_table.upper()
+
+        # 2. Uppercase lookup — SQLAlchemy Oracle returns lowercase identifiers
+        if referred_upper in table_name_map:
+            return table_name_map[referred_upper]
+
+        # 3. SCHEMA.TABLE format using referred_schema
+        if referred_schema:
+            candidate = f"{referred_schema.upper()}.{referred_upper}"
+            if candidate in table_name_map:
+                return table_name_map[candidate]
+
+        # 4. Suffix scan — handles SCHEMA.TABLE keys in the map
+        for key, val in table_name_map.items():
+            key_table = key.rsplit('.', 1)[-1]  # works whether or not there is a dot
+            if key_table.upper() == referred_upper:
+                return val
+    else:
+        # Non-Oracle: try SCHEMA.TABLE via referred_schema
+        if referred_schema:
+            candidate = f"{referred_schema}.{referred_table}"
+            if candidate in table_name_map:
+                return table_name_map[candidate]
+
+    # Fallback: use source database name as prefix (original behaviour)
+    return f"{source_db_name}_{referred_table}"
+
+
 def create_target_tables(replication_config, specific_tables=None):
     """
     Auto-create tables in target database based on configuration
@@ -511,7 +556,10 @@ def add_foreign_keys_to_target(replication_config, specific_tables=None):
             table_name_map[source_table] = target_table
 
             try:
-                source_schema = get_table_schema(source_db, source_table)
+                source_schema = get_table_schema(
+                    source_db, source_table,
+                    schema=table_mapping.source_schema or None,
+                )
                 foreign_keys = source_schema.get('foreign_keys', [])
 
                 if foreign_keys:
@@ -553,13 +601,10 @@ def add_foreign_keys_to_target(replication_config, specific_tables=None):
                         continue
 
                     # Map referred table to target table name
-                    # The sink connector names tables as: {source_db}_{table_name}
-                    # Check if referred table is in our mapping
-                    if referred_table in table_name_map:
-                        target_referred_table = table_name_map[referred_table]
-                    else:
-                        # Try to find it with the same naming pattern
-                        target_referred_table = f"{source_db.database_name}_{referred_table}"
+                    target_referred_table = _resolve_referred_table(
+                        referred_table, referred_schema, table_name_map,
+                        source_db.db_type.lower(), source_db.database_name,
+                    )
 
                     # Generate unique FK name
                     new_fk_name = f"fk_{target_table}_{constrained_columns[0]}"[:64]
@@ -782,7 +827,10 @@ def preview_foreign_keys(replication_config):
                 constraints = []
 
                 try:
-                    source_schema = get_table_schema(source_db, source_table)
+                    source_schema = get_table_schema(
+                        source_db, source_table,
+                        schema=mapping.source_schema or None,
+                    )
                     foreign_keys = source_schema.get('foreign_keys', [])
                 except Exception as e:
                     logger.warning(f"Could not get schema for {source_table}: {e}")
@@ -796,6 +844,7 @@ def preview_foreign_keys(replication_config):
                     constrained_columns = fk.get('constrained_columns', [])
                     referred_table = fk.get('referred_table', '')
                     referred_columns = fk.get('referred_columns', [])
+                    referred_schema = fk.get('referred_schema', '')
 
                     if not constrained_columns or not referred_table or not referred_columns:
                         constraints.append({
@@ -814,10 +863,10 @@ def preview_foreign_keys(replication_config):
                     new_fk_name = f"fk_{target_table}_{constrained_columns[0]}"[:64]
 
                     # Resolve referred table in target
-                    if referred_table in table_name_map:
-                        target_referred_table = table_name_map[referred_table]
-                    else:
-                        target_referred_table = f"{source_db.database_name}_{referred_table}"
+                    target_referred_table = _resolve_referred_table(
+                        referred_table, referred_schema, table_name_map,
+                        source_db.db_type.lower(), source_db.database_name,
+                    )
 
                     if not target_exists:
                         constraints.append({

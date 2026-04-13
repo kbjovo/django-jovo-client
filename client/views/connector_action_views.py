@@ -228,8 +228,22 @@ def apply_oracle_privileges_api(request, database_pk):
         admin_password = body.get('admin_password', '')
         if not admin_user or not admin_password:
             return JsonResponse({'error': 'admin_user and admin_password are required'}, status=400)
+        data_schema = body.get('data_schema', '').strip().upper() or None
+        # Auto-derive data_schema from existing table mappings if not supplied
+        if not data_schema:
+            from client.models.replication import TableMapping
+            first_mapping = (
+                TableMapping.objects
+                .filter(replication_config__database=db_config)
+                .exclude(source_schema='')
+                .values_list('source_schema', flat=True)
+                .first()
+            )
+            if first_mapping:
+                data_schema = first_mapping.upper()
         from client.utils.ddl.oracle_setup import apply_oracle_privileges
-        result = apply_oracle_privileges(db_config, admin_user, admin_password)
+        result = apply_oracle_privileges(db_config, admin_user, admin_password,
+                                         data_schema=data_schema)
         return JsonResponse(result)
     except Exception as e:
         logger.error(f'Oracle apply privileges error: {e}', exc_info=True)

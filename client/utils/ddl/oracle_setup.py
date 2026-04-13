@@ -226,7 +226,8 @@ def create_signal_table(db_config) -> tuple:
         return False, str(e)
 
 
-def apply_oracle_privileges(db_config, admin_user: str, admin_password: str) -> Dict[str, Any]:
+def apply_oracle_privileges(db_config, admin_user: str, admin_password: str,
+                            data_schema: str = None) -> Dict[str, Any]:
     """
     Connect as SYSDBA and apply all missing Debezium LogMiner privileges to the connector user.
 
@@ -236,9 +237,18 @@ def apply_oracle_privileges(db_config, admin_user: str, admin_password: str) -> 
       - SELECT_CATALOG_ROLE, EXECUTE_CATALOG_ROLE grants
       - Explicit V$DATABASE / V$LOGFILE / V$ARCHIVED_LOG / V$TRANSACTION grants
       - Creating the DEBEZIUM_SIGNAL table in the connector user's schema
+      - INSERT, DELETE on {data_schema}.DEBEZIUM_SIGNAL (required for emitWindowOpen/Close)
 
     What is NOT automated (requires manual DBA action):
       - Enabling ARCHIVELOG mode (requires DB shutdown + restart)
+
+    Args:
+        db_config: ClientDatabase instance
+        admin_user: SYSDBA username (e.g. 'sys')
+        admin_password: SYSDBA password
+        data_schema: Schema that owns the DEBEZIUM_SIGNAL table (e.g. 'APPUSER').
+                     When provided, grants INSERT/DELETE on that schema's signal table
+                     to the connector user — required for Debezium's emitWindowOpen/Close.
 
     Returns:
         {
@@ -338,7 +348,34 @@ def apply_oracle_privileges(db_config, admin_user: str, admin_password: str) -> 
                     else:
                         result['failed'].append(f"{label}: {e}")
 
-            # 4. DEBEZIUM_SIGNAL table (run as connector user, not admin)
+            # 4. INSERT, DELETE on {data_schema}.DEBEZIUM_SIGNAL
+            # Debezium's incremental snapshot algorithm (emitWindowOpen/Close) internally
+            # INSERTs and DELETEs watermark records into the signal table as the connector
+            # user — regardless of which channel (kafka/source) delivered the initial signal.
+            if data_schema:
+                schema_upper = data_schema.upper()
+                for priv, sql in [
+                    (f"INSERT on {schema_upper}.DEBEZIUM_SIGNAL",
+                     f"GRANT INSERT ON {schema_upper}.DEBEZIUM_SIGNAL TO {connector_user}"),
+                    (f"DELETE on {schema_upper}.DEBEZIUM_SIGNAL",
+                     f"GRANT DELETE ON {schema_upper}.DEBEZIUM_SIGNAL TO {connector_user}"),
+                ]:
+                    try:
+                        conn.execute(text(sql))
+                        conn.commit()
+                        result['applied'].append(sql)
+                    except Exception as e:
+                        err_str = str(e)
+                        if 'ORA-01917' in err_str or 'already' in err_str.lower() or 'ORA-01749' in err_str:
+                            result['skipped'].append(f"{priv} already granted")
+                        else:
+                            result['failed'].append(f"{priv}: {e}")
+            else:
+                result['skipped'].append(
+                    "INSERT/DELETE on DEBEZIUM_SIGNAL skipped — data_schema not provided"
+                )
+
+            # 5. DEBEZIUM_SIGNAL table (run as connector user, not admin)
             # We do this via a separate connection to the connector user
             try:
                 from sqlalchemy import create_engine as _ce

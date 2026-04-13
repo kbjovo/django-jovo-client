@@ -605,6 +605,72 @@ class ReplicationOrchestrator:
         except Exception as e:
             self._log_warning(f"⚠️ Could not drop PostgreSQL slot/publication ({slot_name}): {e}")
 
+    def _ensure_postgres_publication_tables(self, db_config, new_tables: list) -> None:
+        """
+        Add newly requested tables to the existing PostgreSQL publication.
+
+        publication.autocreate.mode = "filtered" creates the publication on first
+        start but never alters it afterward.  When tables are added via add_tables()
+        we must run ALTER PUBLICATION ... ADD TABLE so Debezium's WAL stream covers
+        the new tables before the connector is restarted.
+
+        Silently warns (does not raise) if the publication doesn't exist yet — in
+        that case Debezium will create it with the correct table list on restart.
+        """
+        import re
+        match = re.search(r'_v_(\d+)$', self.config.kafka_topic_prefix or '')
+        version = int(match.group(1)) if match else 0
+
+        pub_name = f"debezium_pub_{db_config.client_id}_{db_config.id}_v_{version}"
+        pub_name = ''.join(c if (c.isalnum() or c == '_') else '_' for c in pub_name)[:63]
+
+        # Resolve schema — use source_schema from the first mapping that has one,
+        # fall back to 'public'.
+        schema_name = 'public'
+        for t in new_tables:
+            mapping = self.config.table_mappings.filter(source_table=t, is_enabled=True).first()
+            if mapping and mapping.source_schema:
+                schema_name = mapping.source_schema
+                break
+
+        try:
+            from client.utils.database_utils import get_database_engine
+            engine = get_database_engine(db_config)
+            with engine.connect() as conn:
+                # Check the publication exists before trying to alter it
+                exists = conn.execute(
+                    text("SELECT 1 FROM pg_publication WHERE pubname = :pub"),
+                    {'pub': pub_name}
+                ).fetchone()
+
+            if not exists:
+                self._log_info(
+                    f"  ℹ️ Publication '{pub_name}' not found yet — "
+                    f"Debezium will create it with all tables on next start"
+                )
+                engine.dispose()
+                return
+
+            # Build the table list: schema.table for each new table
+            table_list = ', '.join(
+                f'"{schema_name}"."{t}"' for t in new_tables
+            )
+            alter_sql = f'ALTER PUBLICATION "{pub_name}" ADD TABLE {table_list}'
+            with engine.begin() as conn:
+                conn.execute(text(alter_sql))
+
+            self._log_info(
+                f"  ✓ Added {len(new_tables)} table(s) to publication '{pub_name}': "
+                f"{', '.join(new_tables)}"
+            )
+            engine.dispose()
+
+        except Exception as e:
+            self._log_warning(
+                f"⚠️ Could not update PostgreSQL publication '{pub_name}': {e}. "
+                f"Debezium may not replicate the new tables until the publication is updated manually."
+            )
+
     # ==========================================
     # Efficient Sink Connector Management
     # ==========================================
@@ -1655,6 +1721,14 @@ class ReplicationOrchestrator:
 
             self._log_info(f"✓ Source connector config updated with {len(all_tables)} tables")
 
+            # ── PostgreSQL only: update publication ──────────────────────────
+            # publication.autocreate.mode = "filtered" creates the publication on
+            # first run but never modifies it afterward.  New tables must be added
+            # explicitly with ALTER PUBLICATION ... ADD TABLE before the connector
+            # restarts, otherwise Debezium never replicates them.
+            if db_config.db_type == 'postgresql':
+                self._ensure_postgres_publication_tables(db_config, added_tables)
+
             # Restart the connector so it reloads its table.include.list and
             # replays the schema history from Kafka for the new table(s).
             # We must NOT send the snapshot signal until schema replay is done —
@@ -1887,13 +1961,20 @@ class ReplicationOrchestrator:
             progress = self.jolokia.get_incremental_snapshot_progress(
                 db_type, topic_prefix
             )
-            if progress and progress.get('running'):
+            if progress and (progress.get('running') or progress.get('completed')):
                 tables = progress.get('total_tables', '?')
-                msg = f"Signal received — {tables} table(s) queued for snapshot"
-                self._log_info(
-                    f"  Incremental snapshot confirmed running "
-                    f"(signal {signal_id}): {tables} tables queued"
-                )
+                if progress.get('completed') and not progress.get('running'):
+                    msg = f"Signal received — snapshot completed ({tables} table(s))"
+                    self._log_info(
+                        f"  Incremental snapshot confirmed completed fast "
+                        f"(signal {signal_id}): {tables} tables"
+                    )
+                else:
+                    msg = f"Signal received — {tables} table(s) queued for snapshot"
+                    self._log_info(
+                        f"  Incremental snapshot confirmed running "
+                        f"(signal {signal_id}): {tables} tables queued"
+                    )
                 return {'confirmed': True, 'tables': tables, 'msg': msg}
 
             if attempt < polls - 1:

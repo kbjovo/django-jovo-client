@@ -270,22 +270,55 @@ function applyFKConstraints() {
 function renderFKResult(data) {
   const body = document.getElementById('fk-result-body');
   if (!data.success) {
-    body.innerHTML = `<p class="text-red-600 dark:text-red-400">&#10007; ${escFKHTML(data.error || 'Unknown error')}</p>`;
+    body.innerHTML =
+      `<div class="flex items-start gap-2 text-red-600 dark:text-red-400">
+         <span class="shrink-0 font-bold">&#10007;</span>
+         <span class="text-xs">${escFKHTML(data.error || 'Unknown error')}</span>
+       </div>`;
     return;
   }
+
   let html = '';
+
   if (data.created > 0)
-    html += `<p class="text-green-600 dark:text-green-400">&#10003; ${data.created} constraint${data.created !== 1 ? 's' : ''} created</p>`;
+    html += `<div class="flex items-center gap-2 text-green-600 dark:text-green-400">
+               <span class="text-base leading-none">&#10003;</span>
+               <span class="font-medium">${data.created} constraint${data.created !== 1 ? 's' : ''} created</span>
+             </div>`;
+
   if (data.skipped > 0)
-    html += `<p class="text-gray-500 dark:text-gray-400">&#8226; ${data.skipped} already existed (skipped)</p>`;
+    html += `<div class="flex items-center gap-2 text-gray-500 dark:text-gray-400">
+               <span class="text-base leading-none">&#8226;</span>
+               <span>${data.skipped} already existed (skipped)</span>
+             </div>`;
+
   if (data.errors && data.errors.length > 0) {
-    html += `<p class="text-yellow-600 dark:text-yellow-400 mt-1">&#9888; ${data.errors.length} error${data.errors.length !== 1 ? 's' : ''}:</p>`;
-    html += '<ul class="mt-1 space-y-1 pl-4 list-disc">';
-    data.errors.forEach(e => { html += `<li class="text-xs text-gray-500 dark:text-gray-400">${escFKHTML(e)}</li>`; });
-    html += '</ul>';
+    html += `<div class="mt-2 rounded-lg border border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-900/20 overflow-hidden">
+               <div class="px-3 py-2 flex items-center gap-2 text-yellow-700 dark:text-yellow-400 font-medium">
+                 <span>&#9888;</span>
+                 <span>${data.errors.length} constraint${data.errors.length !== 1 ? 's' : ''} failed</span>
+               </div>
+               <ul class="divide-y divide-yellow-100 dark:divide-yellow-800/40">`;
+    data.errors.forEach(e => {
+      // Extract the friendly part before "[SQL:" or "(Background on this error"
+      const friendly = e.replace(/\s*\[SQL:.*$/s, '').replace(/\s*\(Background on this error.*$/s, '').trim();
+      const hasTechnical = friendly !== e.trim();
+      html += `<li class="px-3 py-2">
+                 <p class="text-xs text-yellow-800 dark:text-yellow-300">${escFKHTML(friendly)}</p>
+                 ${hasTechnical
+                   ? `<details class="mt-1">
+                        <summary class="text-xs text-gray-400 dark:text-gray-500 cursor-pointer select-none hover:text-gray-600 dark:hover:text-gray-300">Show SQL</summary>
+                        <pre class="mt-1 text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap break-all bg-gray-100 dark:bg-gray-800 rounded p-2 max-h-24 overflow-y-auto">${escFKHTML(e)}</pre>
+                      </details>`
+                   : ''}
+               </li>`;
+    });
+    html += `</ul></div>`;
   }
+
   if (!html)
     html = `<p class="text-gray-500 dark:text-gray-400">No constraints were created.</p>`;
+
   body.innerHTML = html;
 }
 

@@ -86,10 +86,11 @@ def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
 
             # Match the specific topic for this source db / schema / table across
             # any connector version.
-            # MySQL/PostgreSQL: client_{cid}_db_{db_id}_v_\d+.{db_name}.{table}  (3 segments)
-            # SQL Server/Oracle: client_{cid}_db_{db_id}_v_\d+.{db_name}.{schema}.{table} (4 segments)
+            # MySQL/PostgreSQL/Oracle: client_{cid}_db_{db_id}_v_\d+.{schema}.{table}  (3 segments)
+            # SQL Server:              client_{cid}_db_{db_id}_v_\d+.{db_name}.{schema}.{table} (4 segments)
+            # Oracle topics are 3-segment (prefix.SCHEMA.TABLE) — NOT 4-segment like SQL Server.
             # Use single backslash escaping: Python \\d+ -> string \d+ -> Java regex digit+
-            if db_type in ('mssql', 'sqlserver', 'oracle'):
+            if db_type in ('mssql', 'sqlserver'):
                 topic_regex = (
                     f"client_{client.id}_db_{db_id}_v_\\d+"
                     f"\\.{_re.escape(source_db.database_name)}"

@@ -1005,12 +1005,45 @@ async function runEditProvisionSteps(steps, removeTables, addTables, targetNames
         markLogSuccess('step-add', `Added ${addTables.length} table(s)`);
 
         if (_provisionCancelRequested) { await _doEditCancel(); return; }
+
+        // If the server couldn't confirm the snapshot signal was picked up,
+        // poll from the browser. Debezium (especially Oracle) can have a
+        // delay between the signal being sent and it being processed —
+        // the 3-second server-side grace is sometimes not enough.
+        const signalRecvStep = (res.steps || []).find(s => s.id === 'signal_recv');
+        if (signalRecvStep?.status !== 'ok') {
+            addLogEntry('step-snap-wait', 'Waiting for snapshot signal to be acknowledged...');
+            const confirmed = await _pollForSnapshotStarted(_editConfigPk);
+            if (confirmed) {
+                markLogSuccess('step-snap-wait', 'Snapshot signal acknowledged — data syncing');
+            } else {
+                markLogWarn('step-snap-wait', 'Snapshot queued — check monitor page for progress');
+            }
+        }
     }
 
     // ── All done ──────────────────────────────────────────────────────
     document.getElementById('provision-modal-title').textContent = 'Connector updated successfully!';
     addLogNote('Changes applied — connector is processing updates.', 'info');
     showModalSuccess(`/connector/${_editConfigPk}/monitor/`);
+}
+
+// ── Snapshot signal poller (edit add-tables flow) ─────────────────────
+// Polls every 5 s up to 40 s. Returns true if the incremental-snapshot
+// MBean appears (running or completed). Used when the server-side
+// Jolokia check timed out before Debezium processed the signal.
+async function _pollForSnapshotStarted(configPk) {
+    for (let i = 0; i < 8; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+            const r    = await fetch(`/connector/${configPk}/status/`);
+            const data = await r.json();
+            const snap = data.status?.snapshot;
+            // type === 'incremental' means the MBean is present (running or completed)
+            if (snap?.type === 'incremental') return true;
+        } catch (_) { /* network error — keep polling */ }
+    }
+    return false;
 }
 
 // ── Cancel handler ────────────────────────────────────────────────────
