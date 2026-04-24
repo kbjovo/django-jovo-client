@@ -779,21 +779,25 @@ async function confirmResync(tables) {
 
     const now = Date.now();
 
-    // Connector state is the ground truth (sourced from Debezium via the DOM element
-    // that is seeded by the Django template on page load and updated by every poll).
     const sourceStateEl = document.getElementById('source-state');
     const isConnectorRunning = sourceStateEl?.textContent?.trim() === 'RUNNING';
 
-    // Confirmed syncing: connector is RUNNING (Debezium) AND server recorded a start time.
-    // Connector state is the sole arbiter — if PAUSED, the sync is over regardless of
-    // what batch_sync_started_at says (stale DB value cleared lazily by the backend).
-    const confirmedSyncing = isConnectorRunning && !!batchSyncStartedAt;
-
-    // Predicted syncing: no confirmed start time yet but connector is RUNNING and we're
-    // inside the expected window (e.g. very first moment of a new sync cycle).
-    const predictedSyncing = !confirmedSyncing && isConnectorRunning && batchNextRun
+    // True when next_batch_run has passed but we're still inside the max-catchup window.
+    // This covers two sub-cases:
+    //   - connector is RUNNING  → actively syncing
+    //   - connector is PAUSED   → Celery task fired but hasn't resumed the connector yet
+    const withinSyncWindow = batchNextRun
       && now >= batchNextRun.getTime()
       && now < batchNextRun.getTime() + batchMaxCatchupMs;
+
+    // Confirmed: Debezium says RUNNING and the backend recorded a start timestamp.
+    const confirmedSyncing = isConnectorRunning && !!batchSyncStartedAt;
+
+    // Predicted: connector is RUNNING inside the expected window (start time not yet polled).
+    const predictedSyncing = !confirmedSyncing && isConnectorRunning && withinSyncWindow;
+
+    // Pending: scheduled time has passed, connector still PAUSED — task is queued/starting.
+    const pendingStart = !confirmedSyncing && !isConnectorRunning && withinSyncWindow;
 
     if (confirmedSyncing || predictedSyncing) {
       const startMs = batchSyncStartedAt ? batchSyncStartedAt.getTime() : batchNextRun.getTime();
@@ -802,6 +806,11 @@ async function confirmResync(tables) {
       timerEl.textContent = formatDuration(elapsed);
       timerEl.className = 'text-sm font-bold text-green-600 dark:text-green-400 font-mono';
       if (badge) { badge.textContent = 'Syncing'; badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'; }
+    } else if (pendingStart) {
+      label.textContent = 'Starting...';
+      timerEl.textContent = '--:--';
+      timerEl.className = 'text-sm font-bold text-blue-500 dark:text-blue-400 font-mono';
+      if (badge) { badge.textContent = 'Starting'; badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400'; }
     } else if (batchNextRun && now < batchNextRun.getTime()) {
       const remaining = Math.floor((batchNextRun.getTime() - now) / 1000);
       label.textContent = 'Next sync in';
@@ -933,7 +942,16 @@ async function confirmResync(tables) {
     }
 
     const snap = s.snapshot;
-    currentInterval = (snap && snap.running) ? POLL_INTERVAL : IDLE_INTERVAL;
+    if (snap && snap.running) {
+      currentInterval = POLL_INTERVAL;
+    } else if (isBatch) {
+      // Poll fast while syncing or within 60s of next sync; slow otherwise.
+      const sourceRunning = s.source_connector.state === 'RUNNING';
+      const msToNext = batchNextRun ? (batchNextRun.getTime() - Date.now()) : Infinity;
+      currentInterval = (sourceRunning || msToNext < 60000) ? POLL_INTERVAL : IDLE_INTERVAL;
+    } else {
+      currentInterval = IDLE_INTERVAL;
+    }
   }
 
   function toggleBtn(id, show) {

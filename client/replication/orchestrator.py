@@ -2104,7 +2104,11 @@ class ReplicationOrchestrator:
             except (ImportError, Exception):
                 pass
 
-        is_on_schedule = schedule_active and self.config.next_batch_run is not None
+        is_on_schedule = (
+            schedule_active
+            and self.config.next_batch_run is not None
+            and self.config.next_batch_run > timezone.now()
+        )
 
         return {
             'next_batch_run': self.config.next_batch_run.isoformat() if self.config.next_batch_run else None,

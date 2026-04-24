@@ -927,7 +927,7 @@ def check_replication_health():
 # BATCH PROCESSING TASKS
 # ============================================================================
 
-@shared_task(bind=True, max_retries=0)
+@shared_task(bind=True, max_retries=3)
 def run_batch_sync(self, replication_config_id: int):
     """
     Execute a batch sync cycle for a connector in batch processing mode.
@@ -996,9 +996,11 @@ def run_batch_sync(self, replication_config_id: int):
         success, message = orchestrator.resume_connector()
         if not success:
             logger.error(f"Failed to resume connector: {message}")
-            # Clear the slot claim we set above
             config.batch_sync_started_at = None
-            config.save(update_fields=['batch_sync_started_at'])
+            # Push next_batch_run forward so the UI countdown stays meaningful
+            # and is_on_schedule stays True on the next poll.
+            config.next_batch_run = timezone.now() + timezone.timedelta(seconds=interval_seconds)
+            config.save(update_fields=['batch_sync_started_at', 'next_batch_run'])
             return {'success': False, 'error': message}
 
         logger.info(f"✓ Connector resumed: {config.connector_name}")
@@ -1037,7 +1039,7 @@ def run_batch_sync(self, replication_config_id: int):
                     return {'success': False, 'error': 'Connector failed'}
 
             logger.info(f"  Batch sync running... {int(elapsed)}s elapsed, {int(remaining)}s remaining")
-            time.sleep(min(30, remaining))
+            time.sleep(min(10, remaining))
 
         total_elapsed = time.time() - start_time
         logger.info(f"✓ Batch window completed after {int(total_elapsed)} seconds")
@@ -1050,7 +1052,11 @@ def run_batch_sync(self, replication_config_id: int):
         success, message = orchestrator.pause_connector()
         if not success:
             logger.warning(f"Failed to pause connector: {message}")
-            # Continue — next cycle will retry
+            # pause_connector() didn't save; clear started_at and push next_batch_run
+            # forward so the UI countdown stays accurate.
+            config.batch_sync_started_at = None
+            config.next_batch_run = timezone.now() + timezone.timedelta(seconds=interval_seconds)
+            config.save(update_fields=['batch_sync_started_at', 'next_batch_run'])
 
         logger.info(f"✓ Connector paused: {config.connector_name}")
 
