@@ -1,0 +1,391 @@
+================================================================================
+          DATABASE CONNECTION REQUIREMENTS
+          CDC Replication Platform — Reference Guide
+================================================================================
+
+This document lists the connection details and minimum required permissions for
+each database type supported by the replication platform.
+
+  SOURCE databases  →  used as CDC (Change Data Capture) origins via Debezium
+  TARGET databases  →  receive replicated data from source databases
+
+
+================================================================================
+1. MYSQL
+================================================================================
+
+Can be used as both SOURCE (CDC) and TARGET (replication destination).
+
+────────────────────────────────────────────────────────────────────────────────
+1.1  Connection Details
+────────────────────────────────────────────────────────────────────────────────
+
+  Field            Example / Default    Notes
+  ─────────────────────────────────────────────────────────────────────────────
+  Host             192.168.1.100        IP address or hostname of the MySQL server
+  Port             3306                 Default MySQL port
+  Database Name    my_database          Name of the schema/database to connect to
+  Username         repl_user            SQL-authenticated user
+  Password         ••••••••             Password for the above user
+
+────────────────────────────────────────────────────────────────────────────────
+1.2  Source Database Permissions (for CDC replication)
+────────────────────────────────────────────────────────────────────────────────
+
+  Requirement                   Required    Description
+  ─────────────────────────────────────────────────────────────────────────────
+  SELECT                        Yes         Read table data during snapshot and CDC
+  RELOAD                        Yes         Flush binary logs (required by Debezium)
+  SHOW DATABASES                Yes         List available databases
+  REPLICATION SLAVE             Yes         Read the binary log stream
+  REPLICATION CLIENT            Yes         Check replication status
+  binary logging (log_bin=ON)   Yes         MySQL must be started with binary logging
+  binlog_format = ROW           Yes         Row-level format is required for CDC
+  gtid_mode = ON                Yes         GTID required for read-only incremental
+                                            snapshots (no writes to source needed)
+  enforce_gtid_consistency = ON Yes         Must accompany gtid_mode=ON
+
+  Grant SQL:
+    GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT
+    ON *.* TO 'repl_user'@'%';
+
+  Server config (my.cnf / my.ini):
+    [mysqld]
+    log_bin               = ON
+    binlog_format         = ROW
+    gtid_mode             = ON
+    enforce_gtid_consistency = ON
+
+────────────────────────────────────────────────────────────────────────────────
+1.3  Target Database Permissions
+────────────────────────────────────────────────────────────────────────────────
+
+  Requirement    Required    Description
+  ─────────────────────────────────────────────────────────────────────────────
+  SELECT         Yes         Read existing data
+  INSERT         Yes         Write replicated rows
+  UPDATE         Yes         Apply CDC update events
+  DELETE         Yes         Apply CDC delete events
+  CREATE         Yes         Create target tables automatically
+  DROP           Yes         Drop/recreate tables during resync
+  ALTER          Yes         Alter table structure when schema changes
+  INDEX          Yes         Create indexes on target tables
+
+  Grant SQL:
+    GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX
+    ON target_db.* TO 'sink_user'@'%';
+
+
+================================================================================
+2. POSTGRESQL
+================================================================================
+
+Can be used as both SOURCE (CDC) and TARGET (replication destination).
+
+────────────────────────────────────────────────────────────────────────────────
+2.1  Connection Details
+────────────────────────────────────────────────────────────────────────────────
+
+  Field            Example / Default    Notes
+  ─────────────────────────────────────────────────────────────────────────────
+  Host             192.168.1.100        IP address or hostname
+  Port             5432                 Default PostgreSQL port
+  Database Name    my_database          Name of the PostgreSQL database
+  Username         repl_user            PostgreSQL role name
+  Password         ••••••••             Password for the above role
+
+────────────────────────────────────────────────────────────────────────────────
+2.2  Source Database Permissions (for CDC replication)
+────────────────────────────────────────────────────────────────────────────────
+
+  Requirement                              Required      Description
+  ─────────────────────────────────────────────────────────────────────────────
+  REPLICATION role                         Yes           Required to create replication
+                                                         slots and publications
+  CREATE on database                       Yes           Required to create the logical
+                                                         replication publication (PG 15+)
+  SUPERUSER  OR  DDL triggers              Yes           Superuser can auto-install DDL
+    pre-installed by DBA                                 event triggers; if not superuser,
+                                                         a DBA must pre-install them
+  LOGIN                                    Yes           Role must be allowed to log in
+  SELECT on replicated tables              Yes           Required for the snapshot phase
+  wal_level = logical  (server config)     Yes           Must be set in postgresql.conf
+  max_wal_senders >= 1  (server config)    Yes           Allow at least one WAL sender
+  max_replication_slots >= 1 (server cfg)  Yes           Allow at least one replication slot
+
+  Grant SQL:
+    CREATE ROLE repl_user WITH LOGIN REPLICATION PASSWORD 'yourpassword';
+    GRANT CONNECT ON DATABASE my_database TO repl_user;
+    GRANT CREATE ON DATABASE my_database TO repl_user;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO repl_user;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+      GRANT SELECT ON TABLES TO repl_user;
+
+  Server config (postgresql.conf):
+    wal_level              = logical
+    max_wal_senders        = 5       (or higher)
+    max_replication_slots  = 5       (or higher)
+
+  NOTE: The platform automatically creates the replication slot, publication, and
+        DDL event triggers (capture_ddl / capture_ddl_drop) on first connect when
+        the user has SUPERUSER privilege. If the user is not a superuser, a DBA
+        must create the ddl_capture schema and event triggers manually before
+        starting replication.
+
+────────────────────────────────────────────────────────────────────────────────
+2.3  Target Database Permissions
+────────────────────────────────────────────────────────────────────────────────
+
+  Requirement       Required    Description
+  ─────────────────────────────────────────────────────────────────────────────
+  SELECT            Yes         Read existing data
+  INSERT            Yes         Write replicated rows
+  UPDATE            Yes         Apply CDC update events
+  DELETE            Yes         Apply CDC delete events
+  CREATE TABLE      Yes         Create target tables automatically
+  DROP TABLE        Yes         Drop/recreate tables during resync
+  ALTER TABLE       Yes         Alter table structure on schema changes
+  CREATE SCHEMA     Yes         Create schema if it does not exist
+
+  Grant SQL:
+    GRANT CONNECT ON DATABASE target_db TO sink_user;
+    GRANT CREATE ON SCHEMA public TO sink_user;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public
+      TO sink_user;
+
+
+================================================================================
+3. ORACLE
+================================================================================
+
+Used as SOURCE only. CDC is performed via Oracle LogMiner.
+Oracle CANNOT be used as a replication target database.
+
+────────────────────────────────────────────────────────────────────────────────
+3.1  Connection Details
+────────────────────────────────────────────────────────────────────────────────
+
+  Field              Example / Default          Notes
+  ─────────────────────────────────────────────────────────────────────────────
+  Host               192.168.1.100              IP or hostname of the Oracle listener
+  Port               1521                       Default Oracle listener port
+  Connection Mode    Service Name (recommended) Use "Service Name" for PDB / Cloud /
+                     or SID (legacy)            Docker; use "SID" for legacy CDB
+  Database Name      XEPDB1  or  XE             Enter the PDB service name (e.g. XEPDB1)
+    (Service Name)                              or CDB SID (e.g. XE) depending on mode
+  Username           C##DEBEZIUM                CDB common user (C## prefix) for
+                     or  APPUSER                multitenant databases, or a PDB-local user
+  Password           ••••••••                   Password for the connector user
+
+  Connection Mode guidance:
+    - Service Name → recommended for Pluggable Databases (PDB), Docker (XEPDB1), Cloud
+    - SID          → use only for legacy Container Database root (XE)
+
+────────────────────────────────────────────────────────────────────────────────
+3.2  Database-Level Prerequisites (DBA actions required)
+────────────────────────────────────────────────────────────────────────────────
+
+  Requirement                          Required    Description
+  ─────────────────────────────────────────────────────────────────────────────
+  ARCHIVELOG mode                      Yes         Database must run in ARCHIVELOG
+                                                   mode; requires DBA + DB restart
+  Supplemental logging (MIN level)     Yes         Run:
+                                                   ALTER DATABASE ADD SUPPLEMENTAL
+                                                     LOG DATA;
+  Table-level supplemental logging     Yes         Per replicated table, run:
+                                                   ALTER TABLE <owner>.<table>
+                                                     ADD SUPPLEMENTAL LOG DATA
+                                                     (ALL) COLUMNS;
+
+────────────────────────────────────────────────────────────────────────────────
+3.3  Connector User Privileges
+────────────────────────────────────────────────────────────────────────────────
+
+  Privilege / Role                         Required      Description
+  ─────────────────────────────────────────────────────────────────────────────
+  LOGMINING                                Yes           Use Oracle LogMiner for CDC
+  SELECT ANY TABLE                         Yes           Read data from any table
+                                                         during snapshot
+  FLASHBACK ANY TABLE                      Yes           Required for AS OF SCN
+                                                         snapshot queries
+  CREATE TABLE                             Yes           Create DEBEZIUM_SIGNAL table
+                                                         in the connector schema
+  SELECT_CATALOG_ROLE                      Yes           Access data dictionary views
+  EXECUTE_CATALOG_ROLE                     Yes           Execute catalog procedures
+                                                         needed by LogMiner
+  SELECT on V$DATABASE                     Yes           Check ARCHIVELOG mode and
+                                                         supplemental logging status
+  SELECT on V$LOGFILE                      Yes           LogMiner reads log file paths
+  SELECT on V$ARCHIVED_LOG                 Yes           Access archived redo logs
+  SELECT on V$TRANSACTION                  Yes           Track active transactions
+  SET CONTAINER                            Conditional   Required only for CDB common
+    (CDB common users only)                              users (C## prefix) so Debezium
+                                                         can switch to CDB$ROOT for
+                                                         LogMiner
+  INSERT on <data_schema>.DEBEZIUM_SIGNAL  Yes           Write watermark records for
+  DELETE on <data_schema>.DEBEZIUM_SIGNAL  Yes           incremental snapshot windows
+
+  Grant SQL (run as SYSDBA against the PDB service):
+    GRANT LOGMINING TO C##DEBEZIUM;
+    GRANT SELECT ANY TABLE TO C##DEBEZIUM;
+    GRANT FLASHBACK ANY TABLE TO C##DEBEZIUM;
+    GRANT SELECT ANY TRANSACTION TO C##DEBEZIUM;
+    GRANT CREATE TABLE TO C##DEBEZIUM;
+    GRANT SELECT_CATALOG_ROLE TO C##DEBEZIUM;
+    GRANT EXECUTE_CATALOG_ROLE TO C##DEBEZIUM;
+    GRANT SELECT ON SYS.V_$DATABASE    TO C##DEBEZIUM;
+    GRANT SELECT ON SYS.V_$LOGFILE     TO C##DEBEZIUM;
+    GRANT SELECT ON SYS.V_$ARCHIVED_LOG TO C##DEBEZIUM;
+    GRANT SELECT ON SYS.V_$TRANSACTION  TO C##DEBEZIUM;
+    -- CDB common users only:
+    GRANT SET CONTAINER TO C##DEBEZIUM CONTAINER=ALL;
+
+  DEBEZIUM_SIGNAL table:
+    The platform can create this table automatically via the "Apply Privileges"
+    feature. It is created in the data schema (the schema that owns the tables
+    being replicated), not in the connector user's schema.
+
+    Manual creation (run as the data schema owner, e.g. APPUSER):
+      CREATE TABLE DEBEZIUM_SIGNAL (
+          ID   VARCHAR2(42)   NOT NULL PRIMARY KEY,
+          TYPE VARCHAR2(32)   NOT NULL,
+          DATA VARCHAR2(2048) NULL
+      );
+      GRANT INSERT, DELETE ON APPUSER.DEBEZIUM_SIGNAL TO C##DEBEZIUM;
+
+
+================================================================================
+4. SQL SERVER (MSSQL)
+================================================================================
+
+Used as SOURCE only. CDC uses SQL Server's built-in Change Data Capture feature.
+SQL Server CANNOT be used as a replication target database.
+
+────────────────────────────────────────────────────────────────────────────────
+4.1  Connection Details
+────────────────────────────────────────────────────────────────────────────────
+
+  Field            Example / Default    Notes
+  ─────────────────────────────────────────────────────────────────────────────
+  Host             192.168.1.100        IP or hostname of the SQL Server instance
+  Port             1433                 Default SQL Server port; TCP/IP must be
+                                        enabled in SQL Server Configuration Manager
+  Database Name    MyDatabase           Exact database name (case-sensitive for CDC)
+  Username         debezium_user        SQL-authenticated login; Mixed Mode
+                                        authentication must be enabled on the server
+  Password         ••••••••             Password for the SQL login
+
+────────────────────────────────────────────────────────────────────────────────
+4.2  Server-Level Prerequisites (DBA / sysadmin actions required)
+────────────────────────────────────────────────────────────────────────────────
+
+  Requirement                      Required    Description
+  ─────────────────────────────────────────────────────────────────────────────
+  Mixed Mode Authentication        Yes         SQL Server must accept SQL logins;
+                                              enable in Server Properties → Security
+  TCP/IP Protocol Enabled          Yes         Enable in SQL Server Configuration
+                                              Manager → Network Configuration
+  SQL Server Agent Service         Yes         Agent must be Running; it manages
+                                              CDC capture and cleanup jobs
+  CDC enabled on database          Yes         Run once per database (as db_owner):
+                                              USE [MyDatabase];
+                                              EXEC sys.sp_cdc_enable_db;
+  CDC enabled per table            Yes         Run for each table to replicate:
+                                              EXEC sys.sp_cdc_enable_table
+                                                @source_schema = N'dbo',
+                                                @source_name   = N'MyTable',
+                                                @role_name     = NULL;
+  debezium_signal table (dbo)      Yes         Required for incremental snapshots;
+                                              created automatically by the platform
+
+────────────────────────────────────────────────────────────────────────────────
+4.3  Connector User Permissions
+────────────────────────────────────────────────────────────────────────────────
+
+  Permission                               Required       Description
+  ─────────────────────────────────────────────────────────────────────────────
+  db_datareader role                       Yes            Read access to all tables
+  SELECT on sys.tables                     Yes            Discover tables, check CDC status
+  SELECT on sys.schemas                    Yes            Discover schemas
+  SELECT on sys.dm_server_services         Yes            Check SQL Server Agent status
+  EXECUTE on CDC system stored procedures  Yes            Access CDC change tables
+                                                          (granted via db_owner or explicit)
+  INSERT, UPDATE, DELETE on               Yes            Write watermark records for
+    dbo.debezium_signal                                  incremental snapshot windows
+  VIEW DATABASE STATE                      Recommended    Access DMVs for monitoring
+
+  Simplest setup (least friction):
+    Add the user to the db_owner role on the source database.
+
+  Least-privilege setup:
+    USE [MyDatabase];
+    -- Add to reader role
+    EXEC sp_addrolemember 'db_datareader', 'debezium_user';
+    -- Grant execute on CDC procedures
+    GRANT EXECUTE ON SCHEMA::cdc TO debezium_user;
+    -- Grant signal table access
+    GRANT INSERT, UPDATE, DELETE ON dbo.debezium_signal TO debezium_user;
+
+  Authentication error troubleshooting:
+    - Error 18456 → wrong username/password, or Mixed Mode not enabled
+    - Error 18452 → Windows-only authentication; enable Mixed Mode
+    - Error 4060  → database does not exist or user has no access
+    - "Adaptive Server connection failed" → TCP/IP disabled or wrong port
+
+
+================================================================================
+5. SQLITE
+================================================================================
+
+Limited support — file-based database, no CDC replication capability.
+SQLite CANNOT be used as a replication source or target for CDC.
+
+────────────────────────────────────────────────────────────────────────────────
+5.1  Connection Details
+────────────────────────────────────────────────────────────────────────────────
+
+  Field            Example / Default         Notes
+  ─────────────────────────────────────────────────────────────────────────────
+  Host             N/A                        Not applicable — SQLite is file-based
+  Port             N/A                        Not applicable
+  Database Name    /path/to/database.sqlite   Full file path on the server filesystem
+  Username         N/A                        Not applicable — no authentication
+  Password         N/A                        Not applicable
+
+  NOTE: SQLite does not have a binary log or replication log. It can be connected
+        to for read-only data inspection but is not suitable for production
+        CDC replication workflows.
+
+
+================================================================================
+QUICK REFERENCE — DEFAULT PORTS & ROLE SUMMARY
+================================================================================
+
+  Database     Default Port   Source (CDC)   Target   Min. User Requirement
+  ────────────────────────────────────────────────────────────────────────────
+  MySQL        3306           Yes            Yes      SQL user with REPLICATION grants
+                                                      + binlog / GTID enabled on server
+  PostgreSQL   5432           Yes            Yes      Role with REPLICATION attribute
+                                                      + CREATE on database
+                                                      + wal_level=logical on server
+  Oracle       1521           Yes            No       LOGMINING + SELECT ANY TABLE
+                                                      + catalog roles + V$ view grants
+                                                      + ARCHIVELOG mode on DB
+  SQL Server   1433           Yes            No       db_datareader + CDC execute perms
+                                                      + CDC & Agent enabled on server
+  SQLite       N/A            No             No       N/A (file-based, no auth)
+
+
+================================================================================
+NOTES
+================================================================================
+
+  • All passwords entered into the platform are stored encrypted.
+  • The connector user should be a dedicated account with the minimum permissions
+    listed above. Avoid using superuser / DBA accounts in production.
+  • For Oracle and SQL Server, the DBA must perform the server-level prerequisite
+    steps before the platform can start CDC replication.
+  • For MySQL and SQL Server, the source database host must be network-reachable
+    from the Debezium connector service.
+
+================================================================================
