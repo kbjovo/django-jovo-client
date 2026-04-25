@@ -321,11 +321,11 @@ def schedule_ddl_processing_all():
     group, so running both simultaneously causes unnecessary rebalances with no benefit.
     The batch task fires only as a fallback when the supervisor thread is down.
     """
-    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+    supported_types = ('mysql', 'mssql', 'sqlserver', 'oracle', 'postgresql', 'postgres')
     # All source types that have a continuous consumer (see start_continuous_ddl_consumer).
     # When the consumer is running we skip the batch task to avoid competing on the same
     # Kafka consumer group. The batch task fires as a fallback when the consumer is down.
-    continuous_consumer_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+    continuous_consumer_types = ('mysql', 'mssql', 'sqlserver', 'oracle', 'postgresql', 'postgres')
 
     active_configs = ReplicationConfig.objects.filter(
         status='active',
@@ -352,6 +352,7 @@ def schedule_ddl_processing_all():
         logger.info(f"Scheduled DDL processing for {scheduled} configs")
 
     return {'scheduled': scheduled}
+
 
 
 @shared_task(bind=True, queue='ddl_consumer', time_limit=None, soft_time_limit=None)
@@ -386,7 +387,7 @@ def start_ddl_supervisor(self):
         logger.info("DDL supervisor already running (lock held)")
         return {'success': False, 'error': 'Already running'}
 
-    supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+    supported_types = ('mysql', 'mssql', 'sqlserver', 'oracle', 'postgresql', 'postgres')
     threads: dict = {}      # config_id -> Thread
     stop_events: dict = {}  # config_id -> threading.Event
 
@@ -626,9 +627,9 @@ def start_continuous_ddl_consumer(self, config_id: int):
             return {'success': False, 'error': 'Config not found'}
 
         source_type = config.client_database.db_type.lower()
-        supported_types = ('mysql', 'mssql', 'sqlserver', 'postgresql', 'postgres')
+        supported_types = ('mysql', 'mssql', 'sqlserver', 'oracle', 'postgresql', 'postgres')
         if source_type not in supported_types:
-            logger.error(f"Continuous consumer only supports MySQL/MSSQL/PostgreSQL, not {source_type}")
+            logger.error(f"Continuous consumer only supports MySQL/MSSQL/Oracle/PostgreSQL, not {source_type}")
             return {'success': False, 'error': f'Unsupported source type: {source_type}'}
 
         target_db = config.client_database.client.client_databases.filter(is_target=True).first()

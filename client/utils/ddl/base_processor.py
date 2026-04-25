@@ -165,6 +165,55 @@ class BaseDDLProcessor(ABC):
         """Clean up resources."""
         pass
 
+    def _handle_truncate_for_table(self, source_table: str) -> bool:
+        """
+        Truncate the target table and trigger an incremental snapshot.
+
+        Called by both KafkaDDLProcessor (MySQL/Oracle) and
+        PostgreSQLKafkaDDLProcessor when a TRUNCATE is detected on source.
+        """
+        table_mapping = self.replication_config.table_mappings.filter(
+            source_table=source_table,
+            is_enabled=True
+        ).first()
+
+        if not table_mapping:
+            logger.debug(f"TRUNCATE on untracked table '{source_table}' — skipping")
+            return True
+
+        logger.info(f"TRUNCATE detected on tracked table '{source_table}' — triggering auto-resync")
+
+        target_db = self.replication_config.client_database.client.client_databases.filter(
+            is_target=True
+        ).first()
+        if not target_db:
+            logger.error(f"No target database found — cannot resync after TRUNCATE on '{source_table}'")
+            return False
+
+        from client.utils.table_creator import truncate_tables_for_mappings
+        ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
+        if not ok:
+            logger.error(f"Failed to truncate target table '{table_mapping.target_table}': {msg}")
+            return False
+
+        logger.info(f"  ✓ Target table '{table_mapping.target_table}' truncated")
+
+        try:
+            from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
+            signal_id, method = send_incremental_snapshot_signal(
+                self.replication_config.client_database,
+                self.replication_config,
+                [source_table]
+            )
+            logger.info(f"  ✓ Snapshot signal sent (ID: {signal_id}, via {method})")
+        except Exception as e:
+            logger.error(
+                f"  ✗ Snapshot signal failed for '{source_table}': {e} "
+                f"— target is truncated, manual resync may be needed"
+            )
+
+        return True
+
     def execute_operation(self, operation: DDLOperation) -> Tuple[bool, Optional[str]]:
         """
         Execute a DDL operation using the target adapter.

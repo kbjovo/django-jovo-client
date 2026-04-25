@@ -683,17 +683,12 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         """
         Process Oracle DDL captured by LogMiner from the schema history topic.
 
-        Oracle provides raw DDL strings (like MySQL), so we only need to handle
-        TRUNCATE here — other schema changes (ALTER, CREATE, DROP) are handled
-        by the sink connector's auto.create / auto.evolve settings.
+        Oracle TRUNCATE does not appear in the schema history topic (it doesn't
+        change the schema structure), so it is detected via op="t" on the change
+        topic instead (requires skipped.operations="none" on the connector).
+        All other schema changes (ALTER, CREATE, DROP) are handled by the sink
+        connector's auto.create / auto.evolve settings.
         """
-        ddl_upper = ddl.upper().strip()
-
-        if ddl_upper.startswith('TRUNCATE'):
-            return self._handle_truncate(ddl)
-
-        # All other Oracle DDL (ALTER TABLE, CREATE TABLE, etc.) — skip for now;
-        # the sink connector handles structural changes automatically.
         logger.debug(f"Ignoring Oracle DDL: {ddl[:60]}...")
         return True
 
@@ -710,62 +705,16 @@ class KafkaDDLProcessor(BaseDDLProcessor):
 
         If the table is not in the active mappings the event is silently ignored.
         """
+        # Optional schema/db prefix (e.g. `db`.`table`, "SCHEMA"."TABLE", schema.table)
         match = re.search(
-            r'TRUNCATE\s+(?:TABLE\s+)?[`"\[]?(\w+)[`"\]]?',
+            r'TRUNCATE\s+(?:TABLE\s+)?(?:[`"\[]?\w+[`"\]]?\s*\.\s*)?[`"\[]?(\w+)[`"\]]?',
             ddl, re.IGNORECASE
         )
         if not match:
             logger.warning(f"Could not parse table name from TRUNCATE DDL: {ddl[:80]}")
             return True
 
-        source_table = match.group(1)
-
-        table_mapping = self.replication_config.table_mappings.filter(
-            source_table=source_table,
-            is_enabled=True
-        ).first()
-
-        if not table_mapping:
-            logger.debug(f"TRUNCATE on untracked table '{source_table}' — skipping")
-            return True
-
-        logger.info(f"TRUNCATE detected on tracked table '{source_table}' — triggering auto-resync")
-
-        # Step 1: truncate the target table
-        target_db = self.replication_config.client_database.client.client_databases.filter(
-            is_target=True
-        ).first()
-
-        if not target_db:
-            logger.error(f"No target database found — cannot resync after TRUNCATE on '{source_table}'")
-            return False
-
-        from client.utils.table_creator import truncate_tables_for_mappings
-        ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
-        if not ok:
-            logger.error(f"Failed to truncate target table '{table_mapping.target_table}': {msg}")
-            return False
-
-        logger.info(f"  ✓ Target table '{table_mapping.target_table}' truncated")
-
-        # Step 2: send incremental snapshot signal so Debezium re-reads the source
-        try:
-            from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
-            signal_id, method = send_incremental_snapshot_signal(
-                self.replication_config.client_database,
-                self.replication_config,
-                [source_table]
-            )
-            logger.info(f"  ✓ Snapshot signal sent (ID: {signal_id}, via {method})")
-        except Exception as e:
-            # Target is already truncated — log but don't fail the DDL batch.
-            # The user can trigger a manual resync from the UI if needed.
-            logger.error(
-                f"  ✗ Snapshot signal failed for '{source_table}': {e} "
-                f"— target is truncated, manual resync may be needed"
-            )
-
-        return True
+        return self._handle_truncate_for_table(match.group(1))
 
     def _handle_drop_table(self, ddl: str) -> bool:
         """Handle DROP TABLE."""
@@ -1146,7 +1095,7 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                     table_name = topic.rsplit('.', 1)[-1]
 
                     logger.info(f"op=t detected on topic '{topic}' — triggering resync for '{table_name}'")
-                    self._handle_truncate(f"TRUNCATE TABLE `{table_name}`")
+                    self._handle_truncate_for_table(table_name)
                     handled += 1
 
                 except Exception as e:
@@ -1156,6 +1105,18 @@ class KafkaDDLProcessor(BaseDDLProcessor):
 
             if last_msg is not None:
                 self.truncate_consumer.commit(last_msg)
+            else:
+                # No messages received — commit current fetch positions so the next
+                # run (or supervisor restart) doesn't reset to 'latest' and skip
+                # any truncate event that arrives between now and the next poll.
+                try:
+                    assignment = self.truncate_consumer.assignment()
+                    if assignment:
+                        positions = self.truncate_consumer.position(assignment)
+                        if positions:
+                            self.truncate_consumer.commit(offsets=positions, asynchronous=False)
+                except Exception as e:
+                    logger.debug(f"Truncate watcher position commit failed: {e}")
 
         except Exception as e:
             logger.error(f"Truncate watcher poll error: {e}")

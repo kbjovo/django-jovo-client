@@ -411,6 +411,10 @@ def get_postgresql_connector_config(
 
         "tombstones.on.delete": "true",
 
+        # Emit truncate events (op="t") to change topics so the truncate watcher
+        # can detect TRUNCATE TABLE and auto-resync the target.
+        "skipped.operations": "none",
+
         # Snapshot fetch size - controls JDBC fetchSize during initial snapshot
         # Prevents OOM by limiting how many rows the JDBC driver buffers at a time
         "snapshot.fetch.size": str(replication_config.snapshot_fetch_size) if replication_config and hasattr(replication_config, 'snapshot_fetch_size') else "10000",
@@ -820,7 +824,10 @@ def get_oracle_connector_config(
         "errors.log.include.messages": "true",
 
         "provide.transaction.metadata": "false",
-        "skipped.operations": "t",
+        # Emit truncate events (op="t") to change topics so the truncate watcher
+        # can detect TRUNCATE TABLE and auto-resync the target.
+        # Default is "t" (skip truncate) — "none" means skip nothing.
+        "skipped.operations": "none",
 
         "key.converter": "io.confluent.connect.avro.AvroConverter",
         "key.converter.schema.registry.url": schema_registry_url,

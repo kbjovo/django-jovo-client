@@ -96,6 +96,12 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
         self.source_schema = getattr(db_config, 'schema', 'public') or 'public'
         self.source_database = db_config.database_name
 
+        # Truncate watcher: subscribes to change topics for op="t" events
+        # Requires skipped.operations="none" on the PostgreSQL connector.
+        self.truncate_consumer = None
+        self._truncate_deserializer = None
+        self._init_truncate_watcher(replication_config, bootstrap_servers, group_id)
+
         logger.info(f"PostgreSQLKafkaDDLProcessor initialized")
         logger.info(f"   DDL topic: {self.ddl_topic}")
         logger.info(f"   Consumer group: {group_id}")
@@ -185,6 +191,8 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
 
         if processed > 0 or errors > 0:
             logger.info(f"PostgreSQL DDL processing complete: {processed} processed, {errors} errors")
+
+        self.poll_truncate_events(timeout_sec=2.0)
 
         return processed, errors
 
@@ -632,8 +640,101 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
             logger.error(f"Failed to delete schema subjects: {e}")
             return False
 
+    def _init_truncate_watcher(self, replication_config, bootstrap_servers: str, schema_group_id: str) -> None:
+        """Subscribe to change topics to detect op='t' (TRUNCATE) events."""
+        try:
+            sr_url = settings.DEBEZIUM_CONFIG.get('SCHEMA_REGISTRY_URL', 'http://schema-registry:8081')
+            sr_client = SchemaRegistryClient({'url': sr_url})
+            self._truncate_deserializer = AvroDeserializer(sr_client)
+
+            db_config = replication_config.client_database
+            topic_prefix = (
+                replication_config.kafka_topic_prefix
+                or f"client_{db_config.client_id}_db_{db_config.id}_v_{replication_config.connector_version or 0}"
+            )
+            # RegexRouter rewrites {prefix}.public.table → {prefix}.{db_name}.table
+            change_topics = [
+                f"{topic_prefix}.{db_config.database_name}.{m.source_table.split('.')[-1]}"
+                for m in replication_config.table_mappings.filter(is_enabled=True)
+            ]
+
+            if not change_topics:
+                return
+
+            self.truncate_consumer = Consumer({
+                'bootstrap.servers': bootstrap_servers,
+                'group.id': f'{schema_group_id}-truncate-watcher',
+                'auto.offset.reset': 'latest',
+                'enable.auto.commit': False,
+                'session.timeout.ms': 30000,
+                'max.poll.interval.ms': 300000,
+            })
+            self.truncate_consumer.subscribe(change_topics)
+            logger.info(f"Truncate watcher initialized — watching {len(change_topics)} change topic(s)")
+
+        except Exception as e:
+            logger.warning(f"Could not init truncate watcher (non-fatal): {e}")
+            self.truncate_consumer = None
+            self._truncate_deserializer = None
+
+    def poll_truncate_events(self, timeout_sec: float = 2.0) -> int:
+        """Poll change topics for op='t' (TRUNCATE) events and trigger resync."""
+        if not self.truncate_consumer or not self._truncate_deserializer:
+            return 0
+
+        handled = 0
+        try:
+            msgs = self.truncate_consumer.consume(num_messages=50, timeout=timeout_sec)
+            last_msg = None
+            for msg in msgs:
+                if msg.error():
+                    continue
+                if msg.value() is None:
+                    continue
+
+                try:
+                    record = self._truncate_deserializer(msg.value(), None)
+                    if not record:
+                        continue
+
+                    op = record.get('op') or record.get('payload', {}).get('op')
+                    if op != 't':
+                        continue
+
+                    table_name = msg.topic().rsplit('.', 1)[-1]
+                    logger.info(f"op=t detected on topic '{msg.topic()}' — triggering resync for '{table_name}'")
+                    self._handle_truncate_for_table(table_name)
+                    handled += 1
+
+                except Exception as e:
+                    logger.debug(f"Could not decode change topic message: {e}")
+
+                last_msg = msg
+
+            if last_msg is not None:
+                self.truncate_consumer.commit(last_msg)
+            else:
+                try:
+                    assignment = self.truncate_consumer.assignment()
+                    if assignment:
+                        positions = self.truncate_consumer.position(assignment)
+                        if positions:
+                            self.truncate_consumer.commit(offsets=positions, asynchronous=False)
+                except Exception as e:
+                    logger.debug(f"Truncate watcher position commit failed: {e}")
+
+        except Exception as e:
+            logger.error(f"Truncate watcher poll error: {e}")
+
+        return handled
+
     def close(self):
-        """Close Kafka consumer."""
+        """Close Kafka consumers."""
+        if self.truncate_consumer:
+            try:
+                self.truncate_consumer.close()
+            except Exception as e:
+                logger.error(f"Error closing truncate watcher: {e}")
         if self.consumer:
             try:
                 self.consumer.close()
