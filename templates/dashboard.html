@@ -64,7 +64,6 @@
         value="{{ total_connectors }}"
         icon="sync"
         color="purple"
-        href="{% url 'connectors_list' %}"
       />
 
       <!-- Active Connectors -->
@@ -73,26 +72,15 @@
         value="{{ active_connectors }}"
         icon="chart"
         color="green"
-        href="{% url 'monitoring_dashboard' %}"
       />
 
       <!-- Failed Connectors -->
-      {% if failed_connectors > 0 %}
-      <c-stat-card
-        title="Failed Connectors"
-        value="{{ failed_connectors }}"
-        icon="alert"
-        color="red"
-        href="{% url 'monitoring_dashboard' %}"
-      />
-      {% else %}
       <c-stat-card
         title="Failed Connectors"
         value="{{ failed_connectors }}"
         icon="alert"
         color="red"
       />
-      {% endif %}
 
     </div>
 

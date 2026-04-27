@@ -25,7 +25,6 @@ from .views import (
 
 # Import connector views (split across focused modules)
 from .views.connector_list_views import (
-    connectors_list,
     client_connectors_list,
     connector_list,
 )
@@ -83,7 +82,6 @@ urlpatterns = [
     # ==========================================
     path('', dashboard, name='main-dashboard'),
     path('clients/', clients_list, name='clients_list'),
-    path('connectors/', connectors_list, name='connectors_list'),  # Global connectors view (replaces replications)
     path('monitoring/', monitoring_dashboard, name='monitoring_dashboard'),
 
     # ==========================================

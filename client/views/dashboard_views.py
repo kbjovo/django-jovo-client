@@ -140,17 +140,10 @@ def clients_list(request):
 def monitoring_dashboard(request):
     """
     Real-time monitoring dashboard for all active replications.
-
-    Shows:
-    - Active connectors with health status
-    - Recent sync activity
-    - Error alerts
-    - Performance metrics
-    - Task statuses
     """
     from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+    from client.models.database import ClientDatabase
 
-    # Get all active replications
     active_replications = ReplicationConfig.objects.select_related(
         'client_database', 'client_database__client'
     ).filter(
@@ -159,11 +152,21 @@ def monitoring_dashboard(request):
         Q(connector_name__isnull=True) | Q(connector_name='')
     ).order_by('-updated_at')
 
+    # Pre-fetch sink (target) databases keyed by client_id to avoid N+1
+    client_ids = {c.client_database.client_id for c in active_replications}
+    sink_db_map = {
+        db.client_id: db
+        for db in ClientDatabase.objects.filter(client_id__in=client_ids, is_target=True)
+    }
+
     manager = DebeziumConnectorManager()
 
-    # Build monitoring data
+    STATE_PRIORITY = {'ERROR': 0, 'FAILED': 1, 'PAUSED': 2, 'RUNNING': 3, 'UNKNOWN': 4}
+
     monitoring_data = []
     for config in active_replications:
+        sink_db = sink_db_map.get(config.client_database.client_id)
+        is_batch = config.processing_mode == 'batch'
         try:
             exists, status_data = manager.get_connector_status(config.connector_name)
 
@@ -173,7 +176,6 @@ def monitoring_dashboard(request):
 
             connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
             tasks = status_data.get('tasks', [])
-
             has_failed_task = any(task.get('state') == 'FAILED' for task in tasks)
             connector_trace = status_data.get('connector', {}).get('trace', '')
             monitoring_data.append({
@@ -183,6 +185,10 @@ def monitoring_dashboard(request):
                 'tasks': tasks,
                 'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
                 'error_count': sum(1 for task in tasks if task.get('state') == 'FAILED'),
+                'sink_database': sink_db,
+                'last_batch_run': config.last_batch_run if is_batch else None,
+                'next_batch_run': config.next_batch_run if is_batch else None,
+                'batch_sync_started_at': config.batch_sync_started_at if is_batch else None,
             })
         except Exception as e:
             logger.error(f"Error fetching status for {config.connector_name}: {e}")
@@ -193,15 +199,23 @@ def monitoring_dashboard(request):
                 'is_healthy': False,
                 'error_count': 1,
                 'error_message': str(e),
+                'sink_database': sink_db,
+                'last_batch_run': config.last_batch_run if is_batch else None,
+                'next_batch_run': config.next_batch_run if is_batch else None,
+                'batch_sync_started_at': config.batch_sync_started_at if is_batch else None,
             })
 
-    # Calculate summary stats
+    # Sort: FAILED/ERROR first, then PAUSED, then RUNNING; alpha within each group
+    monitoring_data.sort(key=lambda x: (
+        STATE_PRIORITY.get(x['connector_state'], 4),
+        x['config'].connector_name,
+    ))
+
     total_active = len(monitoring_data)
     healthy_count = sum(1 for item in monitoring_data if item.get('is_healthy'))
     unhealthy_count = total_active - healthy_count
     total_errors = sum(item.get('error_count', 0) for item in monitoring_data)
 
-    # Build unique client list for filter
     clients = sorted(
         {(item['config'].client_database.client.pk, item['config'].client_database.client.name)
          for item in monitoring_data},

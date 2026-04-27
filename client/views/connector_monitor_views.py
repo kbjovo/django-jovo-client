@@ -441,7 +441,15 @@ def connector_dashboard_card_api(request, config_pk):
             logger.warning(f'Sync status check failed for config {config_pk}: {e}')
             sync = {'status': 'unable_to_check'}
 
-        return JsonResponse({'success': True, 'card': card, 'sync': sync})
+        batch = None
+        if config.processing_mode == 'batch':
+            batch = {
+                'last_batch_run': config.last_batch_run.isoformat() if config.last_batch_run else None,
+                'next_batch_run': config.next_batch_run.isoformat() if config.next_batch_run else None,
+                'batch_sync_started_at': config.batch_sync_started_at.isoformat() if config.batch_sync_started_at else None,
+            }
+
+        return JsonResponse({'success': True, 'card': card, 'sync': sync, 'batch': batch})
 
     except Exception as e:
         logger.error(f'Dashboard card API failed for config {config_pk}: {e}', exc_info=True)
