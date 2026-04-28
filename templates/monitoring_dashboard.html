@@ -206,9 +206,10 @@
                 {% endif %}
               </div>
               <div class="min-w-0 flex-1">
-                <h3 class="text-base font-semibold text-gray-900 dark:text-white font-mono truncate">
+                <a href="{% url 'connector_monitor' item.config.pk %}"
+                   class="block text-base font-semibold text-blue-600 dark:text-blue-400 hover:underline font-mono truncate">
                   {{ item.config.connector_name }}
-                </h3>
+                </a>
                 <p class="text-xs text-gray-600 dark:text-gray-400 truncate">
                   {{ item.config.client_database.client.name }} &middot; {{ item.config.client_database.connection_name }}
                 </p>
@@ -307,24 +308,6 @@
               </button>
             </div>
             {% endif %}
-          </div>
-          <!-- Card Actions -->
-          <div class="flex items-center gap-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-            <a href="{% url 'connector_monitor' item.config.pk %}"
-               class="flex-1 inline-flex justify-center items-center gap-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
-              </svg>
-              View Details
-            </a>
-            <a href="{% url 'client_detail' item.config.client_database.client.pk %}"
-               class="flex-1 inline-flex justify-center items-center gap-1 px-3 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 text-xs font-medium rounded-lg transition">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
-              </svg>
-              View Client
-            </a>
           </div>
         </div>
       </div>
