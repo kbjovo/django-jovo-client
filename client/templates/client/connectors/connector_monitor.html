@@ -894,7 +894,7 @@ async function confirmResync(tables) {
           .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const fullTrace = t.trace.replace(/'/g, "\\'").replace(/\n/g, '\\n');
         traceHtml = `<button class="w-full text-left mt-0.5 px-2 py-1.5 bg-red-50 dark:bg-red-900/10 rounded group" onclick="showErrorModal('Task ${t.id} \u2014 Error Trace', '${fullTrace}')">
-          <p class="text-xs font-mono text-red-600 dark:text-red-400 truncate">${shortTrace}</p>
+          <p class="text-xs font-mono text-red-400 dark:text-red-400 truncate">${shortTrace}</p>
           <p class="text-xs text-red-400 dark:text-red-500 mt-0.5 group-hover:underline">Click to view full trace &rarr;</p>
         </button>`;
       }
