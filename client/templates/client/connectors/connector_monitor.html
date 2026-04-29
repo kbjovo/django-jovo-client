@@ -641,8 +641,8 @@ function fetchTableRows() {
           targetHtml = '<span class="font-semibold text-gray-900 dark:text-white">' + Number(t.target_rows).toLocaleString() + '</span>'
             + '<span title="Matches source" class="ml-2 text-xs font-semibold text-green-500 dark:text-green-400">&#10003;</span>';
         } else {
-          targetHtml = '<span class="font-semibold text-amber-500 dark:text-amber-400">' + Number(t.target_rows).toLocaleString() + '</span>'
-            + '<span title="Mismatch with source" class="ml-2 text-xs font-semibold text-amber-500 dark:text-amber-400">&ne;</span>';
+          targetHtml = '<span class="font-semibold text-red-600 dark:text-red-400">' + Number(t.target_rows).toLocaleString() + '</span>'
+            + '<span title="Mismatch with source" class="ml-2 text-xs font-semibold text-red-600 dark:text-red-400">&ne;</span>';
         }
 
         html += '<tr style="border-bottom:1px solid rgba(107,114,128,0.2)" onmouseover="this.style.background=\'rgba(107,114,128,0.15)\'" onmouseout="this.style.background=\'\'">'
