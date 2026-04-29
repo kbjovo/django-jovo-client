@@ -532,7 +532,15 @@ function renderSyncBadge(sync) {
   const svgInner = iconPath === 'spin'
     ? `<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>`
     : `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">${iconPath}</svg>`;
-  return `<span title="${tip}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls} cursor-help">${svgInner}${n}/${t}</span>`;
+  const badge = `<span title="${tip}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls} cursor-help">${svgInner}${n}/${t}</span>`;
+  // Show "Last synced X ago" only when tables are out of sync
+  const notInSync = s !== 'rows_in_sync';
+  const lastSyncedHtml = (notInSync && sync.last_fully_synced)
+    ? `<span class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">Last synced ${timeAgo(new Date(sync.last_fully_synced))}</span>`
+    : '';
+  return notInSync && lastSyncedHtml
+    ? `<div class="flex flex-col items-start gap-0.5">${badge}${lastSyncedHtml}</div>`
+    : badge;
 }
 
 // ─── Tasks renderer ────────────────────────────────────────────────────────────

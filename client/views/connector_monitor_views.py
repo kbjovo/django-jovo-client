@@ -424,6 +424,8 @@ def connector_dashboard_card_api(request, config_pk):
 
                     if in_sync_count == total_count:
                         status = 'rows_in_sync'
+                        config.last_success_at = timezone.now()
+                        config.save(update_fields=['last_success_at'])
                     elif config.processing_mode == 'batch':
                         status = 'syncing' if connector_state == 'RUNNING' else 'yet_to_be_synced'
                     else:
@@ -435,6 +437,7 @@ def connector_dashboard_card_api(request, config_pk):
                         'total_count': total_count,
                         'synced': in_sync_count,
                         'not_synced': not_synced_count,
+                        'last_fully_synced': config.last_success_at.isoformat() if config.last_success_at else None,
                     }
 
         except Exception as e:
