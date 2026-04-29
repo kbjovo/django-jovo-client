@@ -23,9 +23,10 @@
         <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Monitor active replication connectors and their health status</p>
       </div>
       <button
-        onclick="window.location.reload()"
+        id="refresh-btn"
+        onclick="refreshAll()"
         class="inline-flex text-sm items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 px-4 rounded-lg shadow-sm hover:shadow transition">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg id="refresh-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
         </svg>
         Refresh
@@ -316,7 +317,8 @@
 
     <!-- ═══════════════════════════════════════════════════════════════ LIST VIEW -->
     <div x-show="viewMode === 'list'" x-cloak class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
-      <table class="w-full text-sm">
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm min-w-[820px]">
         <thead>
           <tr class="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50">
             <th class="w-8 px-4 py-3"></th>
@@ -384,12 +386,21 @@
             <!-- State badge -->
             <td class="px-4 py-3 whitespace-nowrap">
               <span id="list-state-badge-{{ item.config.pk }}"
-                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold
-                {% if item.connector_state == 'RUNNING' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
-                {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400
-                {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400
-                {% else %}bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300{% endif %}">
-                {{ item.connector_state }}
+                    title="{{ item.connector_state }}"
+                    class="inline-flex items-center justify-center w-7 h-7 rounded-full
+                {% if item.connector_state == 'RUNNING' %}bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400
+                {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400
+                {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400
+                {% else %}bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400{% endif %}">
+                {% if item.connector_state == 'RUNNING' %}
+                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                {% elif item.connector_state == 'PAUSED' %}
+                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
+                {% else %}
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01"/></svg>
+                {% endif %}
               </span>
             </td>
 
@@ -439,6 +450,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     </div>
 
     {% else %}
@@ -652,13 +664,24 @@ function applyCardUpdate(pk, data) {
   const listBadge = document.getElementById(`list-state-badge-${pk}`);
   if (listBadge) {
     const st = card.connector_state;
-    let cls = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ';
-    if (st === 'RUNNING') cls += 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
-    else if (st === 'FAILED' || st === 'ERROR') cls += 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
-    else if (st === 'PAUSED') cls += 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400';
-    else cls += 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
+    let cls = 'inline-flex items-center justify-center w-7 h-7 rounded-full ';
+    let icon = '';
+    if (st === 'RUNNING') {
+      cls += 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400';
+      icon = '<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+    } else if (st === 'PAUSED') {
+      cls += 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400';
+      icon = '<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
+    } else if (st === 'FAILED' || st === 'ERROR') {
+      cls += 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400';
+      icon = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>';
+    } else {
+      cls += 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400';
+      icon = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01"/></svg>';
+    }
     listBadge.className = cls;
-    listBadge.textContent = st;
+    listBadge.title = st;
+    listBadge.innerHTML = icon;
   }
   const listSync = document.getElementById(`list-sync-value-${pk}`);
   if (listSync) listSync.innerHTML = renderSyncBadge(sync);
@@ -711,6 +734,39 @@ function tickListTimers() {
     if (lastEl && lastRaw) lastEl.textContent = timeAgo(new Date(lastRaw));
     if (nextEl && nextRaw) nextEl.textContent = timeUntil(new Date(nextRaw));
     if (timerEl) timerEl.textContent = startedRaw ? elapsed(new Date(startedRaw)) : '—';
+  });
+}
+
+const SPINNER_HTML = '<svg class="w-4 h-4 animate-spin text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>';
+
+function refreshAll() {
+  const icon = document.getElementById('refresh-icon');
+  const btn  = document.getElementById('refresh-btn');
+  if (icon) icon.classList.add('animate-spin');
+  if (btn)  btn.disabled = true;
+
+  const polls = [];
+  document.querySelectorAll('[data-config-pk][data-poll-url]').forEach(function(el) {
+    const pk  = parseInt(el.dataset.configPk, 10);
+    const url = el.dataset.pollUrl;
+
+    // Reset sync cells to spinner while fetching
+    const cardSync = document.getElementById(`sync-value-${pk}`);
+    if (cardSync) cardSync.innerHTML = SPINNER_HTML;
+    const listSync = document.getElementById(`list-sync-value-${pk}`);
+    if (listSync) listSync.innerHTML = SPINNER_HTML;
+
+    polls.push(
+      fetch(url).then(r => r.json()).then(data => { if (data.success) applyCardUpdate(pk, data); }).catch(() => {
+        if (cardSync) cardSync.innerHTML = '<span class="text-xs text-red-400">—</span>';
+        if (listSync) listSync.innerHTML = '<span class="text-xs text-red-400">—</span>';
+      })
+    );
+  });
+
+  Promise.all(polls).finally(function() {
+    if (icon) icon.classList.remove('animate-spin');
+    if (btn)  btn.disabled = false;
   });
 }
 

@@ -60,6 +60,14 @@
         </div>
       </div>
 
+      <button id="monitor-refresh-btn" onclick="refreshMonitor()"
+        class="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed">
+        <svg id="monitor-refresh-icon" class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+        </svg>
+        <span id="monitor-refresh-label">Refresh</span>
+      </button>
+
       <a href="{% url 'connector_list' database.pk %}"
          class="inline-flex items-center px-4 py-2 bg-gray-600 hover:bg-gray-700 dark:bg-gray-700 dark:hover:bg-gray-600 text-white rounded-lg transition text-sm font-medium">
         &larr; Back to Connectors
@@ -447,6 +455,22 @@
 <script>
 // CSRF token for POST requests
 const CSRF_TOKEN = '{{ csrf_token }}';
+
+function refreshMonitor() {
+  const icon = document.getElementById('monitor-refresh-icon');
+  const btn  = document.getElementById('monitor-refresh-btn');
+  if (icon) icon.classList.add('animate-spin');
+  if (btn)  btn.disabled = true;
+
+  fetchTableRows();
+  fetchLiveMetrics();
+  pollNow();
+
+  setTimeout(function() {
+    if (icon) icon.classList.remove('animate-spin');
+    if (btn)  btn.disabled = false;
+  }, 2000);
+}
 
 function connectorAction(url, loadingMsg) {
   showToast('info', loadingMsg);
