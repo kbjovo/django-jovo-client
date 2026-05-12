@@ -193,6 +193,27 @@ def resync_table(request, config_pk):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
+def connector_recover_binlog(request, config_pk):
+    """
+    Recover a MySQL connector stuck on a purged binlog offset.
+
+    Temporarily sets snapshot.mode=schema_only_recovery, restarts failed tasks,
+    waits for recovery, then reverts snapshot.mode to its original value.
+    Safe to call without deleting the connector.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.recover_binlog_offset()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Binlog recovery failed for config {config_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
 def check_oracle_privileges_api(request, database_pk):
     """
     AJAX GET: Check Oracle privileges for LogMiner CDC.

@@ -62,6 +62,11 @@ def connector_monitor(request, config_pk):
 
         target_database = client.client_databases.filter(is_target=True).first()
 
+        has_binlog_error = any(
+            t.get('state') == 'FAILED' and 'BinlogOffsetContext' in (t.get('trace') or '')
+            for t in source_tasks
+        )
+
         context = {
             'replication_config': replication_config,
             'database': database,
@@ -78,6 +83,7 @@ def connector_monitor(request, config_pk):
             'enabled_table_mappings': replication_config.table_mappings.filter(is_enabled=True).order_by('source_table'),
             'connector_history': connector_history,
             'sink_connector_history': sink_connector_history,
+            'has_binlog_error': has_binlog_error,
         }
 
         return render(request, 'client/connectors/connector_monitor.html', context)

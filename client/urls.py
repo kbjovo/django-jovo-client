@@ -53,6 +53,7 @@ from .views.connector_action_views import (
     connector_restart_failed_tasks,
     connector_restart_all_tasks,
     connector_sync_schedule,
+    connector_recover_binlog,
     sink_restart,
     sink_restart_failed_tasks,
     sink_restart_all_tasks,
@@ -196,6 +197,10 @@ urlpatterns = [
     path('connector/<int:config_pk>/sync-schedule/',
          connector_sync_schedule,
          name='connector_sync_schedule'),
+
+    path('connector/<int:config_pk>/recover-binlog/',
+         connector_recover_binlog,
+         name='connector_recover_binlog'),
 
     # Sink connector action endpoints (AJAX)
     path('connector/<int:config_pk>/sink/restart/',

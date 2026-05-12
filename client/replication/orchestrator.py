@@ -2330,6 +2330,83 @@ class ReplicationOrchestrator:
             self._log_error(error_msg)
             return False, error_msg
 
+    def recover_binlog_offset(self) -> Tuple[bool, str]:
+        """
+        Recover a MySQL connector stuck on a purged binlog position.
+
+        The connector's saved offset points to a binlog file that no longer
+        exists on the server (binlog was rotated/purged). This temporarily
+        sets snapshot.mode=schema_only_recovery so Debezium skips the missing
+        position and resumes from the earliest available binlog, then reverts
+        the setting so future restarts behave normally.
+
+        Steps:
+          1. Fetch current config from Kafka Connect
+          2. Swap snapshot.mode to schema_only_recovery
+          3. Restart failed tasks
+          4. Poll until task is RUNNING (max 20 s)
+          5. Revert snapshot.mode to original value
+        """
+        import time
+        connector_name = self.config.connector_name
+        if not connector_name:
+            return False, "No connector configured"
+
+        try:
+            # Step 1 — read current config
+            current_config = self.connector_manager.get_connector_config(connector_name)
+            if not current_config:
+                return False, "Could not read connector config from Kafka Connect"
+
+            original_snapshot_mode = current_config.get('snapshot.mode', 'initial')
+
+            # Step 2 — patch snapshot.mode
+            recovery_config = dict(current_config)
+            recovery_config['snapshot.mode'] = 'recovery'
+            ok, err = self.connector_manager.update_connector_config(connector_name, recovery_config)
+            if not ok:
+                return False, f"Failed to update connector config: {err}"
+            self._log_info("Set snapshot.mode=schema_only_recovery for binlog recovery")
+
+            # Step 3 — restart failed tasks
+            _, status_data = self.connector_manager.get_connector_status(connector_name)
+            failed_tasks = [
+                t for t in (status_data or {}).get('tasks', [])
+                if t.get('state') == 'FAILED'
+            ]
+            if not failed_tasks:
+                failed_tasks = (status_data or {}).get('tasks', [])  # restart all if none explicitly failed
+
+            for task in failed_tasks:
+                self.connector_manager.restart_task(connector_name, task.get('id', 0))
+
+            # Step 4 — poll until running (max 20 s)
+            recovered = False
+            for _ in range(20):
+                time.sleep(1)
+                _, status_data = self.connector_manager.get_connector_status(connector_name)
+                tasks = (status_data or {}).get('tasks', [])
+                if tasks and all(t.get('state') == 'RUNNING' for t in tasks):
+                    recovered = True
+                    break
+
+            # Step 5 — revert snapshot.mode regardless of outcome
+            revert_config = dict(recovery_config)
+            revert_config['snapshot.mode'] = original_snapshot_mode
+            self.connector_manager.update_connector_config(connector_name, revert_config)
+            self._log_info(f"Reverted snapshot.mode back to '{original_snapshot_mode}'")
+
+            if recovered:
+                self._log_info("✓ Binlog offset recovery successful")
+                return True, "Connector recovered successfully. Binlog offset has been reset."
+
+            return True, "Recovery initiated. Tasks were restarted — check status in a few seconds."
+
+        except Exception as e:
+            error_msg = f"Binlog offset recovery failed: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
     def restart_failed_tasks(self, connector_name: str = None) -> Tuple[bool, str]:
         """
         Restart only FAILED tasks for a connector.
