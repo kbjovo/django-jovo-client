@@ -129,7 +129,7 @@
                 Sync with Schedule
               </button>
               {% endif %}
-              {% if database.db_type == 'mysql' %}
+              {% if has_binlog_error %}
               <div class="border-t border-gray-100 dark:border-gray-700 my-1"></div>
               <button id="btn-recover-binlog" @click="connectorAction('{% url 'connector_recover_binlog' replication_config.pk %}', 'Recovering binlog offset...'); srcMenu = false"
                 class="w-full text-left px-3 py-1.5 text-xs text-orange-700 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20">
