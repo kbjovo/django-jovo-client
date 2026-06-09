@@ -335,7 +335,7 @@
           <tr id="list-row-{{ item.config.pk }}"
               data-config-pk="{{ item.config.pk }}"
               x-show="isVisible({{ item.config.client_database.client.pk }}, '{{ item.config.connector_name|escapejs }}')"
-              class="group transition-colors {% if not item.is_healthy %}bg-red-900/10 hover:bg-red-900/20{% else %}hover:bg-gray-700/30{% endif %}">
+              class="group transition-colors {% if not item.is_healthy %}bg-red-900/10 hover:bg-red-900/20{% else %}hover:bg-gray-100 dark:hover:bg-gray-700/20{% endif %}">
 
             <!-- Status dot -->
             <td class="px-4 py-3">
