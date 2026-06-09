@@ -1841,10 +1841,10 @@ class ReplicationOrchestrator:
             })
 
             # ========================================
-            # STEP 5.5: Add foreign keys to new target tables
+            # STEP 5.5: Add foreign keys + indexes to new target tables
             # ========================================
-            self._log_info("STEP 5.5/6: Adding foreign keys to new target tables...")
-            from client.utils.table_creator import add_foreign_keys_to_target
+            self._log_info("STEP 5.5/6: Adding foreign keys and indexes to new target tables...")
+            from client.utils.table_creator import add_foreign_keys_to_target, add_indexes_to_target
             try:
                 # Wait a moment for sink to create the tables
                 import time
@@ -1853,12 +1853,18 @@ class ReplicationOrchestrator:
                 self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
                 if errors:
                     self._log_warning(f"⚠️ FK errors: {errors}")
+                idx_created, idx_skipped, idx_errors = add_indexes_to_target(self.config, specific_tables=added_tables)
+                self._log_info(f"✓ Indexes: {idx_created} created, {idx_skipped} skipped")
+                if idx_errors:
+                    self._log_warning(f"⚠️ Index errors: {idx_errors}")
                 steps.append({
                     'id': 'fk',
-                    'status': 'ok' if not errors else 'warn',
+                    'status': 'ok' if not errors and not idx_errors else 'warn',
                     'msg': (
                         f"Foreign keys: {created} created, {skipped} skipped"
                         + (f" ({len(errors)} error(s))" if errors else "")
+                        + f" | Indexes: {idx_created} created, {idx_skipped} skipped"
+                        + (f" ({len(idx_errors)} error(s))" if idx_errors else "")
                     ),
                 })
             except Exception as e:
@@ -2120,6 +2126,7 @@ class ReplicationOrchestrator:
             'celery_task_name': self.config.batch_celery_task_name,
             'schedule_active': schedule_active,
             'is_on_schedule': is_on_schedule,
+            'last_batch_operations': self.config.last_batch_operations,
         }
 
     def _get_connector_status(self) -> Dict[str, Any]:
@@ -2837,9 +2844,9 @@ class ReplicationOrchestrator:
         import time
         self._log_info("Finalizing batch replication (post-snapshot)...")
         try:
-            # 1. Add foreign keys to target tables
-            self._log_info("Adding foreign keys to target tables...")
-            from client.utils.table_creator import add_foreign_keys_to_target
+            # 1. Add foreign keys + indexes to target tables
+            self._log_info("Adding foreign keys and indexes to target tables...")
+            from client.utils.table_creator import add_foreign_keys_to_target, add_indexes_to_target
             try:
                 created, skipped, errors = add_foreign_keys_to_target(self.config)
                 self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
@@ -2847,6 +2854,13 @@ class ReplicationOrchestrator:
                     self._log_warning(f"⚠️ FK errors: {errors}")
             except Exception as e:
                 self._log_warning(f"⚠️ Could not add foreign keys: {e}")
+            try:
+                idx_created, idx_skipped, idx_errors = add_indexes_to_target(self.config)
+                self._log_info(f"✓ Indexes: {idx_created} created, {idx_skipped} skipped")
+                if idx_errors:
+                    self._log_warning(f"⚠️ Index errors: {idx_errors}")
+            except Exception as e:
+                self._log_warning(f"⚠️ Could not add indexes: {e}")
 
             # 2. Pause connector so batch schedule controls when it runs
             self._log_info("Pausing connector for batch scheduling...")
@@ -2917,9 +2931,9 @@ class ReplicationOrchestrator:
                     self._log_warning(f"Snapshot wait issue: {message}")
                     # Continue anyway - connector might still be usable
 
-            # Step 2.5: Add foreign keys to target tables
-            self._log_info("Step 2.5/4: Adding foreign keys to target tables...")
-            from client.utils.table_creator import add_foreign_keys_to_target
+            # Step 2.5: Add foreign keys + indexes to target tables
+            self._log_info("Step 2.5/4: Adding foreign keys and indexes to target tables...")
+            from client.utils.table_creator import add_foreign_keys_to_target, add_indexes_to_target
             try:
                 created, skipped, errors = add_foreign_keys_to_target(self.config)
                 self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
@@ -2927,6 +2941,13 @@ class ReplicationOrchestrator:
                     self._log_warning(f"⚠️ FK errors: {errors}")
             except Exception as e:
                 self._log_warning(f"⚠️ Could not add foreign keys: {e}")
+            try:
+                idx_created, idx_skipped, idx_errors = add_indexes_to_target(self.config)
+                self._log_info(f"✓ Indexes: {idx_created} created, {idx_skipped} skipped")
+                if idx_errors:
+                    self._log_warning(f"⚠️ Index errors: {idx_errors}")
+            except Exception as e:
+                self._log_warning(f"⚠️ Could not add indexes: {e}")
 
             # Step 3: Pause source connector (batch mode waits between syncs)
             self._log_info("Step 3/4: Pausing connector for batch scheduling...")

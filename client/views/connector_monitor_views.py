@@ -482,19 +482,23 @@ def connector_fk_preview_api(request, config_pk):
 
 def connector_fk_apply_api(request, config_pk):
     """
-    AJAX POST endpoint that applies FK constraints to the target database.
+    AJAX POST endpoint that applies FK constraints and indexes to the target database.
     """
     if request.method != 'POST':
         return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
     try:
         config = get_object_or_404(ReplicationConfig, pk=config_pk)
-        from client.utils.table_creator import add_foreign_keys_to_target
+        from client.utils.table_creator import add_foreign_keys_to_target, add_indexes_to_target
         created, skipped, errors = add_foreign_keys_to_target(config)
+        idx_created, idx_skipped, idx_errors = add_indexes_to_target(config)
         return JsonResponse({
             'success': True,
             'created': created,
             'skipped': skipped,
             'errors': errors,
+            'indexes_created': idx_created,
+            'indexes_skipped': idx_skipped,
+            'index_errors': idx_errors,
         })
     except Exception as e:
         logger.error(f'FK apply failed for config {config_pk}: {e}', exc_info=True)
@@ -510,7 +514,7 @@ def database_fk_preview_api(request, database_pk):
     try:
         from client.models.database import ClientDatabase
         database = get_object_or_404(ClientDatabase, pk=database_pk)
-        configs = list(database.replication_configs.all())
+        configs = list(database.get_source_connectors())
 
         from client.utils.table_creator import preview_foreign_keys
 
@@ -554,7 +558,7 @@ def database_fk_apply_api(request, database_pk):
     try:
         from client.models.database import ClientDatabase
         database = get_object_or_404(ClientDatabase, pk=database_pk)
-        configs = list(database.replication_configs.all())
+        configs = list(database.get_source_connectors())
 
         from client.utils.table_creator import add_foreign_keys_to_target
 
@@ -562,8 +566,95 @@ def database_fk_apply_api(request, database_pk):
         total_skipped = 0
         all_errors = []
 
+        from client.utils.table_creator import add_indexes_to_target
+        total_idx_created = 0
+        total_idx_skipped = 0
+        all_idx_errors = []
+
         for config in configs:
             created, skipped, errors = add_foreign_keys_to_target(config)
+            total_created += created
+            total_skipped += skipped
+            all_errors.extend(errors)
+            idx_created, idx_skipped, idx_errors = add_indexes_to_target(config)
+            total_idx_created += idx_created
+            total_idx_skipped += idx_skipped
+            all_idx_errors.extend(idx_errors)
+
+        return JsonResponse({
+            'success': True,
+            'created': total_created,
+            'skipped': total_skipped,
+            'errors': all_errors,
+            'indexes_created': total_idx_created,
+            'indexes_skipped': total_idx_skipped,
+            'index_errors': all_idx_errors,
+        })
+    except Exception as e:
+        logger.error(f'DB FK apply failed for database {database_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def database_index_preview_api(request, database_pk):
+    """
+    AJAX GET — preview indexes across ALL source connectors for a target database.
+    Read-only; does not create anything.
+    """
+    try:
+        from client.models.database import ClientDatabase
+        database = get_object_or_404(ClientDatabase, pk=database_pk)
+        configs = list(database.get_source_connectors())
+
+        from client.utils.table_creator import preview_indexes
+
+        aggregate = {
+            'has_any_indexes': False,
+            'summary': {
+                'tables_total': 0,
+                'tables_created': 0,
+                'tables_missing': 0,
+                'idx_will_create': 0,
+                'idx_already_exists': 0,
+                'idx_table_not_ready': 0,
+            },
+            'tables': [],
+        }
+
+        for config in configs:
+            result = preview_indexes(config)
+            if result.get('has_any_indexes'):
+                aggregate['has_any_indexes'] = True
+            for key in aggregate['summary']:
+                aggregate['summary'][key] += result.get('summary', {}).get(key, 0)
+            for table in result.get('tables', []):
+                table['connector_name'] = config.connector_name
+                aggregate['tables'].append(table)
+
+        return JsonResponse({'success': True, **aggregate})
+    except Exception as e:
+        logger.error(f'DB index preview failed for database {database_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def database_index_apply_api(request, database_pk):
+    """
+    AJAX POST — apply indexes across ALL source connectors for a target database.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        from client.models.database import ClientDatabase
+        database = get_object_or_404(ClientDatabase, pk=database_pk)
+        configs = list(database.get_source_connectors())
+
+        from client.utils.table_creator import add_indexes_to_target
+
+        total_created = 0
+        total_skipped = 0
+        all_errors = []
+
+        for config in configs:
+            created, skipped, errors = add_indexes_to_target(config)
             total_created += created
             total_skipped += skipped
             all_errors.extend(errors)
@@ -575,5 +666,5 @@ def database_fk_apply_api(request, database_pk):
             'errors': all_errors,
         })
     except Exception as e:
-        logger.error(f'DB FK apply failed for database {database_pk}: {e}', exc_info=True)
+        logger.error(f'DB index apply failed for database {database_pk}: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)

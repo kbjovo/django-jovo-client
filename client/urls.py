@@ -45,6 +45,8 @@ from .views.connector_monitor_views import (
     connector_fk_apply_api,
     database_fk_preview_api,
     database_fk_apply_api,
+    database_index_preview_api,
+    database_index_apply_api,
 )
 from .views.connector_action_views import (
     connector_pause,
@@ -268,6 +270,16 @@ urlpatterns = [
     path('database/<int:database_pk>/fk-apply/',
          database_fk_apply_api,
          name='database_fk_apply_api'),
+
+    # AJAX: DB-level index preview — aggregates across all source connectors
+    path('database/<int:database_pk>/index-preview/',
+         database_index_preview_api,
+         name='database_index_preview_api'),
+
+    # AJAX: DB-level index apply — aggregates across all source connectors
+    path('database/<int:database_pk>/index-apply/',
+         database_index_apply_api,
+         name='database_index_apply_api'),
 
     # ==========================================
     # Provision Step Endpoints (AJAX — modal create flow)

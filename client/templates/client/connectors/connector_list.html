@@ -20,15 +20,17 @@
         </a>
         {% if source_connectors %}
         <button
-            data-preview-url="{% url 'database_fk_preview_api' database.pk %}"
-            data-apply-url="{% url 'database_fk_apply_api' database.pk %}"
+            data-index-preview-url="{% url 'database_index_preview_api' database.pk %}"
+            data-index-apply-url="{% url 'database_index_apply_api' database.pk %}"
+            data-fk-preview-url="{% url 'database_fk_preview_api' database.pk %}"
+            data-fk-apply-url="{% url 'database_fk_apply_api' database.pk %}"
             data-db-name="{{ database.connection_name }}"
-            onclick="openFKModal(this)"
+            onclick="openCKModal(this)"
             class="inline-flex items-center px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm transition">
             <svg class="w-4 h-4 mr-2 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
             </svg>
-            Foreign Keys
+            Keys &amp; Indexes
         </button>
         {% endif %}
         {% if can_add_connector %}
@@ -244,6 +246,6 @@
 {% include "client/connectors/_delete_modal.html" %}
 </div>
 
-{% include "client/connectors/_fk_modal.html" %}
+{% include "client/connectors/_combined_keys_modal.html" %}
 
 {% endblock %}

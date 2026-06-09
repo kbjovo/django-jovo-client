@@ -928,6 +928,197 @@ def check_replication_health():
 # BATCH PROCESSING TASKS
 # ============================================================================
 
+def _snapshot_kafka_offsets(config) -> dict | None:
+    """
+    Snapshot the current Kafka high-watermark (end) offset for every
+    monitored topic-partition of this ReplicationConfig.
+
+    Returns {'{topic}:{partition}': offset, ...} or None on error.
+
+    Accurate because Kafka topics only contain events for tables in
+    table.include.list — unmonitored-table binlog noise is filtered
+    out before reaching Kafka, so offset deltas reflect real changes.
+    """
+    from confluent_kafka import Consumer, TopicPartition
+    from jovoclient.utils.kafka.topic_manager import format_topic_name
+    from django.conf import settings
+
+    bootstrap = settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+    db_config = config.client_database
+    topic_prefix = config.kafka_topic_prefix or ''
+
+    topics = []
+    for mapping in config.table_mappings.filter(is_enabled=True):
+        topic = format_topic_name(db_config, mapping.source_table, topic_prefix, mapping.source_schema)
+        if topic not in topics:
+            topics.append(topic)
+
+    if not topics:
+        return None
+
+    consumer = Consumer({
+        'bootstrap.servers': bootstrap,
+        'group.id': f'jovo_batch_snap_{config.id}',
+        'enable.auto.commit': False,
+        'socket.timeout.ms': 5000,
+    })
+    offsets = {}
+    try:
+        for topic in topics:
+            meta = consumer.list_topics(topic, timeout=5)
+            if topic not in meta.topics:
+                continue
+            for partition in meta.topics[topic].partitions:
+                tp = TopicPartition(topic, partition)
+                try:
+                    _, high = consumer.get_watermark_offsets(tp, timeout=5)
+                    offsets[f'{topic}:{partition}'] = high
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f'Kafka offset snapshot failed for config {config.id}: {e}')
+        return None
+    finally:
+        consumer.close()
+
+    return offsets or None
+
+
+def _count_ops_from_kafka_offsets(config, before_offsets: dict, after_offsets: dict, max_messages: int = 10000) -> dict | None:
+    """
+    Read the new Kafka messages produced between two offset snapshots and
+    count them by Debezium op type (c=create, u=update, d=delete).
+
+    Uses fastavro + Schema Registry to decode Avro-encoded message values.
+    Tombstone messages (value=None) are skipped; op='r' (snapshot read)
+    events are not counted as changes.
+
+    Returns {'creates': N, 'updates': N, 'deletes': N, 'total': N} or None.
+    """
+    from confluent_kafka import Consumer, TopicPartition
+    from django.conf import settings
+    import io as _io
+    import json as _json
+    import requests as _req
+
+    if not before_offsets or not after_offsets:
+        return None
+
+    bootstrap = settings.DEBEZIUM_CONFIG.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+    sr_url = settings.DEBEZIUM_CONFIG.get('SCHEMA_REGISTRY_EXTERNAL_URL', 'http://localhost:8082')
+
+    # Build segments: (topic, partition, start, end) where end > start
+    segments = []
+    for key, end_off in after_offsets.items():
+        start_off = before_offsets.get(key, end_off)
+        if end_off > start_off:
+            topic, part = key.rsplit(':', 1)
+            segments.append((topic, int(part), start_off, end_off))
+
+    if not segments:
+        return {'creates': 0, 'updates': 0, 'deletes': 0, 'total': 0}
+
+    total_delta = sum(e - s for _, _, s, e in segments)
+    logger.info(f'Kafka op count: reading up to {min(total_delta, max_messages)} messages from {len(segments)} partition(s)')
+
+    _schema_cache: dict = {}
+
+    def _get_schema(schema_id: int):
+        if schema_id not in _schema_cache:
+            try:
+                r = _req.get(f'{sr_url}/schemas/ids/{schema_id}', timeout=3)
+                _schema_cache[schema_id] = _json.loads(r.json()['schema']) if r.ok else None
+            except Exception:
+                _schema_cache[schema_id] = None
+        return _schema_cache[schema_id]
+
+    def _decode_op(value_bytes) -> str:
+        if value_bytes is None:
+            return 'tombstone'
+        if len(value_bytes) < 6 or value_bytes[0] != 0x00:
+            return 'unknown'
+        try:
+            import fastavro
+            schema_id = int.from_bytes(value_bytes[1:5], 'big')
+            schema_dict = _get_schema(schema_id)
+            if schema_dict is None:
+                return 'unknown'
+            parsed = fastavro.parse_schema(schema_dict)
+            record = fastavro.schemaless_reader(_io.BytesIO(value_bytes[5:]), parsed)
+            return record.get('op', 'unknown')
+        except Exception:
+            return 'unknown'
+
+    # Build topic → table_name map (last dot-segment of topic name)
+    # and seed by_table with zero counts for every monitored topic so
+    # tables with no new messages still appear in the breakdown.
+    topic_to_table: dict = {}
+    for key in after_offsets:
+        topic = key.rsplit(':', 1)[0]
+        topic_to_table[topic] = topic.split('.')[-1]
+
+    by_table: dict = {t: {'creates': 0, 'updates': 0, 'deletes': 0} for t in topic_to_table.values()}
+
+    consumer = Consumer({
+        'bootstrap.servers': bootstrap,
+        'group.id': f'jovo_batch_ops_{config.id}',
+        'enable.auto.commit': False,
+        'auto.offset.reset': 'error',
+        'socket.timeout.ms': 5000,
+    })
+    counts = {'creates': 0, 'updates': 0, 'deletes': 0, 'total': 0}
+    messages_read = 0
+
+    try:
+        end_offset_map = {(t, p): e for t, p, _, e in segments}
+        done: set = set()
+
+        consumer.assign([TopicPartition(t, p, s) for t, p, s, _ in segments])
+
+        while messages_read < min(total_delta, max_messages):
+            if len(done) >= len(segments):
+                break
+            msg = consumer.poll(timeout=2.0)
+            if msg is None:
+                break
+            if msg.error():
+                continue
+
+            tp = (msg.topic(), msg.partition())
+            if msg.offset() >= end_offset_map.get(tp, 0):
+                done.add(tp)
+                continue
+            if tp in done:
+                continue
+
+            op = _decode_op(msg.value())
+            table_name = topic_to_table.get(msg.topic(), msg.topic())
+            tbl = by_table.setdefault(table_name, {'creates': 0, 'updates': 0, 'deletes': 0})
+            if op == 'c':
+                counts['creates'] += 1
+                counts['total'] += 1
+                tbl['creates'] += 1
+            elif op == 'u':
+                counts['updates'] += 1
+                counts['total'] += 1
+                tbl['updates'] += 1
+            elif op == 'd':
+                counts['deletes'] += 1
+                counts['total'] += 1
+                tbl['deletes'] += 1
+            # 'r' (snapshot read), tombstone, unknown: skip
+
+            messages_read += 1
+
+        counts['by_table'] = by_table
+        return counts
+    except Exception as e:
+        logger.warning(f'Kafka op count failed for config {config.id}: {e}')
+        return None
+    finally:
+        consumer.close()
+
+
 @shared_task(bind=True, max_retries=3)
 def run_batch_sync(self, replication_config_id: int):
     """
@@ -988,6 +1179,15 @@ def run_batch_sync(self, replication_config_id: int):
         if skip_reason:
             logger.info(skip_reason)
             return {'success': True, 'message': skip_reason}
+
+        sync_start_time = timezone.now()
+
+        # Snapshot Kafka high-watermark offsets BEFORE resume.
+        # Kafka topics contain only filtered-table events so offset deltas
+        # give an accurate per-op count (no unmonitored-table inflation).
+        # Unlike JMX cumulative counters, watermarks are not reset by a
+        # Kafka Connect restart, so snapshotting before resume is safe.
+        snap_before = _snapshot_kafka_offsets(config)
 
         # ========================================
         # STEP 1: Resume Connector
@@ -1061,11 +1261,41 @@ def run_batch_sync(self, replication_config_id: int):
 
         logger.info(f"✓ Connector paused: {config.connector_name}")
 
+        # Snapshot Kafka offsets after pause, then count ops from messages produced this window
+        snap_after = _snapshot_kafka_offsets(config)
+        op_counts = (
+            _count_ops_from_kafka_offsets(config, snap_before, snap_after)
+            if snap_before is not None and snap_after is not None
+            else None
+        )
+        if op_counts is not None:
+            batch_ops = {
+                'period_start': sync_start_time.isoformat(),
+                'period_end': timezone.now().isoformat(),
+                'duration_seconds': int(total_elapsed),
+                'events_total': op_counts['total'],
+                'events_creates': op_counts['creates'],
+                'events_updates': op_counts['updates'],
+                'events_deletes': op_counts['deletes'],
+                'events_filtered': None,
+                'events_truncates': None,
+                'table_ops': op_counts.get('by_table', {}),
+                'jolokia_available': True,
+            }
+        else:
+            batch_ops = {
+                'period_start': sync_start_time.isoformat(),
+                'period_end': timezone.now().isoformat(),
+                'duration_seconds': int(total_elapsed),
+                'jolokia_available': False,
+            }
+
         # ========================================
         # Record completion + reset Celery timing
         # ========================================
         config.last_batch_run = timezone.now()
-        config.save(update_fields=['last_batch_run'])
+        config.last_batch_operations = batch_ops
+        config.save(update_fields=['last_batch_run', 'last_batch_operations'])
         # pause_connector() already set next_batch_run = now + interval and saved.
 
         # Reset Celery Beat's last_run_at to NOW so the next firing is exactly
@@ -1178,15 +1408,19 @@ def add_foreign_keys_task(self, replication_config_id: int):
 
         config = ReplicationConfig.objects.get(id=replication_config_id)
 
-        from client.utils.table_creator import add_foreign_keys_to_target
+        from client.utils.table_creator import add_foreign_keys_to_target, add_indexes_to_target
 
         created, skipped, errors = add_foreign_keys_to_target(config)
-
         logger.info(f"Foreign keys for config {replication_config_id}: "
                     f"{created} created, {skipped} skipped, {len(errors)} errors")
-
         if errors:
             logger.warning(f"FK errors: {errors}")
+
+        idx_created, idx_skipped, idx_errors = add_indexes_to_target(config)
+        logger.info(f"Indexes for config {replication_config_id}: "
+                    f"{idx_created} created, {idx_skipped} skipped, {len(idx_errors)} errors")
+        if idx_errors:
+            logger.warning(f"Index errors: {idx_errors}")
 
         return {
             'success': True,

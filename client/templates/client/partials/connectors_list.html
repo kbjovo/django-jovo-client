@@ -41,15 +41,17 @@
         </div>
         <div class="flex items-center gap-2">
           <button
-              data-preview-url="{% url 'database_fk_preview_api' db_group.grouper.pk %}"
-              data-apply-url="{% url 'database_fk_apply_api' db_group.grouper.pk %}"
+              data-index-preview-url="{% url 'database_index_preview_api' db_group.grouper.pk %}"
+              data-index-apply-url="{% url 'database_index_apply_api' db_group.grouper.pk %}"
+              data-fk-preview-url="{% url 'database_fk_preview_api' db_group.grouper.pk %}"
+              data-fk-apply-url="{% url 'database_fk_apply_api' db_group.grouper.pk %}"
               data-db-name="{{ db_group.grouper.connection_name }}"
-              onclick="openFKModal(this)"
+              onclick="openCKModal(this)"
               class="inline-flex items-center px-2.5 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 transition">
             <svg class="w-3.5 h-3.5 mr-1.5 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
             </svg>
-            Foreign Keys
+            Keys &amp; Indexes
           </button>
           <a href="{% url 'connector_list' db_group.grouper.pk %}"
              class="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
@@ -221,5 +223,5 @@
   {% endif %}
 
   {% include "client/connectors/_delete_modal.html" %}
-  {% include "client/connectors/_fk_modal.html" %}
+  {% include "client/connectors/_combined_keys_modal.html" %}
 </div>

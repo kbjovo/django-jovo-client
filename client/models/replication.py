@@ -361,6 +361,12 @@ class ReplicationConfig(models.Model):
         help_text="Timestamp when the current (or most recent) batch sync window started"
     )
 
+    last_batch_operations = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Operation counters (inserts/updates/deletes/etc.) captured during the last batch sync window"
+    )
+
     # Status
     status = models.CharField(
         max_length=20, 

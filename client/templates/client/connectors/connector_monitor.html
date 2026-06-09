@@ -276,27 +276,60 @@
   <!-- Batch Schedule Panel (only for batch connectors) -->
   {% if replication_config.processing_mode == 'batch' %}
   <div id="batch-panel" class="mb-6">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-6 py-4">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-6">
-          <div class="flex items-center gap-2">
-            <svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            <span id="batch-status-badge" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400">Scheduled</span>
-          </div>
-          <div class="flex items-center gap-1">
-            <span id="batch-countdown-label" class="text-sm text-gray-500 dark:text-gray-400">Next sync in</span>
-            <span id="batch-countdown" class="text-sm font-bold text-purple-600 dark:text-purple-400 font-mono">--:--</span>
-          </div>
-          <span class="text-xs text-gray-400 dark:text-gray-500">|</span>
-          <div class="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
-            <span>Interval: <span id="batch-interval" class="font-medium text-gray-700 dark:text-gray-300">{{ replication_config.get_batch_interval_display|default:"--" }}</span></span>
-            <span>Max: <span id="batch-max-duration" class="font-medium text-gray-700 dark:text-gray-300">{{ replication_config.batch_max_catchup_minutes }}m</span></span>
-            <span>Last: <span id="batch-last-run" class="font-medium text-gray-700 dark:text-gray-300">{% if replication_config.last_batch_run %}{{ replication_config.last_batch_run|timesince }} ago{% else %}Never{% endif %}</span></span>
-            <span>Next: <span id="batch-next-run" class="font-medium text-gray-700 dark:text-gray-300">{% if replication_config.next_batch_run %}{{ replication_config.next_batch_run|date:"M d, g:i A" }}{% else %}--{% endif %}</span></span>
-          </div>
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-6 py-4 space-y-3">
+      <!-- Row 1: status + countdown + schedule info -->
+      <div class="flex items-center gap-6 flex-wrap">
+        <div class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+          <span id="batch-status-badge" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400">Scheduled</span>
         </div>
+        <div class="flex items-center gap-1">
+          <span id="batch-countdown-label" class="text-sm text-gray-500 dark:text-gray-400">Next sync in</span>
+          <span id="batch-countdown" class="text-sm font-bold text-purple-600 dark:text-purple-400 font-mono">--:--</span>
+        </div>
+        <span class="text-xs text-gray-400 dark:text-gray-500">|</span>
+        <div class="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
+          <span>Interval: <span id="batch-interval" class="font-medium text-gray-700 dark:text-gray-300">{{ replication_config.get_batch_interval_display|default:"--" }}</span></span>
+          <span>Max: <span id="batch-max-duration" class="font-medium text-gray-700 dark:text-gray-300">{{ replication_config.batch_max_catchup_minutes }}m</span></span>
+          <span>Last: <span id="batch-last-run" class="font-medium text-gray-700 dark:text-gray-300">{% if replication_config.last_batch_run %}{{ replication_config.last_batch_run|timesince }} ago{% else %}Never{% endif %}</span></span>
+          <span>Next: <span id="batch-next-run" class="font-medium text-gray-700 dark:text-gray-300">{% if replication_config.next_batch_run %}{{ replication_config.next_batch_run|date:"M d, g:i A" }}{% else %}--{% endif %}</span></span>
+        </div>
+      </div>
+      <!-- Row 2: last-run operations (hidden until data arrives) -->
+      <div id="batch-ops-row" class="hidden border-t border-gray-100 dark:border-gray-700 pt-2 flex items-center gap-1 flex-wrap text-xs text-gray-500 dark:text-gray-400">
+        <svg class="w-3.5 h-3.5 text-gray-400 dark:text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+        </svg>
+        <span class="text-gray-400 dark:text-gray-500">Last run:</span>
+        <span id="batch-ops-creates" class="hidden inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 font-medium"></span>
+        <span id="batch-ops-updates" class="hidden inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 font-medium"></span>
+        <span id="batch-ops-deletes" class="hidden inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 font-medium"></span>
+        <span id="batch-ops-truncates" class="hidden inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-400 font-medium"></span>
+        <span id="batch-ops-total" class="hidden text-gray-400 dark:text-gray-500"></span>
+        <span id="batch-ops-duration" class="hidden text-gray-400 dark:text-gray-500 ml-1"></span>
+        <span id="batch-ops-unavailable" class="hidden text-gray-400 dark:text-gray-500 italic">metrics unavailable</span>
+        <button id="batch-table-ops-toggle" class="hidden ml-auto flex items-center gap-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors" onclick="toggleBatchTableOps()">
+          <span id="batch-table-ops-toggle-label" class="text-xs">per table</span>
+          <svg id="batch-table-ops-chevron" class="w-3 h-3 transition-transform duration-150" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+      </div>
+      <!-- Per-table op breakdown (toggled) -->
+      <div id="batch-table-ops-panel" class="hidden border-t border-gray-100 dark:border-gray-700 pt-2">
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="text-gray-400 dark:text-gray-500 text-left">
+              <th class="pb-1 font-medium pr-4">Table</th>
+              <th class="pb-1 font-medium text-right pr-3 text-green-600 dark:text-green-400">Inserted</th>
+              <th class="pb-1 font-medium text-right pr-3 text-blue-600 dark:text-blue-400">Updated</th>
+              <th class="pb-1 font-medium text-right text-red-600 dark:text-red-400">Deleted</th>
+            </tr>
+          </thead>
+          <tbody id="batch-table-ops-body" class="divide-y divide-gray-50 dark:divide-gray-700/50"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -910,6 +943,97 @@ async function confirmResync(tables) {
       nextRunEl.textContent = batchNextRun.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'Asia/Kolkata' }) + ', ' +
         batchNextRun.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' });
     }
+
+    renderBatchOps(batch.last_batch_operations);
+  }
+
+  function renderBatchOps(ops) {
+    const row = document.getElementById('batch-ops-row');
+    if (!row) return;
+    if (!ops) { row.classList.add('hidden'); return; }
+
+    row.classList.remove('hidden');
+
+    function chip(id, value, label) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (value === null || value === undefined) { el.classList.add('hidden'); return; }
+      el.classList.remove('hidden');
+      el.textContent = formatNumber(value) + ' ' + label;
+    }
+
+    if (ops.jolokia_available === false) {
+      document.getElementById('batch-ops-unavailable').classList.remove('hidden');
+      ['batch-ops-creates','batch-ops-updates','batch-ops-deletes','batch-ops-truncates','batch-ops-total','batch-ops-duration','batch-table-ops-toggle'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('hidden');
+      });
+      document.getElementById('batch-table-ops-panel').classList.add('hidden');
+      return;
+    }
+
+    document.getElementById('batch-ops-unavailable').classList.add('hidden');
+    chip('batch-ops-creates',   ops.events_creates,   'inserted');
+    chip('batch-ops-updates',   ops.events_updates,   'updated');
+    chip('batch-ops-deletes',   ops.events_deletes,   'deleted');
+    chip('batch-ops-truncates', ops.events_truncates, 'truncated');
+
+    const totalEl = document.getElementById('batch-ops-total');
+    if (totalEl) {
+      if (ops.events_creates === null && ops.events_updates === null) {
+        totalEl.classList.remove('hidden');
+        totalEl.textContent = '(' + formatNumber(ops.events_total) + ' total events)';
+      } else {
+        totalEl.classList.add('hidden');
+      }
+    }
+
+    const durEl = document.getElementById('batch-ops-duration');
+    if (durEl && ops.duration_seconds !== undefined) {
+      durEl.classList.remove('hidden');
+      durEl.textContent = '· ' + ops.duration_seconds + 's window';
+    }
+
+    // Per-table breakdown
+    const tableOps = ops.table_ops || {};
+    const tableKeys = Object.keys(tableOps);
+    const toggleBtn = document.getElementById('batch-table-ops-toggle');
+    if (tableKeys.length > 0) {
+      toggleBtn.classList.remove('hidden');
+      const tbody = document.getElementById('batch-table-ops-body');
+      tbody.innerHTML = '';
+      // Sort: tables with changes first, then alphabetically
+      tableKeys.sort((a, b) => {
+        const aTotal = tableOps[a].creates + tableOps[a].updates + tableOps[a].deletes;
+        const bTotal = tableOps[b].creates + tableOps[b].updates + tableOps[b].deletes;
+        if (bTotal !== aTotal) return bTotal - aTotal;
+        return a.localeCompare(b);
+      });
+      tableKeys.forEach(table => {
+        const t = tableOps[table];
+        const hasChanges = t.creates > 0 || t.updates > 0 || t.deletes > 0;
+        const tr = document.createElement('tr');
+        tr.className = hasChanges
+          ? 'text-gray-700 dark:text-gray-300'
+          : 'text-gray-400 dark:text-gray-600';
+        tr.innerHTML =
+          `<td class="py-0.5 pr-4 font-mono">${table}</td>` +
+          `<td class="py-0.5 pr-3 text-right ${t.creates > 0 ? 'text-green-600 dark:text-green-400 font-medium' : ''}">${formatNumber(t.creates)}</td>` +
+          `<td class="py-0.5 pr-3 text-right ${t.updates > 0 ? 'text-blue-600 dark:text-blue-400 font-medium' : ''}">${formatNumber(t.updates)}</td>` +
+          `<td class="py-0.5 text-right ${t.deletes > 0 ? 'text-red-600 dark:text-red-400 font-medium' : ''}">${formatNumber(t.deletes)}</td>`;
+        tbody.appendChild(tr);
+      });
+    } else {
+      if (toggleBtn) toggleBtn.classList.add('hidden');
+      document.getElementById('batch-table-ops-panel').classList.add('hidden');
+    }
+  }
+
+  function toggleBatchTableOps() {
+    const panel = document.getElementById('batch-table-ops-panel');
+    const chevron = document.getElementById('batch-table-ops-chevron');
+    const isHidden = panel.classList.toggle('hidden');
+    chevron.style.transform = isHidden ? '' : 'rotate(180deg)';
   }
 
   function taskBgClass(state) {
@@ -1075,6 +1199,10 @@ async function confirmResync(tables) {
   if (isBatch) {
     updateBatchDisplay();
     countdownTimer = setInterval(updateBatchDisplay, 1000);
+    // Seed operations row immediately from server-rendered context
+    {% if replication_config.last_batch_operations %}
+    renderBatchOps({{ replication_config.last_batch_operations|safe }});
+    {% endif %}
   }
 })();
 </script>

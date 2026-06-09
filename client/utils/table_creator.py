@@ -751,6 +751,341 @@ def add_foreign_keys_after_sink(replication_config_id: int, table_names: list = 
         return False, error_msg, {}
 
 
+def add_indexes_to_target(replication_config, specific_tables=None):
+    """
+    Add index definitions from source tables to the corresponding target tables.
+
+    Mirrors add_foreign_keys_to_target() — reads indexes from source schema via
+    SQLAlchemy reflection and issues CREATE INDEX on the target.
+
+    Primary-key indexes are always skipped (handled during table creation).
+    Unsupported target DB types are skipped with a warning.
+
+    Returns:
+        Tuple[int, int, List[str]]: (created_count, skipped_count, errors)
+    """
+    logger.info(f"Creating indexes for ReplicationConfig ID: {replication_config.id}")
+
+    source_db = replication_config.client_database
+    client = source_db.client
+    target_db = client.get_target_database()
+
+    if not target_db:
+        raise Exception(f"No target database found for client '{client.name}'")
+
+    source_engine = get_database_engine(source_db)
+    target_engine = get_database_engine(target_db)
+
+    created_count = 0
+    skipped_count = 0
+    errors = []
+
+    try:
+        table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+        if specific_tables:
+            table_mappings = table_mappings.filter(source_table__in=specific_tables)
+
+        all_indexes = []
+
+        for table_mapping in table_mappings:
+            source_table = table_mapping.source_table
+            target_table = table_mapping.target_table
+            try:
+                source_schema = get_table_schema(
+                    source_db, source_table,
+                    schema=table_mapping.source_schema or None,
+                )
+                primary_keys = set(source_schema.get('primary_keys', []))
+                for idx in source_schema.get('indexes', []):
+                    col_names = idx.get('column_names') or []
+                    if not col_names:
+                        continue
+                    # MySQL names the clustered PK index 'PRIMARY'
+                    if idx.get('name') == 'PRIMARY':
+                        continue
+                    # Skip if all indexed columns exactly match the PK set
+                    if primary_keys and set(col_names) == primary_keys:
+                        continue
+                    all_indexes.append({
+                        'source_table': source_table,
+                        'target_table': target_table,
+                        'idx_info': idx,
+                    })
+            except Exception as e:
+                logger.warning(f"   ⚠️ Could not get schema for {source_table}: {e}")
+
+        if not all_indexes:
+            logger.info("ℹ️ No indexes found in source tables")
+            return 0, 0, []
+
+        logger.info(f"🗂️ Found {len(all_indexes)} total indexes to create")
+
+        target_db_type = target_db.db_type.lower()
+
+        with target_engine.begin() as conn:
+            for idx_data in all_indexes:
+                target_table = idx_data['target_table']
+                idx_info = idx_data['idx_info']
+                try:
+                    col_names = idx_info.get('column_names', [])
+                    is_unique = idx_info.get('unique', False)
+
+                    new_idx_name = f"idx_{target_table}_{col_names[0]}"[:64]
+                    unique_kw = 'UNIQUE ' if is_unique else ''
+
+                    if target_db_type == 'mysql':
+                        check_sql = text("""
+                            SELECT INDEX_NAME FROM information_schema.STATISTICS
+                            WHERE TABLE_SCHEMA = :db_name
+                              AND TABLE_NAME   = :table_name
+                              AND INDEX_NAME   = :idx_name
+                            LIMIT 1
+                        """)
+                        row = conn.execute(check_sql, {
+                            'db_name': target_db.database_name,
+                            'table_name': target_table,
+                            'idx_name': new_idx_name,
+                        }).fetchone()
+                        if row:
+                            logger.info(f"   ℹ️ Index {new_idx_name} already exists on {target_table}")
+                            skipped_count += 1
+                            continue
+                        cols = ', '.join(f"`{c}`" for c in col_names)
+                        create_sql = f"CREATE {unique_kw}INDEX `{new_idx_name}` ON `{target_table}` ({cols})"
+
+                    elif target_db_type == 'postgresql':
+                        check_sql = text("""
+                            SELECT indexname FROM pg_indexes
+                            WHERE tablename = :table_name
+                              AND indexname  = :idx_name
+                        """)
+                        row = conn.execute(check_sql, {
+                            'table_name': target_table,
+                            'idx_name': new_idx_name,
+                        }).fetchone()
+                        if row:
+                            logger.info(f"   ℹ️ Index {new_idx_name} already exists on {target_table}")
+                            skipped_count += 1
+                            continue
+                        cols = ', '.join(f'"{c}"' for c in col_names)
+                        create_sql = f'CREATE {unique_kw}INDEX "{new_idx_name}" ON "{target_table}" ({cols})'
+
+                    else:
+                        logger.warning(f"   ⚠️ Unsupported target DB type for index: {target_db_type}")
+                        skipped_count += 1
+                        continue
+
+                    conn.execute(text(create_sql))
+                    logger.info(f"   ✅ Created index: {new_idx_name} on {target_table}")
+                    created_count += 1
+
+                except Exception as e:
+                    error_msg = f"Failed to create index on {target_table}: {e}"
+                    logger.error(f"   ❌ {error_msg}")
+                    errors.append(error_msg)
+
+        logger.info(f"{'='*60}")
+        logger.info(f"📊 INDEX CREATION SUMMARY:")
+        logger.info(f"   ✅ Created: {created_count} indexes")
+        logger.info(f"   ⏭️ Skipped: {skipped_count} (already exist or unsupported)")
+        if errors:
+            logger.info(f"   ❌ Errors: {len(errors)}")
+        logger.info(f"{'='*60}")
+
+    finally:
+        source_engine.dispose()
+        target_engine.dispose()
+
+    return created_count, skipped_count, errors
+
+
+def add_indexes_after_sink(replication_config_id: int, table_names: list = None) -> tuple:
+    """
+    Thin wrapper around add_indexes_to_target() for use after the sink connector
+    has created tables.
+
+    Returns:
+        Tuple[bool, str, dict]: (success, message, details)
+    """
+    from client.models.replication import ReplicationConfig
+
+    try:
+        replication_config = ReplicationConfig.objects.get(pk=replication_config_id)
+    except ReplicationConfig.DoesNotExist:
+        return False, f"ReplicationConfig with ID {replication_config_id} not found", {}
+
+    try:
+        created, skipped, errors = add_indexes_to_target(replication_config, specific_tables=table_names)
+
+        client = replication_config.client_database.client
+        target_db = client.get_target_database()
+
+        details = {
+            'config_id': replication_config_id,
+            'indexes_created': created,
+            'indexes_skipped': skipped,
+            'errors': errors,
+            'target_database': target_db.database_name if target_db else None,
+        }
+
+        if errors:
+            return False, f"Created {created} index(es) with {len(errors)} error(s)", details
+
+        return True, f"Successfully created {created} index(es)", details
+
+    except Exception as e:
+        error_msg = f"Failed to add indexes: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return False, error_msg, {}
+
+
+def preview_indexes(replication_config):
+    """
+    Preview which indexes can be created, already exist, or are blocked by missing tables.
+
+    Does NOT modify anything — purely read-only analysis.
+
+    Returns a dict with:
+        has_any_indexes: bool  — True if source tables have any non-PK indexes at all
+        summary: dict          — Aggregate counts
+        tables: list           — Per-table breakdown with per-index status
+    """
+    source_db = replication_config.client_database
+    client = source_db.client
+    target_db = client.get_target_database()
+
+    if not target_db:
+        raise Exception(f"No target database found for client '{client.name}'")
+
+    target_engine = get_database_engine(target_db)
+    target_db_type = target_db.db_type.lower()
+
+    table_mappings = replication_config.table_mappings.filter(is_enabled=True)
+    table_name_map = {m.source_table: m.target_table for m in table_mappings}
+    all_target_tables = list(table_name_map.values())
+
+    # Batch-check which target tables exist
+    existing_target_tables = set()
+    try:
+        with target_engine.connect() as conn:
+            if target_db_type == 'mysql':
+                placeholders = ', '.join([f':t{i}' for i in range(len(all_target_tables))])
+                rows = conn.execute(text(f"""
+                    SELECT TABLE_NAME FROM information_schema.TABLES
+                    WHERE TABLE_SCHEMA = :db_name AND TABLE_NAME IN ({placeholders})
+                """), dict({'db_name': target_db.database_name}, **{f't{i}': t for i, t in enumerate(all_target_tables)})).fetchall()
+                existing_target_tables = {r[0] for r in rows}
+            elif target_db_type == 'postgresql':
+                placeholders = ', '.join([f':t{i}' for i in range(len(all_target_tables))])
+                rows = conn.execute(text(f"""
+                    SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name IN ({placeholders})
+                """), {f't{i}': t for i, t in enumerate(all_target_tables)}).fetchall()
+                existing_target_tables = {r[0] for r in rows}
+    except Exception as e:
+        logger.warning(f"Could not check existing target tables: {e}")
+
+    results = []
+    has_any_indexes = False
+    summary = {
+        'tables_total': len(all_target_tables),
+        'tables_created': len(existing_target_tables),
+        'tables_missing': len(all_target_tables) - len(existing_target_tables),
+        'idx_will_create': 0,
+        'idx_already_exists': 0,
+        'idx_table_not_ready': 0,
+    }
+
+    try:
+        with target_engine.connect() as conn:
+            for mapping in table_mappings:
+                source_table = mapping.source_table
+                target_table = mapping.target_table
+                target_exists = target_table in existing_target_tables
+
+                indexes_info = []
+
+                try:
+                    source_schema = get_table_schema(
+                        source_db, source_table,
+                        schema=mapping.source_schema or None,
+                    )
+                    primary_keys = set(source_schema.get('primary_keys', []))
+                    raw_indexes = [
+                        idx for idx in source_schema.get('indexes', [])
+                        if (idx.get('column_names') or [])
+                        and idx.get('name') != 'PRIMARY'
+                        and not (primary_keys and set(idx.get('column_names', [])) == primary_keys)
+                    ]
+                except Exception as e:
+                    logger.warning(f"Could not get schema for {source_table}: {e}")
+                    raw_indexes = []
+
+                if raw_indexes:
+                    has_any_indexes = True
+
+                for idx in raw_indexes:
+                    col_names = idx.get('column_names', [])
+                    is_unique = idx.get('unique', False)
+                    new_idx_name = f"idx_{target_table}_{col_names[0]}"[:64]
+
+                    if not target_exists:
+                        indexes_info.append({
+                            'idx_name': new_idx_name,
+                            'columns': col_names,
+                            'unique': is_unique,
+                            'status': 'table_not_ready',
+                            'reason': f'Target table "{target_table}" has not been created yet',
+                        })
+                        summary['idx_table_not_ready'] += 1
+                        continue
+
+                    # Check if index already exists on target
+                    idx_exists = False
+                    try:
+                        if target_db_type == 'mysql':
+                            r = conn.execute(text("""
+                                SELECT INDEX_NAME FROM information_schema.STATISTICS
+                                WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :tbl AND INDEX_NAME = :idx
+                                LIMIT 1
+                            """), {'db': target_db.database_name, 'tbl': target_table, 'idx': new_idx_name})
+                        else:
+                            r = conn.execute(text("""
+                                SELECT indexname FROM pg_indexes
+                                WHERE tablename = :tbl AND indexname = :idx
+                            """), {'tbl': target_table, 'idx': new_idx_name})
+                        idx_exists = r.fetchone() is not None
+                    except Exception as e:
+                        logger.warning(f"Could not check index existence for {new_idx_name}: {e}")
+
+                    status = 'already_exists' if idx_exists else 'will_create'
+                    summary['idx_already_exists' if idx_exists else 'idx_will_create'] += 1
+
+                    indexes_info.append({
+                        'idx_name': new_idx_name,
+                        'columns': col_names,
+                        'unique': is_unique,
+                        'status': status,
+                        'reason': '',
+                    })
+
+                results.append({
+                    'source_table': source_table,
+                    'target_table': target_table,
+                    'target_exists': target_exists,
+                    'indexes': indexes_info,
+                })
+
+    finally:
+        target_engine.dispose()
+
+    return {
+        'has_any_indexes': has_any_indexes,
+        'summary': summary,
+        'tables': results,
+    }
+
+
 def preview_foreign_keys(replication_config):
     """
     Preview which foreign key constraints can be created, already exist, or cannot be created.

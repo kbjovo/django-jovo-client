@@ -223,6 +223,11 @@ def get_mysql_connector_config(
         "signal.kafka.consumer.key.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
         "signal.kafka.consumer.value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
         
+        # Propagate original column type/length metadata through Kafka so the JDBC
+        # Sink connector can recreate columns with the correct type (e.g. VARCHAR(100)
+        # instead of LONGTEXT) when auto-creating target tables.
+        "column.propagate.source.type": ".*",
+
         # Decimal handling
         "decimal.handling.mode": "precise",  # Options: precise, double, string
 
@@ -396,6 +401,8 @@ def get_postgresql_connector_config(
         "signal.data.collection": signal_table,
 
         "include.schema.changes": "true",
+
+        "column.propagate.source.type": ".*",
 
         "decimal.handling.mode": "precise",
         "time.precision.mode": "adaptive_time_microseconds",
@@ -585,6 +592,7 @@ def get_sqlserver_connector_config(
         "database.encrypt": "false",
 
         # Data type handling
+        "column.propagate.source.type": ".*",
         "decimal.handling.mode": "precise",
         "binary.handling.mode": "bytes",
         "time.precision.mode": "adaptive_time_microseconds",
@@ -802,6 +810,7 @@ def get_oracle_connector_config(
         
         "schema.include.list": schema_name,
         
+        "column.propagate.source.type": ".*",
         "decimal.handling.mode": "precise",
         "time.precision.mode": "adaptive_time_microseconds",
         "interval.handling.mode": "string",
