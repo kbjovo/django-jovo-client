@@ -506,6 +506,12 @@ class ReplicationConfig(models.Model):
         help_text="[DEPRECATED] Last heartbeat from consumer - no longer used with sink connectors"
     )
 
+    pending_truncates = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Source table names queued for truncate+resync while connector was paused; applied on next resume"
+    )
+
     last_error_message = models.TextField(
         blank=True,
         null=True,

@@ -2287,6 +2287,7 @@ class ReplicationOrchestrator:
                         )
                 self.config.save()
                 self._log_info(f"✓ Connector resumed: {self.config.connector_name}")
+                self._apply_pending_truncates()
                 return True, "Connector resumed successfully"
             else:
                 return False, f"Failed to resume connector: {error}"
@@ -2295,6 +2296,38 @@ class ReplicationOrchestrator:
             error_msg = f"Error resuming connector: {str(e)}"
             self._log_error(error_msg)
             return False, error_msg
+
+    def _apply_pending_truncates(self) -> None:
+        """
+        Apply any TRUNCATE+resync operations that were deferred while the connector
+        was paused.  Called automatically by resume_connector() after a successful resume.
+        """
+        from client.models.replication import ReplicationConfig
+        cfg = ReplicationConfig.objects.only('pending_truncates').get(pk=self.config.pk)
+        pending = list(cfg.pending_truncates or [])
+        if not pending:
+            return
+
+        self._log_info(f"Applying {len(pending)} deferred TRUNCATE(s) after resume: {pending}")
+
+        from client.utils.ddl.base_processor import _apply_truncate_and_snapshot
+        applied = []
+        for table_name in pending:
+            try:
+                ok = _apply_truncate_and_snapshot(self.config, table_name)
+                if ok:
+                    applied.append(table_name)
+                else:
+                    self._log_warning(f"  ✗ Deferred TRUNCATE failed for '{table_name}' — will retry on next resume")
+            except Exception as e:
+                self._log_error(f"  ✗ Deferred TRUNCATE error for '{table_name}': {e}")
+
+        remaining = [t for t in pending if t not in applied]
+        ReplicationConfig.objects.filter(pk=self.config.pk).update(pending_truncates=remaining)
+        self.config.pending_truncates = remaining
+
+        if applied:
+            self._log_info(f"  ✓ Deferred TRUNCATEs applied: {applied}")
 
     def pause_connector(self) -> Tuple[bool, str]:
         """

@@ -171,6 +171,10 @@ class BaseDDLProcessor(ABC):
 
         Called by both KafkaDDLProcessor (MySQL/Oracle) and
         PostgreSQLKafkaDDLProcessor when a TRUNCATE is detected on source.
+
+        If the connector is currently paused, the truncate is deferred and
+        stored in ReplicationConfig.pending_truncates; it is applied when the
+        connector resumes via orchestrator.resume_connector().
         """
         table_mapping = self.replication_config.table_mappings.filter(
             source_table=source_table,
@@ -181,38 +185,26 @@ class BaseDDLProcessor(ABC):
             logger.debug(f"TRUNCATE on untracked table '{source_table}' — skipping")
             return True
 
+        # Fresh DB read — the processor is long-lived so the in-memory instance is stale.
+        from client.models.replication import ReplicationConfig as _RC
+        current_state = _RC.objects.filter(
+            pk=self.replication_config.pk
+        ).values_list('connector_state', flat=True).first()
+
+        if current_state == 'PAUSED':
+            cfg = _RC.objects.only('pending_truncates').get(pk=self.replication_config.pk)
+            pending = list(cfg.pending_truncates or [])
+            if source_table not in pending:
+                pending.append(source_table)
+                _RC.objects.filter(pk=self.replication_config.pk).update(pending_truncates=pending)
+            logger.info(
+                f"Connector PAUSED — deferred TRUNCATE on '{source_table}' until resume "
+                f"(pending queue: {pending})"
+            )
+            return True
+
         logger.info(f"TRUNCATE detected on tracked table '{source_table}' — triggering auto-resync")
-
-        target_db = self.replication_config.client_database.client.client_databases.filter(
-            is_target=True
-        ).first()
-        if not target_db:
-            logger.error(f"No target database found — cannot resync after TRUNCATE on '{source_table}'")
-            return False
-
-        from client.utils.table_creator import truncate_tables_for_mappings
-        ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
-        if not ok:
-            logger.error(f"Failed to truncate target table '{table_mapping.target_table}': {msg}")
-            return False
-
-        logger.info(f"  ✓ Target table '{table_mapping.target_table}' truncated")
-
-        try:
-            from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
-            signal_id, method = send_incremental_snapshot_signal(
-                self.replication_config.client_database,
-                self.replication_config,
-                [source_table]
-            )
-            logger.info(f"  ✓ Snapshot signal sent (ID: {signal_id}, via {method})")
-        except Exception as e:
-            logger.error(
-                f"  ✗ Snapshot signal failed for '{source_table}': {e} "
-                f"— target is truncated, manual resync may be needed"
-            )
-
-        return True
+        return _apply_truncate_and_snapshot(self.replication_config, source_table, table_mapping)
 
     def execute_operation(self, operation: DDLOperation) -> Tuple[bool, Optional[str]]:
         """
@@ -296,3 +288,51 @@ class BaseDDLProcessor(ABC):
             is_target=True
         ).first()
         return target_db.db_type.lower() if target_db else 'unknown'
+
+
+def _apply_truncate_and_snapshot(replication_config, source_table: str, table_mapping=None) -> bool:
+    """
+    Truncate the sink table for *source_table* and fire an incremental snapshot.
+
+    Used by _handle_truncate_for_table (immediate path) and by the orchestrator
+    when draining pending_truncates after a connector resume.
+    """
+    if table_mapping is None:
+        table_mapping = replication_config.table_mappings.filter(
+            source_table=source_table,
+            is_enabled=True
+        ).first()
+        if not table_mapping:
+            logger.debug(f"TRUNCATE apply: untracked table '{source_table}' — skipping")
+            return True
+
+    target_db = replication_config.client_database.client.client_databases.filter(
+        is_target=True
+    ).first()
+    if not target_db:
+        logger.error(f"No target database found — cannot apply TRUNCATE for '{source_table}'")
+        return False
+
+    from client.utils.table_creator import truncate_tables_for_mappings
+    ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
+    if not ok:
+        logger.error(f"Failed to truncate target table '{table_mapping.target_table}': {msg}")
+        return False
+
+    logger.info(f"  ✓ Target table '{table_mapping.target_table}' truncated")
+
+    try:
+        from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
+        signal_id, method = send_incremental_snapshot_signal(
+            replication_config.client_database,
+            replication_config,
+            [source_table]
+        )
+        logger.info(f"  ✓ Snapshot signal sent (ID: {signal_id}, via {method})")
+    except Exception as e:
+        logger.error(
+            f"  ✗ Snapshot signal failed for '{source_table}': {e} "
+            f"— target is truncated, manual resync may be needed"
+        )
+
+    return True
