@@ -48,7 +48,7 @@
             <p class="text-red-800 dark:text-red-200 mb-2">Deleting it will also:</p>
             <ul class="text-red-700 dark:text-red-300 list-disc list-inside space-y-1 mb-3">
                 <li>✅ Delete the source connector from Debezium</li>
-                <li>✅ Delete the shared sink connector ({{ database.get_sink_connector_name }})</li>
+                <li>✅ Delete the dedicated sink connector ({{ database.get_sink_connector_name }})</li>
                 <li>✅ Stop all CDC replication for this database</li>
                 <li>🗑️ Delete all Kafka topics for this database</li>
                 <li>🗑️ Drop all target tables in the target database</li>
@@ -62,7 +62,7 @@
             <h6 class="font-semibold text-blue-900 dark:text-blue-100 mb-2">ℹ️ What will happen:</h6>
             <ul class="text-blue-800 dark:text-blue-200 list-disc list-inside space-y-1">
                 <li>✅ This source connector will be deleted from Debezium</li>
-                <li>✅ The shared sink connector will continue running for other source connectors</li>
+                <li>✅ The sink connector will continue running for other source connectors on this database</li>
                 <li>🗑️ Kafka topics for this connector will be deleted</li>
                 <li>🗑️ Target tables for this connector will be dropped</li>
             </ul>

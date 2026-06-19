@@ -176,12 +176,24 @@ class ClientDetailView(DetailView):
             except Exception:
                 connector.debezium_status = {'state': 'UNKNOWN'}
 
+            # Sink connector status (per source connector; controlled via row toggle)
+            if connector.sink_connector_name:
+                try:
+                    s_exists, s_data = connector_manager.get_connector_status(connector.sink_connector_name)
+                    s_state = s_data.get('connector', {}).get('state', 'UNKNOWN') if (s_exists and s_data) else 'NOT_FOUND'
+                except Exception:
+                    s_state = 'ERROR'
+                connector.sink_status = {'state': s_state}
+            else:
+                connector.sink_status = {'state': 'NOT_CONFIGURED'}
+
             # Get table count
             connector.table_count = connector.table_mappings.filter(is_enabled=True).count()
             total_tables += connector.table_count
             valid_connectors.append(connector)
 
         context['all_connectors'] = valid_connectors
+        context['target_database'] = self.object.get_target_database()
 
         # Calculate connector stats from Kafka-confirmed connectors only
         total_count = len(valid_connectors)
@@ -243,17 +255,16 @@ def client_soft_delete(request, pk):
             except Exception as e:
                 logger.warning(f"Failed to clean up connector {config.id} for client {pk}: {e}")
 
-    # Clean up the shared sink connector from Kafka Connect.
-    sink_db = client.client_databases.filter(is_target=True).first()
-    if sink_db:
+    # Clean up every per-source sink connector from Kafka Connect (one per source connector).
+    from client.models.database import ClientDatabase
+    manager = DebeziumConnectorManager()
+    for sink_name in ClientDatabase.get_all_sink_connector_names(client):
         try:
-            manager = DebeziumConnectorManager()
-            sink_name = sink_db.get_sink_connector_name()
             exists, _ = manager.get_connector_status(sink_name)
             if exists:
                 manager.delete_connector(sink_name)
         except Exception as e:
-            logger.warning(f"Failed to delete sink connector for client {pk}: {e}")
+            logger.warning(f"Failed to delete sink connector {sink_name} for client {pk}: {e}")
 
     client.soft_delete()
 

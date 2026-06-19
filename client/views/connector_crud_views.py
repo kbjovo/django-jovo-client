@@ -173,14 +173,6 @@ def connector_add(request, database_pk):
                     return redirect('connector_add', database_pk=database_pk)
                 connector_name = custom_name if custom_name else generate_connector_name(client, database, version=next_version)
 
-                # Get processing mode settings
-                processing_mode = request.POST.get('processing_mode', 'cdc')
-                batch_interval = request.POST.get('batch_interval') if processing_mode == 'batch' else None
-                batch_max_catchup = int(request.POST.get('batch_max_catchup_minutes', 5))
-                # Validate batch_max_catchup is one of the allowed values
-                if batch_max_catchup not in [5, 10, 20]:
-                    batch_max_catchup = 5
-
                 # Create ReplicationConfig with performance settings
                 replication_config = ReplicationConfig.objects.create(
                     client_database=database,
@@ -191,11 +183,6 @@ def connector_add(request, database_pk):
                     is_active=False,
                     auto_create_tables=request.POST.get('auto_create_tables') == 'on',
                     enable_ddl_sync=request.POST.get('enable_ddl_sync') == '1',
-
-                    # Processing mode settings
-                    processing_mode=processing_mode,
-                    batch_interval=batch_interval,
-                    batch_max_catchup_minutes=batch_max_catchup,
 
                     # Performance tuning settings
                     snapshot_mode=request.POST.get('snapshot_mode', 'initial'),
@@ -293,9 +280,7 @@ def connector_add(request, database_pk):
                     return JsonResponse({
                         'success': True,
                         'config_pk': replication_config.id,
-                        'processing_mode': replication_config.processing_mode,
                         'table_count': len(selected_tables),
-                        'batch_interval': replication_config.batch_interval,
                     })
 
                 # Non-AJAX fallback: redirect through original provision view
@@ -316,8 +301,6 @@ def connector_add(request, database_pk):
         'connector_name_preview': connector_name_preview,
         'unassigned_tables': tables_with_info,
         'snapshot_mode_choices': ReplicationConfig.SNAPSHOT_MODE_CHOICES,
-        'processing_mode_choices': ReplicationConfig.PROCESSING_MODE_CHOICES,
-        'batch_interval_choices': ReplicationConfig.BATCH_INTERVAL_CHOICES,
         'max_tables_per_connector': settings.DEBEZIUM_CONFIG.get('MAX_TABLES_PER_CONNECTOR', 25),
     }
 
@@ -330,47 +313,13 @@ def connector_add(request, database_pk):
 
 def connector_create_debezium(request, config_pk):
     """
-    Create Debezium source connector and sink connector (if first).
+    Create Debezium source connector and its dedicated sink connector.
     This is called after connector configuration is saved.
-
-    For batch processing mode, the connector is created in PAUSED state
-    and a Celery Beat schedule is set up.
     """
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
     database = replication_config.client_database
     client = database.client
 
-    # Check if batch mode - use orchestrator for proper setup
-    if replication_config.processing_mode == 'batch':
-        try:
-            from client.replication.orchestrator import ReplicationOrchestrator
-            orchestrator = ReplicationOrchestrator(replication_config)
-
-            success, message = orchestrator.start_batch_replication()
-
-            if success:
-                messages.success(
-                    request,
-                    f"Batch connector {replication_config.connector_name} created successfully. "
-                    f"Next sync: {replication_config.next_batch_run}"
-                )
-            else:
-                messages.error(request, f"Error creating batch connector: {message}")
-                replication_config.status = 'error'
-                replication_config.last_error_message = message
-                replication_config.save()
-
-            return redirect('connector_monitor', config_pk=replication_config.pk)
-
-        except Exception as e:
-            logger.error(f"Error creating batch connector: {e}", exc_info=True)
-            messages.error(request, f"Error creating batch connector: {str(e)}")
-            replication_config.status = 'error'
-            replication_config.last_error_message = str(e)
-            replication_config.save()
-            return redirect('connector_monitor', config_pk=replication_config.pk)
-
-    # CDC mode - continue with existing logic
     try:
         connector_manager = DebeziumConnectorManager()
 
@@ -610,57 +559,9 @@ def connector_edit_tables(request, config_pk):
                         setattr(replication_config, int_field, new_val)
                         settings_changed = True
 
-            # Processing mode & batch settings
-            processing_mode = request.POST.get('processing_mode', replication_config.processing_mode)
-            old_processing_mode = replication_config.processing_mode
-            mode_switched = processing_mode != old_processing_mode
-
-            if mode_switched:
-                replication_config.processing_mode = processing_mode
-                settings_changed = True
-
-            if processing_mode == 'batch':
-                batch_interval = request.POST.get('batch_interval')
-                if mode_switched and not batch_interval:
-                    messages.error(request, "Please select a sync interval for batch mode")
-                    return redirect('connector_edit_tables', config_pk=config_pk)
-                if batch_interval and batch_interval != replication_config.batch_interval:
-                    replication_config.batch_interval = batch_interval
-                    settings_changed = True
-                batch_max_catchup = int(request.POST.get('batch_max_catchup_minutes', replication_config.batch_max_catchup_minutes))
-                if batch_max_catchup not in [5, 10, 20]:
-                    batch_max_catchup = 5
-                if batch_max_catchup != replication_config.batch_max_catchup_minutes:
-                    replication_config.batch_max_catchup_minutes = batch_max_catchup
-                    settings_changed = True
-            elif processing_mode == 'cdc' and mode_switched:
-                # Switching to CDC — clear batch settings (schedule cleanup happens below)
-                replication_config.batch_interval = None
-                settings_changed = True
-
             if settings_changed:
                 replication_config.save()
-
-                from client.replication.orchestrator import ReplicationOrchestrator
-                orch = ReplicationOrchestrator(replication_config)
-
-                if mode_switched:
-                    if processing_mode == 'batch':
-                        # CDC → Batch: setup schedule (will pause connector on schedule)
-                        orch.setup_batch_schedule()
-                        # Pause connector immediately — batch schedule will resume it
-                        orch.pause_connector()
-                        messages.success(request, "Switched to batch mode — connector paused, batch schedule created")
-                    elif processing_mode == 'cdc':
-                        # Batch → CDC: remove schedule and resume connector for continuous streaming
-                        orch.remove_batch_schedule()
-                        orch.resume_connector()
-                        messages.success(request, "Switched to CDC mode — batch schedule removed, connector resumed")
-                else:
-                    # Same mode, just settings changed — reschedule if batch
-                    if processing_mode == 'batch':
-                        orch.setup_batch_schedule()
-                    messages.success(request, "Connector settings updated")
+                messages.success(request, "Connector settings updated")
 
             # Handle table changes
             tables_to_remove = request.POST.getlist('remove_tables')

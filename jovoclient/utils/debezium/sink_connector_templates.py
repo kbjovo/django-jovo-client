@@ -21,7 +21,7 @@ from client.models.database import ClientDatabase
 logger = logging.getLogger(__name__)
 
 
-def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
+def _get_custom_table_transforms(client: Client, config: Dict, source_db_id: Optional[int] = None) -> List[str]:
     """
     Build per-table RegexRouter transforms for tables whose target_table name
     differs from the default sink connector naming ({schema}_{table}).
@@ -48,6 +48,11 @@ def _get_custom_table_transforms(client: Client, config: Dict) -> List[str]:
             replication_config__status__in=['configured', 'active', 'paused', 'error'],
             is_enabled=True,
         ).select_related('replication_config__client_database').order_by('-id')
+
+        # Scope to a single source DB so each per-source sink only carries its own
+        # rename transforms (one sink per source connector).
+        if source_db_id is not None:
+            all_mappings = all_mappings.filter(replication_config__client_database__id=source_db_id)
 
         custom_transform_names: List[str] = []
         seen_names: set = set()
@@ -157,6 +162,10 @@ def get_mysql_sink_connector_config(
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
     jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}?autoReconnect=true"
 
+    # Source DB id scopes this sink to a single source connector's topics (one sink per
+    # source connector). Falls back to a wildcard only if no replication_config is given.
+    src_db_id = replication_config.client_database.id if replication_config else None
+
     # Default configuration
     config = {
         "name": connector_name,
@@ -169,6 +178,10 @@ def get_mysql_sink_connector_config(
         "hibernate.c3p0.testConnectionOnCheckout": "true",
         "hibernate.c3p0.preferredTestQuery": "SELECT 1",
         "hibernate.c3p0.idle_test_period": "300",
+        # Bound the pool: one sink per source connector now feeds the single target DB,
+        # so total target connections = (#source DBs) x tasks.max x max_size. Cap at 5.
+        "hibernate.c3p0.max_size": "5",
+        "hibernate.c3p0.min_size": "1",
 
         # --- TRANSFORMS ---
         # 1. unwrap: flattens the Debezium envelope so the sink sees the actual data fields.
@@ -234,7 +247,8 @@ def get_mysql_sink_connector_config(
 
     # Add Dead Letter Queue configuration if enabled
     if dlq_enabled and errors_tolerance == 'all':
-        dlq_topic = f"client_{client.id}.dlq"
+        # Per source-DB DLQ for isolation (one sink per source connector).
+        dlq_topic = f"client_{client.id}_db_{src_db_id}.dlq" if src_db_id else f"client_{client.id}.dlq"
         config["errors.deadletterqueue.topic.name"] = dlq_topic
         config["errors.deadletterqueue.topic.replication.factor"] = str(dlq_replication_factor)
         config["errors.deadletterqueue.context.headers.enable"] = str(dlq_context_headers).lower()
@@ -251,7 +265,11 @@ def get_mysql_sink_connector_config(
     # Matches both 3-segment topics (MySQL/PostgreSQL: prefix.db.table) and
     # 4-segment topics (SQL Server/Oracle: prefix.db.schema.table).
     # The middle optional group (?:[^.]+\.)? absorbs the extra schema segment.
-    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
+    # Scope to a single source connector's topics: client_{cid}_db_{src_db_id}_v_{ver}.*
+    # (one sink per source connector). Fall back to the client-wide wildcard only when
+    # no replication_config was supplied.
+    db_segment = str(src_db_id) if src_db_id else "\\d+"
+    topic_regex = f"client_{client.id}_db_{db_segment}_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
@@ -259,7 +277,7 @@ def get_mysql_sink_connector_config(
     # Custom transforms are prepended so they run before the generic extractTableName.
     # Topics that match a custom rename get routed to the custom table name;
     # the generic $1_$2 extractTableName handles all remaining topics.
-    custom_transforms = _get_custom_table_transforms(client, config)
+    custom_transforms = _get_custom_table_transforms(client, config, source_db_id=src_db_id)
     if custom_transforms:
         config["transforms"] = "unwrap," + ",".join(custom_transforms) + ",extractTableName"
     else:
@@ -305,6 +323,10 @@ def get_postgresql_sink_connector_config(
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
     jdbc_url = f"jdbc:postgresql://{db_config.host}:{db_config.port}/{db_config.database_name}"
 
+    # Source DB id scopes this sink to a single source connector's topics (one sink per
+    # source connector). Falls back to a wildcard only if no replication_config is given.
+    src_db_id = replication_config.client_database.id if replication_config else None
+
     # Default configuration
     config = {
         "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
@@ -337,6 +359,11 @@ def get_postgresql_sink_connector_config(
         # 'basic' mode: creates tables if missing, adds new columns as NULLABLE
         "schema.evolution": "basic",
         "collection.name.format": "${topic}",
+
+        # Bound the pool: one sink per source connector now feeds the single target DB,
+        # so total target connections = (#source DBs) x tasks.max x max_size. Cap at 5.
+        "hibernate.c3p0.max_size": "5",
+        "hibernate.c3p0.min_size": "1",
 
         # --- UPDATED TO MATCH SOURCE (AVRO) ---
         "key.converter": "io.confluent.connect.avro.AvroConverter",
@@ -387,7 +414,8 @@ def get_postgresql_sink_connector_config(
 
     # Add Dead Letter Queue configuration if enabled
     if dlq_enabled and errors_tolerance == 'all':
-        dlq_topic = f"client_{client.id}.dlq"
+        # Per source-DB DLQ for isolation (one sink per source connector).
+        dlq_topic = f"client_{client.id}_db_{src_db_id}.dlq" if src_db_id else f"client_{client.id}.dlq"
         config["errors.deadletterqueue.topic.name"] = dlq_topic
         config["errors.deadletterqueue.topic.replication.factor"] = str(dlq_replication_factor)
         config["errors.deadletterqueue.context.headers.enable"] = str(dlq_context_headers).lower()
@@ -404,13 +432,17 @@ def get_postgresql_sink_connector_config(
     # Matches both 3-segment topics (MySQL/PostgreSQL: prefix.db.table) and
     # 4-segment topics (SQL Server/Oracle: prefix.db.schema.table).
     # The middle optional group (?:[^.]+\.)? absorbs the extra schema segment.
-    topic_regex = f"client_{client.id}_db_\\d+_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
+    # Scope to a single source connector's topics: client_{cid}_db_{src_db_id}_v_{ver}.*
+    # (one sink per source connector). Fall back to the client-wide wildcard only when
+    # no replication_config was supplied.
+    db_segment = str(src_db_id) if src_db_id else "\\d+"
+    topic_regex = f"client_{client.id}_db_{db_segment}_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
     # Build custom per-table rename transforms and assemble the full transforms chain.
     # Order: unwrap (flatten envelope) → custom renames → extractTableName → castMicroTime
-    custom_transforms = _get_custom_table_transforms(client, config)
+    custom_transforms = _get_custom_table_transforms(client, config, source_db_id=src_db_id)
     if custom_transforms:
         config["transforms"] = "unwrap," + ",".join(custom_transforms) + ",extractTableName,castMicroTime"
     else:

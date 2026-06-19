@@ -6,7 +6,7 @@ import logging
 from typing import Dict, List, Optional, Any, Tuple
 from client.models.client import Client
 from client.models.database import ClientDatabase
-from client.models.job import ReplicationConfig
+from client.models.replication import ReplicationConfig
 from sqlalchemy.sql import text
 
 logger = logging.getLogger(__name__)

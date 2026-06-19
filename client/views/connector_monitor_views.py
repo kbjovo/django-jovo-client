@@ -114,87 +114,6 @@ def connector_status_api(request, config_pk):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
-def connector_live_metrics_api(request, config_pk):
-    """
-    AJAX endpoint for live connector metrics, polled every ~10s by the monitor page.
-    Returns:
-      - streaming: Jolokia JMX streaming metrics (lag, throughput, queue utilisation)
-      - config_diff: Live connector config vs stored model values
-    """
-    try:
-        config = get_object_or_404(ReplicationConfig, pk=config_pk)
-        database = config.client_database
-        result = {}
-
-        # ── 1. Streaming metrics via Jolokia ───────────────────────────────
-        try:
-            from jovoclient.utils.debezium.jolokia_client import JolokiaClient
-            jolokia = JolokiaClient()
-            raw = jolokia.get_streaming_metrics(database.db_type, config.kafka_topic_prefix or '')
-            if raw:
-                lag_ms = raw.get('MilliSecondsBehindSource', 0) or 0
-                queue_total = raw.get('QueueTotalCapacity', 0) or 0
-                queue_remaining = raw.get('QueueRemainingCapacity', 0) or 0
-                queue_used = queue_total - queue_remaining
-                queue_pct = round((queue_used / queue_total) * 100) if queue_total else 0
-                ms_since_last = raw.get('MilliSecondsSinceLastEvent', 0) or 0
-                result['streaming'] = {
-                    'available': True,
-                    'lag_ms': lag_ms,
-                    'lag_display': f"{lag_ms:,} ms" if lag_ms < 60000 else f"{lag_ms // 1000:,} s",
-                    'total_events': raw.get('TotalNumberOfEventsSeen', 0),
-                    'filtered_events': raw.get('NumberOfEventsFiltered', 0),
-                    'queue_total': queue_total,
-                    'queue_used': queue_used,
-                    'queue_pct': queue_pct,
-                    'ms_since_last_event': ms_since_last,
-                    'idle_display': f"{ms_since_last // 1000}s ago" if ms_since_last < 3600000 else "over 1h ago",
-                }
-            else:
-                result['streaming'] = {'available': False}
-        except Exception as e:
-            result['streaming'] = {'available': False, 'error': str(e)}
-
-        # ── 2. Live config diff (Kafka Connect REST vs stored model) ───────
-        try:
-            from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
-            manager = DebeziumConnectorManager()
-            live_config = manager.get_connector_config(config.connector_name)
-            if live_config:
-                TRACKED = {
-                    'max.queue.size': ('max_queue_size', int),
-                    'max.batch.size': ('max_batch_size', int),
-                    'poll.interval.ms': ('poll_interval_ms', int),
-                    'snapshot.fetch.size': ('snapshot_fetch_size', int),
-                }
-                diffs = []
-                for live_key, (model_attr, cast) in TRACKED.items():
-                    live_val = live_config.get(live_key)
-                    stored_val = getattr(config, model_attr, None)
-                    if live_val is not None and stored_val is not None:
-                        if cast(live_val) != stored_val:
-                            diffs.append({
-                                'key': live_key,
-                                'live': live_val,
-                                'stored': str(stored_val),
-                            })
-                result['config_diff'] = {
-                    'available': True,
-                    'diffs': diffs,
-                    'in_sync': len(diffs) == 0,
-                }
-            else:
-                result['config_diff'] = {'available': False}
-        except Exception as e:
-            result['config_diff'] = {'available': False, 'error': str(e)}
-
-        return JsonResponse({'success': True, **result})
-
-    except Exception as e:
-        logger.error(f'Failed to get live metrics: {e}', exc_info=True)
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
-
-
 def connector_table_rows_api(request, config_pk):
     """
     AJAX endpoint returning row counts for all enabled tables
@@ -371,6 +290,17 @@ def connector_dashboard_card_api(request, config_pk):
 
         connector_state = card['connector_state']
 
+        # ── 1b. Sink connector state (shared sink, controlled via toggle) ──
+        sink_state = 'NOT_CONFIGURED'
+        if config.sink_connector_name:
+            try:
+                s_mgr = DebeziumConnectorManager()
+                s_exists, s_data = s_mgr.get_connector_status(config.sink_connector_name)
+                sink_state = s_data.get('connector', {}).get('state', 'UNKNOWN') if (s_exists and s_data) else 'NOT_FOUND'
+            except Exception:
+                sink_state = 'ERROR'
+        card['sink_state'] = sink_state
+
         # ── 2. Snapshot detection (only connectors created < 24h ago) ──────
         is_new = (timezone.now() - config.created_at) < timedelta(hours=24)
         if is_new:
@@ -432,8 +362,6 @@ def connector_dashboard_card_api(request, config_pk):
                         status = 'rows_in_sync'
                         config.last_success_at = timezone.now()
                         config.save(update_fields=['last_success_at'])
-                    elif config.processing_mode == 'batch':
-                        status = 'syncing' if connector_state == 'RUNNING' else 'yet_to_be_synced'
                     else:
                         status = 'not_synced'
 
@@ -450,15 +378,7 @@ def connector_dashboard_card_api(request, config_pk):
             logger.warning(f'Sync status check failed for config {config_pk}: {e}')
             sync = {'status': 'unable_to_check'}
 
-        batch = None
-        if config.processing_mode == 'batch':
-            batch = {
-                'last_batch_run': config.last_batch_run.isoformat() if config.last_batch_run else None,
-                'next_batch_run': config.next_batch_run.isoformat() if config.next_batch_run else None,
-                'batch_sync_started_at': config.batch_sync_started_at.isoformat() if config.batch_sync_started_at else None,
-            }
-
-        return JsonResponse({'success': True, 'card': card, 'sync': sync, 'batch': batch})
+        return JsonResponse({'success': True, 'card': card, 'sync': sync})
 
     except Exception as e:
         logger.error(f'Dashboard card API failed for config {config_pk}: {e}', exc_info=True)

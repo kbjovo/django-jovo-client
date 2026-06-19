@@ -410,59 +410,21 @@ class ReplicationOrchestrator:
                 except Exception as e:
                     self._log_warning(f"⚠️ Source deletion error: {e}")
 
-            # Handle sink connector (shared by multiple source connectors)
-            # Check if there are other active source connectors for this client
+            # Sink connector is dedicated to THIS source connector (one sink per source DB).
+            # Delete it unless another active config still uses the same source database
+            # (which would share the same per-source sink name).
             if sink_connector_name:
                 from client.models import ReplicationConfig
-                from client.models.database import ClientDatabase
 
-                client = self.config.client_database.client
-                target_db = ClientDatabase.objects.filter(client=client, is_target=True).first()
-
-                # Get remaining configs (excluding the one being deleted)
-                remaining_configs = ReplicationConfig.objects.filter(
-                    client_database__client=client,
+                siblings = ReplicationConfig.objects.filter(
+                    client_database=self.config.client_database,
                     status__in=['configured', 'active', 'paused', 'error'],
                 ).exclude(pk=config_id)
 
-                if remaining_configs.exists() and target_db:
-                    # Other source connectors exist - update sink with remaining topics
-                    self._log_info("ℹ️ Other source connectors exist - updating sink connector")
-
-                    remaining_topics = set()
-                    for config in remaining_configs:
-                        db_config = config.client_database
-                        topic_prefix = config.kafka_topic_prefix
-
-                        for tm in config.table_mappings.filter(is_enabled=True):
-                            topic = format_topic_name(
-                                db_config=db_config,
-                                table_name=tm.source_table,
-                                topic_prefix=topic_prefix,
-                                schema=tm.source_schema
-                            )
-                            remaining_topics.add(topic)
-
-                    if remaining_topics:
-                        try:
-                            success, message = self._update_sink_connector(
-                                sink_connector_name,
-                                remaining_topics,
-                                target_db
-                            )
-                            if success:
-                                self._log_info(f"✓ Updated sink with {len(remaining_topics)} remaining topics")
-                            else:
-                                self._log_warning(f"⚠️ Failed to update sink: {message}")
-                        except Exception as e:
-                            self._log_warning(f"⚠️ Sink update error: {e}")
-                    else:
-                        # No remaining topics - delete sink
-                        self._log_info("ℹ️ No remaining topics - deleting sink connector")
-                        self._delete_sink_connector(sink_connector_name)
+                if siblings.exists():
+                    self._log_info("ℹ️ Another config still uses this source DB — keeping its sink connector")
                 else:
-                    # No other active source connectors - delete sink
-                    self._log_info("ℹ️ No other source connectors - deleting sink connector")
+                    self._log_info("ℹ️ Deleting dedicated sink connector")
                     self._delete_sink_connector(sink_connector_name)
 
             # Optionally delete Kafka topics and their schema registry subjects
@@ -699,14 +661,13 @@ class ReplicationOrchestrator:
             if not target_db:
                 return False, "No target database configured"
 
-            # Generate sink connector name using consistent naming convention
-            # IMPORTANT: Must match ClientDatabase.get_sink_connector_name() for consistency
-            # Format: client_{client_id}_sink (shared by ALL source connectors for this client)
-            sink_connector_name = f"client_{client.id}_sink"
+            # Generate sink connector name using consistent naming convention.
+            # IMPORTANT: Must match ClientDatabase.get_sink_connector_name() for consistency.
+            # Format: client_{client_id}_db_{src_db_id}_sink (one sink per source connector).
+            sink_connector_name = self.config.client_database.get_sink_connector_name()
 
-            # Get topics from ALL active source connectors for this client
-            # This enables multiple source connectors to feed into one shared sink
-            current_topics = self._get_all_kafka_topics_for_client()
+            # Topics for THIS source connector only (one sink per source connector).
+            current_topics = self._get_kafka_topics_for_config()
 
             if not current_topics:
                 return False, "No tables enabled for replication"
@@ -770,50 +731,6 @@ class ReplicationOrchestrator:
                 schema=table_mapping.source_schema
             )
             topics.add(topic)
-
-        return topics
-
-    def _get_all_kafka_topics_for_client(self) -> Set[str]:
-        """
-        Get topics from ALL active ReplicationConfigs for this client.
-
-        Used for sink connector to subscribe to all source connectors,
-        enabling multiple source connectors to feed into a shared sink.
-
-        Returns:
-            Set of topic names from all active configs
-        """
-        from client.models import ReplicationConfig
-
-        client = self.config.client_database.client
-        topics = set()
-
-        # Get all active/configured configs for this client (any source DB)
-        active_configs = ReplicationConfig.objects.filter(
-            client_database__client=client,
-            status__in=['configured', 'active'],
-        ).exclude(
-            pk=self.config.pk  # Exclude current config, we'll add it separately
-        )
-
-        # Add topics from other active configs
-        for config in active_configs:
-            db_config = config.client_database
-            topic_prefix = config.kafka_topic_prefix
-
-            for tm in config.table_mappings.filter(is_enabled=True):
-                topic = format_topic_name(
-                    db_config=db_config,
-                    table_name=tm.source_table,
-                    topic_prefix=topic_prefix,
-                    schema=tm.source_schema
-                )
-                topics.add(topic)
-
-        # Add topics from current config
-        topics.update(self._get_kafka_topics_for_config())
-
-        self._log_info(f"Aggregated {len(topics)} topics from {active_configs.count() + 1} source connector(s)")
 
         return topics
 
@@ -1424,8 +1341,9 @@ class ReplicationOrchestrator:
             # ========================================
             self._log_info("STEP 4/6: Updating source connector configuration...")
 
-            # For batch mode: check if connector is paused and resume it first
-            was_paused = self._resume_if_paused()
+            # Ensure the connector is running before reconfiguring (resume if a user
+            # manually paused it).
+            self._resume_if_paused()
 
             source_config = get_connector_config_for_database(
                 db_config=db_config,
@@ -1438,7 +1356,6 @@ class ReplicationOrchestrator:
                 source_config
             )
             if not cfg_ok:
-                self._re_pause_if_batch_mode(was_paused)
                 steps.append({
                     'id': 'src_config',
                     'status': 'error',
@@ -1510,15 +1427,6 @@ class ReplicationOrchestrator:
                     'msg': 'Sink connector cycled (stop → clear offsets → resume)' if sink_ok else f"Sink connector cycle warning: {stop_err or resume_err}",
                 })
 
-            # ========================================
-            # STEP 6: Re-pause for batch mode (if applicable)
-            # ========================================
-            if was_paused:
-                self._log_info("STEP 6/6: Re-pausing connector for batch mode...")
-                self._re_pause_if_batch_mode(was_paused)
-            else:
-                self._log_info("STEP 6/6: Skipped (connector was not paused)")
-
             self._log_info("=" * 60)
             self._log_info("✓ TABLES REMOVED SUCCESSFULLY")
             self._log_info("=" * 60)
@@ -1529,9 +1437,6 @@ class ReplicationOrchestrator:
         except Exception as e:
             error_msg = f"Failed to remove tables: {str(e)}"
             self._log_error(error_msg)
-            # Ensure we re-pause on error if we resumed
-            if 'was_paused' in locals() and was_paused:
-                self._re_pause_if_batch_mode(was_paused)
             return False, error_msg, steps
 
     def add_tables(self, table_names: list, target_table_names: dict = None) -> Tuple[bool, str, list]:
@@ -1675,8 +1580,9 @@ class ReplicationOrchestrator:
             # ========================================
             self._log_info("STEP 3/6: Updating source connector...")
 
-            # For batch mode: check if connector is paused and resume it first
-            was_paused = self._resume_if_paused()
+            # Ensure the connector is running before reconfiguring (resume if a user
+            # manually paused it).
+            self._resume_if_paused()
 
             enabled_mappings = self.config.table_mappings.filter(is_enabled=True)
             if db_config.db_type == 'oracle':
@@ -1691,7 +1597,6 @@ class ReplicationOrchestrator:
             # An empty tables_whitelist causes the template to omit table.include.list
             # entirely, making Debezium capture every table in the database.
             if not all_tables:
-                self._re_pause_if_batch_mode(was_paused)
                 steps.append({
                     'id': 'src_config',
                     'status': 'error',
@@ -1710,8 +1615,6 @@ class ReplicationOrchestrator:
                 source_config
             )
             if not add_cfg_ok:
-                # Re-pause if we resumed it
-                self._re_pause_if_batch_mode(was_paused)
                 steps.append({
                     'id': 'src_config',
                     'status': 'error',
@@ -1875,30 +1778,15 @@ class ReplicationOrchestrator:
                     'msg': f"Foreign key setup skipped: {e}",
                 })
 
-            # ========================================
-            # STEP 6: Handle batch mode state
-            # ========================================
-            # NOTE: For add_tables, we do NOT re-pause immediately because the
-            # incremental snapshot needs to run. The connector must stay RUNNING
-            # until the snapshot completes. The batch scheduler will pause it
-            # on the next scheduled cycle.
-            if was_paused:
-                self._log_info("STEP 6/6: Batch mode - connector will stay RUNNING for snapshot")
-                self._log_info("  → Incremental snapshot is in progress")
-                self._log_info("  → Connector will be paused on next batch schedule")
-                # Update state to reflect it's now running
-                self.config.connector_state = 'RUNNING'
-                self.config.save()
-            else:
-                self._log_info("STEP 6/6: Skipped (connector was not paused)")
+            # The source connector stays RUNNING so the incremental snapshot can proceed.
+            self.config.connector_state = 'RUNNING'
+            self.config.save()
 
             self._log_info("=" * 60)
             self._log_info("✓ TABLES ADDED SUCCESSFULLY")
             self._log_info("=" * 60)
 
             result_msg = f"Added {len(added_tables)} table(s) via {method} signal (ID: {signal_id})"
-            if was_paused:
-                result_msg += " | Connector running for snapshot (will pause on next schedule)"
             if failed_tables:
                 result_msg += f" | {len(failed_tables)} failed: {', '.join(failed_tables)}"
 
@@ -1907,9 +1795,6 @@ class ReplicationOrchestrator:
         except Exception as e:
             error_msg = f"Failed to add tables: {str(e)}"
             self._log_error(error_msg)
-            # On error, re-pause if we resumed (snapshot didn't start)
-            if 'was_paused' in locals() and was_paused:
-                self._re_pause_if_batch_mode(was_paused)
             return False, error_msg, steps
 
     # ==========================================
@@ -2004,17 +1889,6 @@ class ReplicationOrchestrator:
         overall_health = self._calculate_overall_health(connector_status, sink_status)
         snapshot_progress = self._get_snapshot_progress()
 
-        # Lazy cleanup: if the connector is PAUSED but batch_sync_started_at is still
-        # set (e.g. pause_connector() failed to save, or a crash left it stale), clear
-        # it now so the UI doesn't keep showing "Syncing" for a paused connector.
-        if (
-            self.config.processing_mode == 'batch'
-            and self.config.batch_sync_started_at
-            and connector_status.get('state') == 'PAUSED'
-        ):
-            self.config.batch_sync_started_at = None
-            self.config.save(update_fields=['batch_sync_started_at'])
-
         return {
             'overall': overall_health,
             'source_connector': connector_status,
@@ -2028,14 +1902,8 @@ class ReplicationOrchestrator:
                 'kafka_topic_prefix': self.config.kafka_topic_prefix,
             },
             'statistics': {
-                'total_rows_synced': sum(
-                    tm.total_rows_synced or 0
-                    for tm in self.config.table_mappings.all()
-                ),
                 'tables_enabled': self.config.table_mappings.filter(is_enabled=True).count(),
-                'last_sync_at': self.config.last_sync_at.isoformat() if self.config.last_sync_at else None,
             },
-            'batch_schedule': self._get_batch_schedule() if self.config.processing_mode == 'batch' else None,
             'timestamp': timezone.now().isoformat(),
         }
 
@@ -2096,38 +1964,6 @@ class ReplicationOrchestrator:
             return None
         except Exception:
             return None
-
-    def _get_batch_schedule(self) -> Dict[str, Any]:
-        """Get batch schedule info for the monitor page."""
-        schedule_active = False
-        if self.config.batch_celery_task_name:
-            try:
-                from django_celery_beat.models import PeriodicTask
-                schedule_active = PeriodicTask.objects.filter(
-                    name=self.config.batch_celery_task_name,
-                    enabled=True,
-                ).exists()
-            except (ImportError, Exception):
-                pass
-
-        is_on_schedule = (
-            schedule_active
-            and self.config.next_batch_run is not None
-            and self.config.next_batch_run > timezone.now()
-        )
-
-        return {
-            'next_batch_run': self.config.next_batch_run.isoformat() if self.config.next_batch_run else None,
-            'last_batch_run': self.config.last_batch_run.isoformat() if self.config.last_batch_run else None,
-            'batch_sync_started_at': self.config.batch_sync_started_at.isoformat() if self.config.batch_sync_started_at else None,
-            'batch_interval': self.config.batch_interval,
-            'batch_interval_display': self.config.get_batch_interval_display() if self.config.batch_interval else None,
-            'batch_max_catchup_minutes': self.config.batch_max_catchup_minutes,
-            'celery_task_name': self.config.batch_celery_task_name,
-            'schedule_active': schedule_active,
-            'is_on_schedule': is_on_schedule,
-            'last_batch_operations': self.config.last_batch_operations,
-        }
 
     def _get_connector_status(self) -> Dict[str, Any]:
         """Get Debezium source connector status."""
@@ -2215,7 +2051,8 @@ class ReplicationOrchestrator:
 
     def _resume_if_paused(self) -> bool:
         """
-        Resume connector if it's paused (for batch mode operations).
+        Resume the source connector if a user has manually paused it, so reconfigure
+        operations (add/remove tables, snapshots) can proceed.
 
         Returns:
             True if connector was paused and resumed, False if it was already running
@@ -2233,31 +2070,13 @@ class ReplicationOrchestrator:
                 self._log_warning("  ⚠️ Failed to resume paused connector")
         return False
 
-    def _re_pause_if_batch_mode(self, was_paused: bool) -> None:
-        """
-        Re-pause connector if it's in batch mode and was previously paused.
-
-        Args:
-            was_paused: Whether the connector was paused before the operation
-        """
-        if was_paused and self.config.processing_mode == 'batch':
-            self._log_info("  → Re-pausing connector for batch mode...")
-            success, _ = self.connector_manager.pause_connector(self.config.connector_name)
-            if success:
-                self.config.connector_state = 'PAUSED'
-                self.config.save()
-                self._log_info("  ✓ Connector re-paused for batch mode")
-            else:
-                self._log_warning("  ⚠️ Failed to re-pause connector")
-
-    # ==========================================
-    # Batch Processing Methods
-    # ==========================================
-
     def resume_connector(self) -> Tuple[bool, str]:
         """
-        Resume a paused source connector.
-        Used by batch processing to start a sync window.
+        Resume a paused source connector (manual pause/resume control).
+
+        Connectors stream continuously; this simply lets a user resume one they
+        previously paused (also used for add-tables snapshots, sink offset cycling,
+        and manual recovery).
 
         Returns:
             (success, message)
@@ -2272,19 +2091,6 @@ class ReplicationOrchestrator:
 
             if success:
                 self.config.connector_state = 'RUNNING'
-                if self.config.processing_mode == 'batch':
-                    now = timezone.now()
-                    self.config.batch_sync_started_at = now
-                    # Advance next_batch_run to estimated next cycle:
-                    # sync_start + max_catchup + interval, so the UI shows
-                    # when the *next* sync will happen rather than the current
-                    # run's scheduled time.
-                    if self.config.batch_max_catchup_minutes and self.config.batch_interval:
-                        max_seconds = self.config.batch_max_catchup_minutes * 60
-                        interval_seconds = self._get_batch_interval_seconds()
-                        self.config.next_batch_run = now + timezone.timedelta(
-                            seconds=max_seconds + interval_seconds
-                        )
                 self.config.save()
                 self._log_info(f"✓ Connector resumed: {self.config.connector_name}")
                 self._apply_pending_truncates()
@@ -2299,13 +2105,27 @@ class ReplicationOrchestrator:
 
     def _apply_pending_truncates(self) -> None:
         """
-        Apply any TRUNCATE+resync operations that were deferred while the connector
-        was paused.  Called automatically by resume_connector() after a successful resume.
+        Apply any TRUNCATE+resync operations that were deferred while a connector
+        was paused.  Called by resume_connector() and resume_sink_connector().
+
+        A deferred TRUNCATE truncates the target table directly and fires a
+        re-snapshot that flows through source → Kafka → sink, so it must only run
+        once BOTH the source and sink connectors are active.  If either is still
+        paused the queue is left intact and drained on the next resume.
         """
         from client.models.replication import ReplicationConfig
-        cfg = ReplicationConfig.objects.only('pending_truncates').get(pk=self.config.pk)
+        cfg = ReplicationConfig.objects.only(
+            'pending_truncates', 'connector_state', 'sink_connector_state'
+        ).get(pk=self.config.pk)
         pending = list(cfg.pending_truncates or [])
         if not pending:
+            return
+
+        if cfg.connector_state == 'PAUSED' or cfg.sink_connector_state == 'PAUSED':
+            self._log_info(
+                f"Deferred TRUNCATE(s) kept queued — pipeline still paused "
+                f"(source={cfg.connector_state}, sink={cfg.sink_connector_state}): {pending}"
+            )
             return
 
         self._log_info(f"Applying {len(pending)} deferred TRUNCATE(s) after resume: {pending}")
@@ -2331,8 +2151,7 @@ class ReplicationOrchestrator:
 
     def pause_connector(self) -> Tuple[bool, str]:
         """
-        Pause a running source connector.
-        Used by batch processing to end a sync window.
+        Pause a running source connector (manual pause/resume control).
 
         Returns:
             (success, message)
@@ -2347,18 +2166,6 @@ class ReplicationOrchestrator:
 
             if success:
                 self.config.connector_state = 'PAUSED'
-                self.config.batch_sync_started_at = None
-
-                # Advance next_batch_run so the frontend countdown is always
-                # relative to NOW, not the original setup time.  Without this,
-                # next_batch_run stays in the past forever after the first cycle
-                # and the frontend predictedSyncing window fires on every tick,
-                # making the UI show "Syncing…" even when the connector is paused.
-                if self.config.processing_mode == 'batch' and self.config.batch_interval:
-                    interval_seconds = self._get_batch_interval_seconds()
-                    self.config.next_batch_run = timezone.now() + timezone.timedelta(seconds=interval_seconds)
-                    self._log_info(f"  → Next batch run scheduled: {self.config.next_batch_run}")
-
                 self.config.save()
                 self._log_info(f"✓ Connector paused: {self.config.connector_name}")
                 return True, "Connector paused successfully"
@@ -2367,6 +2174,68 @@ class ReplicationOrchestrator:
 
         except Exception as e:
             error_msg = f"Error pausing connector: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def pause_sink_connector(self) -> Tuple[bool, str]:
+        """
+        Pause the sink connector and record sink_connector_state='PAUSED'.
+
+        While paused, DML buffers in Kafka and any source TRUNCATE is deferred
+        into pending_truncates (see base_processor._handle_truncate_for_table),
+        so the target is never truncated out from under the paused pipeline.
+
+        Returns:
+            (success, message)
+        """
+        self._log_info("Pausing sink connector...")
+
+        if not self.config.sink_connector_name:
+            return False, "No sink connector configured"
+
+        try:
+            success, error = self.connector_manager.pause_connector(self.config.sink_connector_name)
+
+            if success:
+                self.config.sink_connector_state = 'PAUSED'
+                self.config.save(update_fields=['sink_connector_state'])
+                self._log_info(f"✓ Sink connector paused: {self.config.sink_connector_name}")
+                return True, "Sink connector paused"
+            else:
+                return False, f"Failed to pause sink connector: {error}"
+
+        except Exception as e:
+            error_msg = f"Error pausing sink connector: {str(e)}"
+            self._log_error(error_msg)
+            return False, error_msg
+
+    def resume_sink_connector(self) -> Tuple[bool, str]:
+        """
+        Resume the sink connector, record sink_connector_state='RUNNING' and drain
+        any TRUNCATEs that were deferred while the pipeline was paused.
+
+        Returns:
+            (success, message)
+        """
+        self._log_info("Resuming sink connector...")
+
+        if not self.config.sink_connector_name:
+            return False, "No sink connector configured"
+
+        try:
+            success, error = self.connector_manager.resume_connector(self.config.sink_connector_name)
+
+            if success:
+                self.config.sink_connector_state = 'RUNNING'
+                self.config.save(update_fields=['sink_connector_state'])
+                self._log_info(f"✓ Sink connector resumed: {self.config.sink_connector_name}")
+                self._apply_pending_truncates()
+                return True, "Sink connector resumed"
+            else:
+                return False, f"Failed to resume sink connector: {error}"
+
+        except Exception as e:
+            error_msg = f"Error resuming sink connector: {str(e)}"
             self._log_error(error_msg)
             return False, error_msg
 
@@ -2545,199 +2414,6 @@ class ReplicationOrchestrator:
             self._log_error(error_msg)
             return False, error_msg
 
-    def sync_with_schedule(self) -> Tuple[bool, str]:
-        """
-        Re-establish batch schedule for a connector that is out of sync.
-
-        If the connector is currently RUNNING (manually resumed), pause it first,
-        then set up the Celery Beat periodic task so it returns to its normal cycle.
-
-        Returns:
-            (success, message) - returns early if already on schedule.
-        """
-        if self.config.processing_mode != 'batch':
-            return False, "Only batch connectors can be synced with schedule"
-
-        if not self.config.batch_interval:
-            return False, "No batch interval configured"
-
-        try:
-            # Check if already on schedule
-            schedule_info = self._get_batch_schedule()
-            if schedule_info['is_on_schedule']:
-                # Also check connector is actually paused (expected state between runs)
-                exists, status_data = self.connector_manager.get_connector_status(
-                    self.config.connector_name
-                )
-                if exists and status_data:
-                    state = status_data.get('connector', {}).get('state', '')
-                    if state == 'PAUSED':
-                        return True, "Connector is already on schedule"
-
-            # If connector is running, pause it first
-            exists, status_data = self.connector_manager.get_connector_status(
-                self.config.connector_name
-            )
-            if exists and status_data:
-                state = status_data.get('connector', {}).get('state', '')
-                if state == 'RUNNING':
-                    self._log_info("Pausing connector before re-establishing schedule...")
-                    self.pause_connector()
-
-            # Re-establish the batch schedule
-            success, message = self.setup_batch_schedule()
-            if success:
-                self._log_info("✓ Connector synced back to schedule")
-                return True, "Connector synced back to schedule"
-            return False, message
-
-        except ImportError:
-            return False, "django-celery-beat is not installed"
-        except Exception as e:
-            error_msg = f"Error syncing with schedule: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
-
-    def _get_batch_interval_seconds(self) -> int:
-        """
-        Convert batch interval choice to seconds.
-
-        Returns:
-            Interval in seconds
-        """
-        interval_map = {
-            '2m': 2 * 60,         # 2 minutes
-            '5m': 5 * 60,         # 5 minutes
-            '15m': 15 * 60,       # 15 minutes
-            '30m': 30 * 60,       # 30 minutes
-            '1h': 60 * 60,        # 1 hour
-            '2h': 2 * 60 * 60,    # 2 hours
-            '6h': 6 * 60 * 60,    # 6 hours
-            '12h': 12 * 60 * 60,  # 12 hours
-            '24h': 24 * 60 * 60,  # 24 hours
-        }
-        return interval_map.get(self.config.batch_interval, 2 * 60 * 60)
-
-    def setup_batch_schedule(self) -> Tuple[bool, str]:
-        """
-        Create or update Celery Beat periodic task for batch processing.
-
-        Uses django-celery-beat's IntervalSchedule and PeriodicTask models.
-
-        Returns:
-            (success, message)
-        """
-        if self.config.processing_mode != 'batch':
-            return False, "Connector is not in batch processing mode"
-
-        if not self.config.batch_interval:
-            return False, "No batch interval configured"
-
-        try:
-            from django_celery_beat.models import PeriodicTask, IntervalSchedule
-            import json
-
-            # Get interval in seconds
-            interval_seconds = self._get_batch_interval_seconds()
-
-            # Create or get interval schedule
-            schedule, _ = IntervalSchedule.objects.get_or_create(
-                every=interval_seconds,
-                period=IntervalSchedule.SECONDS,
-            )
-
-            # Generate unique task name
-            task_name = f"batch_sync_config_{self.config.id}"
-
-            # Create or update periodic task
-            periodic_task, created = PeriodicTask.objects.update_or_create(
-                name=task_name,
-                defaults={
-                    'interval': schedule,
-                    'task': 'client.tasks.run_batch_sync',
-                    'args': json.dumps([self.config.id]),
-                    'enabled': True,
-                }
-            )
-
-            # Calculate next run time
-            self.config.batch_celery_task_name = task_name
-            self.config.next_batch_run = timezone.now() + timezone.timedelta(seconds=interval_seconds)
-            self.config.save()
-
-            action = "created" if created else "updated"
-            self._log_info(f"✓ Batch schedule {action}: {task_name} (every {self.config.batch_interval})")
-
-            return True, f"Batch schedule {action} successfully"
-
-        except ImportError:
-            error_msg = "django-celery-beat is not installed. Run: pip install django-celery-beat"
-            self._log_error(error_msg)
-            return False, error_msg
-
-        except Exception as e:
-            error_msg = f"Failed to setup batch schedule: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
-
-    def remove_batch_schedule(self) -> Tuple[bool, str]:
-        """
-        Remove Celery Beat periodic task for batch processing.
-
-        Returns:
-            (success, message)
-        """
-        if not self.config.batch_celery_task_name:
-            return True, "No batch schedule to remove"
-
-        try:
-            from django_celery_beat.models import PeriodicTask
-
-            # Delete periodic task
-            deleted_count, _ = PeriodicTask.objects.filter(
-                name=self.config.batch_celery_task_name
-            ).delete()
-
-            # Clear all batch schedule fields
-            self.config.batch_celery_task_name = None
-            self.config.next_batch_run = None
-            self.config.last_batch_run = None
-            self.config.save()
-
-            if deleted_count > 0:
-                self._log_info(f"✓ Batch schedule removed")
-                return True, "Batch schedule removed successfully"
-            else:
-                return True, "No batch schedule found (already removed)"
-
-        except ImportError:
-            return True, "django-celery-beat not installed, no schedule to remove"
-
-        except Exception as e:
-            error_msg = f"Failed to remove batch schedule: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
-
-    def update_batch_interval(self, new_interval: str) -> Tuple[bool, str]:
-        """
-        Update the batch interval and reschedule.
-
-        Args:
-            new_interval: New interval choice ('30m', '2h', '6h', '12h', '24h')
-
-        Returns:
-            (success, message)
-        """
-        valid_intervals = ['5m', '15m', '30m', '1h', '2h', '6h', '12h', '24h']
-        if new_interval not in valid_intervals:
-            return False, f"Invalid interval. Must be one of: {', '.join(valid_intervals)}"
-
-        self.config.batch_interval = new_interval
-        self.config.save()
-
-        # Reschedule with new interval
-        return self.setup_batch_schedule()
-
     def _wait_for_snapshot_completion(self, max_wait_minutes: int = 60) -> Tuple[bool, str]:
         """
         Wait for initial snapshot to complete before transitioning to streaming.
@@ -2864,162 +2540,4 @@ class ReplicationOrchestrator:
             elapsed += poll_interval
 
         return False, f"Timeout waiting for snapshot after {max_wait_minutes} minutes"
-
-    def finalize_batch_replication(self) -> Tuple[bool, str]:
-        """
-        Post-snapshot finalization steps for batch mode.
-
-        Called by the provision modal AFTER the frontend has polled and confirmed
-        the initial snapshot is complete (rather than blocking a Gunicorn worker).
-
-        Steps: add FKs → pause connector → set up Celery Beat schedule.
-        """
-        import time
-        self._log_info("Finalizing batch replication (post-snapshot)...")
-        try:
-            # 1. Add foreign keys + indexes to target tables
-            self._log_info("Adding foreign keys and indexes to target tables...")
-            from client.utils.table_creator import add_foreign_keys_to_target, add_indexes_to_target
-            try:
-                created, skipped, errors = add_foreign_keys_to_target(self.config)
-                self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
-                if errors:
-                    self._log_warning(f"⚠️ FK errors: {errors}")
-            except Exception as e:
-                self._log_warning(f"⚠️ Could not add foreign keys: {e}")
-            try:
-                idx_created, idx_skipped, idx_errors = add_indexes_to_target(self.config)
-                self._log_info(f"✓ Indexes: {idx_created} created, {idx_skipped} skipped")
-                if idx_errors:
-                    self._log_warning(f"⚠️ Index errors: {idx_errors}")
-            except Exception as e:
-                self._log_warning(f"⚠️ Could not add indexes: {e}")
-
-            # 2. Pause connector so batch schedule controls when it runs
-            self._log_info("Pausing connector for batch scheduling...")
-            success, message = self.pause_connector()
-            if not success:
-                self._log_warning(f"Could not pause connector: {message}")
-                time.sleep(3)
-                success, message = self.pause_connector()
-                if not success:
-                    self._log_warning(f"Retry pause failed: {message}")
-
-            self.config.status = 'active'
-            self.config.is_active = True
-            self.config.connector_state = 'PAUSED'
-            self.config.save()
-
-            # 3. Set up Celery Beat schedule
-            self._log_info("Setting up batch schedule...")
-            success, message = self.setup_batch_schedule()
-            if not success:
-                return False, f"Failed to setup batch schedule: {message}"
-
-            self._log_info(f"✓ Batch replication ready — schedule: every {self.config.batch_interval}")
-            return True, f"Batch schedule set — next run: {self.config.next_batch_run}"
-
-        except Exception as e:
-            error_msg = f"Batch finalization failed: {str(e)}"
-            self._log_error(error_msg)
-            return False, error_msg
-
-    def start_batch_replication(self) -> Tuple[bool, str]:
-        """
-        Start replication in batch mode.
-
-        Flow:
-        1. Create connector (starts with initial snapshot per config)
-        2. Wait for initial snapshot to complete
-        3. Pause connector for scheduled batch syncs
-        4. Setup batch schedule via Celery Beat
-
-        Returns:
-            (success, message)
-        """
-        self._log_info("=" * 60)
-        self._log_info("STARTING BATCH REPLICATION")
-        self._log_info(f"Interval: {self.config.batch_interval}")
-        self._log_info("=" * 60)
-
-        try:
-            # Step 1: Create connectors (source + sink)
-            # Skip topic conflict check for batch mode - multiple batch replications 
-            # can use same source database without conflicts
-            self._log_info("Step 1/4: Creating connectors...")
-            success, message = self.start_replication(skip_topic_conflict_check=True)
-
-            if not success:
-                return False, message
-
-            # Step 2: Wait for initial snapshot to complete
-            self._log_info("Step 2/4: Waiting for initial snapshot...")
-
-            # Determine wait time based on snapshot mode
-            if self.config.snapshot_mode == 'never':
-                self._log_info("  Snapshot mode is 'never', skipping wait")
-            else:
-                success, message = self._wait_for_snapshot_completion(max_wait_minutes=60)
-                if not success:
-                    self._log_warning(f"Snapshot wait issue: {message}")
-                    # Continue anyway - connector might still be usable
-
-            # Step 2.5: Add foreign keys + indexes to target tables
-            self._log_info("Step 2.5/4: Adding foreign keys and indexes to target tables...")
-            from client.utils.table_creator import add_foreign_keys_to_target, add_indexes_to_target
-            try:
-                created, skipped, errors = add_foreign_keys_to_target(self.config)
-                self._log_info(f"✓ Foreign keys: {created} created, {skipped} skipped")
-                if errors:
-                    self._log_warning(f"⚠️ FK errors: {errors}")
-            except Exception as e:
-                self._log_warning(f"⚠️ Could not add foreign keys: {e}")
-            try:
-                idx_created, idx_skipped, idx_errors = add_indexes_to_target(self.config)
-                self._log_info(f"✓ Indexes: {idx_created} created, {idx_skipped} skipped")
-                if idx_errors:
-                    self._log_warning(f"⚠️ Index errors: {idx_errors}")
-            except Exception as e:
-                self._log_warning(f"⚠️ Could not add indexes: {e}")
-
-            # Step 3: Pause source connector (batch mode waits between syncs)
-            self._log_info("Step 3/4: Pausing connector for batch scheduling...")
-            success, message = self.pause_connector()
-            if not success:
-                self._log_warning(f"Could not pause connector: {message}")
-                # Retry once after a short delay
-                import time
-                time.sleep(3)
-                success, message = self.pause_connector()
-                if not success:
-                    self._log_warning(f"Retry pause failed: {message}")
-
-            # Update status for batch mode
-            self.config.status = 'active'
-            self.config.is_active = True
-            self.config.connector_state = 'PAUSED'
-            self.config.save()
-
-            # Step 4: Setup batch schedule via Celery Beat
-            self._log_info("Step 4/4: Setting up batch schedule...")
-            success, message = self.setup_batch_schedule()
-            if not success:
-                self._log_warning(f"Could not setup batch schedule: {message}")
-                return False, message
-
-            self._log_info("=" * 60)
-            self._log_info("✓ BATCH REPLICATION STARTED")
-            self._log_info(f"Connector: {self.config.connector_name} (PAUSED)")
-            self._log_info(f"Initial snapshot: Complete")
-            self._log_info(f"Next sync: {self.config.next_batch_run}")
-            self._log_info("=" * 60)
-
-            return True, "Batch replication started successfully"
-
-        except Exception as e:
-            error_msg = f"Failed to start batch replication: {str(e)}"
-            self._log_error(error_msg)
-            self._update_status('error', error_msg)
-            return False, error_msg
-
 

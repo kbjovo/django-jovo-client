@@ -23,10 +23,6 @@ app.conf.beat_schedule = {
         'task': 'client.tasks.monitor_connectors',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
     },
-    'check-replication-health': {
-        'task': 'client.tasks.check_replication_health',
-        'schedule': crontab(minute='*/10'),  # Every 10 minutes
-    },
     # Comprehensive health monitoring with auto-fix (connector status only)
     'monitor-replication-health': {
         'task': 'client.replication.monitor_replication_health',
@@ -46,11 +42,6 @@ app.conf.beat_schedule = {
     'sync-postgresql-schemas': {
         'task': 'client.tasks.sync_postgresql_schemas',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
-    },
-    # Alert: batch connectors that missed their scheduled run (every 10 minutes)
-    'check-batch-schedules': {
-        'task': 'client.tasks.check_batch_schedules',
-        'schedule': crontab(minute='*/10'),
     },
 }
 

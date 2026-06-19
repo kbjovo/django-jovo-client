@@ -26,6 +26,7 @@ from .views import (
 # Import connector views (split across focused modules)
 from .views.connector_list_views import (
     client_connectors_list,
+    client_sink_capacity,
     connector_list,
 )
 from .views.connector_crud_views import (
@@ -38,7 +39,6 @@ from .views.connector_crud_views import (
 from .views.connector_monitor_views import (
     connector_monitor,
     connector_status_api,
-    connector_live_metrics_api,
     connector_table_rows_api,
     connector_dashboard_card_api,
     connector_fk_preview_api,
@@ -54,9 +54,10 @@ from .views.connector_action_views import (
     connector_restart,
     connector_restart_failed_tasks,
     connector_restart_all_tasks,
-    connector_sync_schedule,
     connector_recover_binlog,
     sink_restart,
+    sink_pause,
+    sink_resume,
     sink_restart_failed_tasks,
     sink_restart_all_tasks,
     check_postgresql_privileges_api,
@@ -70,7 +71,6 @@ from .views.connector_provision_views import (
     provision_topics,
     provision_source,
     provision_sink,
-    provision_batch_finalize,
     provision_cancel,
     edit_save_settings,
     edit_remove_tables,
@@ -97,6 +97,7 @@ urlpatterns = [
 
     # Client-level connectors view (all connectors across all databases)
     path('clients/<int:client_pk>/connectors/', client_connectors_list, name='client_connectors_list'),
+    path('clients/<int:client_pk>/sink-capacity/', client_sink_capacity, name='client_sink_capacity'),
 
     path('api/check-client-unique/', check_client_unique_field, name='check_client_unique_field'),
 
@@ -196,10 +197,6 @@ urlpatterns = [
          connector_restart_all_tasks,
          name='connector_restart_all_tasks'),
 
-    path('connector/<int:config_pk>/sync-schedule/',
-         connector_sync_schedule,
-         name='connector_sync_schedule'),
-
     path('connector/<int:config_pk>/recover-binlog/',
          connector_recover_binlog,
          name='connector_recover_binlog'),
@@ -208,6 +205,14 @@ urlpatterns = [
     path('connector/<int:config_pk>/sink/restart/',
          sink_restart,
          name='sink_restart'),
+
+    path('connector/<int:config_pk>/sink/pause/',
+         sink_pause,
+         name='sink_pause'),
+
+    path('connector/<int:config_pk>/sink/resume/',
+         sink_resume,
+         name='sink_resume'),
 
     path('connector/<int:config_pk>/sink/restart-failed-tasks/',
          sink_restart_failed_tasks,
@@ -245,11 +250,6 @@ urlpatterns = [
     path('connector/<int:config_pk>/dashboard-card/',
          connector_dashboard_card_api,
          name='connector_dashboard_card_api'),
-
-    # AJAX: Live metrics (streaming lag, DLQ count, config diff)
-    path('connector/<int:config_pk>/live-metrics/',
-         connector_live_metrics_api,
-         name='connector_live_metrics_api'),
 
     # AJAX: FK constraint preview (read-only analysis)
     path('connector/<int:config_pk>/fk-preview/',
@@ -295,10 +295,6 @@ urlpatterns = [
     path('connector/<int:config_pk>/provision/sink/',
          provision_sink,
          name='provision_sink'),
-
-    path('connector/<int:config_pk>/provision/batch-finalize/',
-         provision_batch_finalize,
-         name='provision_batch_finalize'),
 
     path('connector/<int:config_pk>/provision/cancel/',
          provision_cancel,

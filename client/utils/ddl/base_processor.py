@@ -172,9 +172,11 @@ class BaseDDLProcessor(ABC):
         Called by both KafkaDDLProcessor (MySQL/Oracle) and
         PostgreSQLKafkaDDLProcessor when a TRUNCATE is detected on source.
 
-        If the connector is currently paused, the truncate is deferred and
-        stored in ReplicationConfig.pending_truncates; it is applied when the
-        connector resumes via orchestrator.resume_connector().
+        If either the source or the sink connector is currently paused, the
+        truncate is deferred and stored in ReplicationConfig.pending_truncates;
+        it is applied when the pipeline resumes via resume_connector() or
+        resume_sink_connector(). A TRUNCATE truncates the target table directly,
+        so it must not run while DML is still buffered behind a paused sink.
         """
         table_mapping = self.replication_config.table_mappings.filter(
             source_table=source_table,
@@ -187,19 +189,21 @@ class BaseDDLProcessor(ABC):
 
         # Fresh DB read — the processor is long-lived so the in-memory instance is stale.
         from client.models.replication import ReplicationConfig as _RC
-        current_state = _RC.objects.filter(
+        states = _RC.objects.filter(
             pk=self.replication_config.pk
-        ).values_list('connector_state', flat=True).first()
+        ).values('connector_state', 'sink_connector_state').first() or {}
+        source_state = states.get('connector_state')
+        sink_state = states.get('sink_connector_state')
 
-        if current_state == 'PAUSED':
+        if source_state == 'PAUSED' or sink_state == 'PAUSED':
             cfg = _RC.objects.only('pending_truncates').get(pk=self.replication_config.pk)
             pending = list(cfg.pending_truncates or [])
             if source_table not in pending:
                 pending.append(source_table)
                 _RC.objects.filter(pk=self.replication_config.pk).update(pending_truncates=pending)
             logger.info(
-                f"Connector PAUSED — deferred TRUNCATE on '{source_table}' until resume "
-                f"(pending queue: {pending})"
+                f"Pipeline PAUSED (source={source_state}, sink={sink_state}) — deferred "
+                f"TRUNCATE on '{source_table}' until resume (pending queue: {pending})"
             )
             return True
 

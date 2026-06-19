@@ -64,102 +64,6 @@
         </div>
     </div>
 
-    <!-- Processing Mode Configuration (CDC vs Batch) -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden">
-        <div class="bg-purple-600 text-white px-4 py-2">
-            <h5 class="text-base font-semibold">🔄 Processing Mode</h5>
-        </div>
-        <div class="p-4">
-            <p class="text-gray-600 dark:text-gray-400 mb-4 text-sm">
-                Choose how data changes should be captured and replicated.
-            </p>
-
-            <!-- CDC vs Batch Mode Selection -->
-            <div class="space-y-3 mb-4">
-                <label class="flex items-start p-3 border-2 border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition">
-                    <input type="radio"
-                           name="processing_mode"
-                           value="cdc"
-                           class="mt-1 w-4 h-4 text-blue-600 focus:ring-blue-500"
-                           checked
-                           onchange="toggleBatchOptions()">
-                    <div class="ml-3">
-                        <span class="block font-semibold text-gray-900 dark:text-white">CDC (Change Data Capture)</span>
-                        <span class="block text-sm text-gray-600 dark:text-gray-400 mt-1">
-                            Continuous streaming of changes. Best for real-time requirements.
-                        </span>
-                    </div>
-                </label>
-
-                <label class="flex items-start p-3 border-2 border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition">
-                    <input type="radio"
-                           name="processing_mode"
-                           value="batch"
-                           class="mt-1 w-4 h-4 text-blue-600 focus:ring-blue-500"
-                           onchange="toggleBatchOptions()">
-                    <div class="ml-3">
-                        <span class="block font-semibold text-gray-900 dark:text-white">Batch Processing</span>
-                        <span class="block text-sm text-gray-600 dark:text-gray-400 mt-1">
-                            Periodic sync with pauses. Good for reducing load on source database.
-                        </span>
-                    </div>
-                </label>
-            </div>
-
-            <!-- Info Text -->
-            <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 text-sm text-blue-900 dark:text-blue-100" id="processing-mode-info">
-                <strong>CDC Mode:</strong> Changes are streamed continuously. Best for real-time requirements.
-            </div>
-
-            <!-- Batch Options (shown only when batch mode is selected) -->
-            <div id="batch-options" class="hidden mt-4">
-                <div class="grid grid-cols-2 gap-4">
-                    <!-- Sync Interval -->
-                    <div>
-                        <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-2">
-                            Sync Interval
-                        </label>
-                        <select name="batch_interval"
-                                id="batch_interval"
-                                class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                            <option value="">Select interval...</option>
-                            <option value="2m">Every 2 minutes</option>
-                            <option value="5m">Every 5 minutes</option>
-                            <option value="15m">Every 15 minutes</option>
-                            <option value="30m">Every 30 minutes</option>
-                            <option value="1h">Every 1 hour</option>
-                            <option value="2h">Every 2 hours</option>
-                            <option value="4h">Every 4 hours</option>
-                            <option value="6h">Every 6 hours</option>
-                            <option value="12h">Every 12 hours</option>
-                            <option value="24h">Every 24 hours</option>
-                        </select>
-                        <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                            How frequently should the connector sync data in batch mode?
-                        </p>
-                    </div>
-
-                    <!-- Max Sync Duration -->
-                    <div>
-                        <label class="block text-sm font-semibold text-gray-900 dark:text-white mb-2">
-                            Max Sync Duration
-                        </label>
-                        <select name="batch_max_catchup_minutes"
-                                id="batch_max_catchup_minutes"
-                                class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500">
-                            <option value="5" selected>5 minutes</option>
-                            <option value="10">10 minutes</option>
-                            <option value="20">20 minutes</option>
-                        </select>
-                        <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                            Maximum time the connector runs before pausing. Should be less than sync interval.
-                        </p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     {% if database.db_type|lower == 'postgresql' %}
     <!-- PostgreSQL Feature Requirements (only shown for PostgreSQL sources) -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 overflow-hidden" id="pg-feature-panel">
@@ -1093,8 +997,6 @@ const MAX_TABLES_PER_CONNECTOR = {{ max_tables_per_connector }};
 let _createCompletedSteps   = [];
 let _createSinkWasNew       = false;
 let _createConfigPk         = null;
-let _createProcessingMode   = null;
-let _createBatchInterval    = null;
 
 // ── Client-side validation (shared between normal and AJAX submit) ───
 function validateCreateForm() {
@@ -1152,15 +1054,6 @@ function validateCreateForm() {
         return false;
     }
 
-    const processingMode = document.querySelector('input[name="processing_mode"]:checked').value;
-    if (processingMode === 'batch') {
-        const batchInterval = document.getElementById('batch_interval').value;
-        if (!batchInterval) {
-            showWarning('Batch interval required', 'Please select a sync interval for batch processing.');
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -1211,8 +1104,6 @@ async function runCreateProvisionSteps(formData) {
     }
 
     _createConfigPk       = res.config_pk;
-    _createProcessingMode = res.processing_mode;
-    _createBatchInterval  = res.batch_interval;
     _createCompletedSteps.push('db_saved');
     markLogSuccess('step-save', `Connector configuration saved (${res.table_count} tables)`);
 
@@ -1281,10 +1172,8 @@ async function runCreateProvisionSteps(formData) {
     // ── Step 4: Create source connector ─────────────────────────────
     // Sink is already in the consumer group with known positions — no race
     // condition with the broker during the snapshot.
-    // provision/source/ returns immediately for both modes; the snapshot runs
-    // asynchronously in Debezium (we poll below for batch mode).
-    const isBatch = _createProcessingMode === 'batch';
-    addLogEntry('step-source', isBatch ? 'Creating source connector (batch mode)...' : 'Creating source connector...');
+    // provision/source/ returns immediately; the snapshot runs asynchronously.
+    addLogEntry('step-source', 'Creating source connector...');
 
     try {
         const r = await fetch(`/connector/${_createConfigPk}/provision/source/`, {
@@ -1311,53 +1200,9 @@ async function runCreateProvisionSteps(formData) {
 
     if (_provisionCancelRequested) { await _doCreateCancel(); return; }
 
-    // ── Step 4b (batch only): poll snapshot → finalize ───────────────
-    // We wait here in the browser so we never block a Gunicorn sync worker.
-    if (isBatch && res.snapshot_pending) {
-        addLogEntry('step-snap', 'Waiting for snapshot to start...');
-
-        const snapDone = await _pollUntilSnapshotComplete();
-
-        if (_provisionCancelRequested) { await _doCreateCancel(); return; }
-
-        if (snapDone) {
-            markLogSuccess('step-snap', 'Initial snapshot complete');
-        } else {
-            markLogWarn('step-snap', 'Snapshot wait timed out — proceeding with finalization');
-        }
-
-        // Post-snapshot: pause connector, add FKs, set Celery schedule (all fast)
-        addLogEntry('step-finalize', 'Setting up batch schedule (pausing connector, adding FKs)...');
-        try {
-            const r = await fetch(`/connector/${_createConfigPk}/provision/batch-finalize/`, {
-                method: 'POST', headers: { 'X-CSRFToken': CSRF },
-            });
-            res = await r.json();
-        } catch (err) {
-            markLogError('step-finalize', 'Network error during batch finalization', err.message);
-            showModalCleaning();
-            await _doCreateCancel(true);
-            showModalError('Network error — check your connection', 'Cleaned Up — Close');
-            return;
-        }
-
-        if (!res.success) {
-            markLogError('step-finalize', 'Batch finalization failed', res.error);
-            const finalizeError = res.error;
-            showModalCleaning();
-            await _doCreateCancel(true);
-            showModalError(finalizeError, 'Cleaned Up — Close');
-            return;
-        }
-
-        markLogSuccess('step-finalize', res.message);
-    }
-
     // ── All done ─────────────────────────────────────────────────────
     document.getElementById('provision-modal-title').textContent = 'Connector created successfully!';
-    if (!isBatch) {
-        addLogNote('Connector is initialising — initial snapshot may take a few minutes.', 'info');
-    }
+    addLogNote('Connector is initialising — initial snapshot may take a few minutes.', 'info');
     showModalSuccess(`/connector/${_createConfigPk}/monitor/`);
 }
 
@@ -1492,21 +1337,6 @@ document.getElementById('connector-form').addEventListener('submit', async funct
     await runCreateProvisionSteps(formData);
 });
 
-// Toggle batch options visibility based on processing mode
-function toggleBatchOptions() {
-    const processingMode = document.querySelector('input[name="processing_mode"]:checked').value;
-    const batchOptions = document.getElementById('batch-options');
-    const infoText = document.getElementById('processing-mode-info');
-
-    if (processingMode === 'batch') {
-        batchOptions.classList.remove('hidden');
-        infoText.innerHTML = '<strong>Batch Mode:</strong> Connector pauses between sync windows. Good for reducing load on source database.';
-    } else {
-        batchOptions.classList.add('hidden');
-        infoText.innerHTML = '<strong>CDC Mode:</strong> Changes are streamed continuously. Best for real-time requirements.';
-    }
-}
-
 // Sanitize connector name — allow only letters, numbers, dots, underscores, hyphens
 function sanitizeConnectorName(input) {
     const raw = input.value;
@@ -1532,10 +1362,6 @@ function toggleConnectorSettings() {
     }
 }
 
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', function() {
-    toggleBatchOptions();
-});
 </script>
 
 {% endblock %}

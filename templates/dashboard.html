@@ -114,11 +114,6 @@
                     <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ connector.client_database.client.name }} &middot; {{ connector.client_database.connection_name }}</p>
                   </div>
                 </div>
-                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium flex-shrink-0
-                  {% if connector.processing_mode == 'cdc' %}bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400
-                  {% else %}bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400{% endif %}">
-                  {{ connector.processing_mode|upper }}
-                </span>
               </a>
             </li>
             {% endfor %}

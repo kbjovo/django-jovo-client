@@ -1,0 +1,80 @@
+{% comment %}
+Live sink-pair capacity widget shared by the client Connectors tab, the client
+Databases tab, and the per-database connector list. Fetches the client's capacity
+(derived from the target DB's max_connections) and fills any of these elements that
+exist on the page, then offers refresh via window.refreshSinkCapacity():
+  #cap-current  current pair count       #cap-max  max pairs
+  #cap-db-text  / #cap-db-detail          databases-tab summary line
+  #cap-refresh-icon / #cap-db-refresh-icon  spin while loading
+Needs an element carrying data-capacity-url (the client_sink_capacity endpoint).
+{% endcomment %}
+<script>
+(function () {
+  if (window.__sinkCapacityLoaded) return;
+  window.__sinkCapacityLoaded = true;
+
+  function setText(id, text, cls) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    if (cls) el.className = cls;
+  }
+
+  window.refreshSinkCapacity = function () {
+    var holder = document.querySelector('[data-capacity-url]');
+    if (!holder) return;
+    var card = document.getElementById('sink-capacity-card');
+    var icons = [document.getElementById('cap-refresh-icon'), document.getElementById('cap-db-refresh-icon')];
+    icons.forEach(function (i) { if (i) i.classList.add('animate-spin'); });
+    setText('cap-db-text', 'checking…', 'font-medium text-gray-400 dark:text-gray-500');
+
+    fetch(holder.dataset.capacityUrl, { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.success) return;
+        var used = d.current_pairs || 0;
+        setText('cap-current', String(used));
+
+        if (d.has_target === false) {
+          setText('cap-max', 'n/a', 'text-gray-400 dark:text-gray-500');
+          setText('cap-db-text', 'No target database', 'text-xs font-medium text-gray-400 dark:text-gray-500');
+          setText('cap-db-detail', '');
+          if (card) card.title = 'No target (sink) database configured for this client';
+          return;
+        }
+        if (d.reachable === false || d.max_pairs === undefined || d.max_pairs === null) {
+          setText('cap-max', '?', 'text-yellow-500');
+          setText('cap-db-text', 'capacity unknown — target unreachable', 'text-xs font-medium text-yellow-600 dark:text-yellow-400');
+          setText('cap-db-detail', '');
+          if (card) card.title = 'Could not read max_connections from the target database';
+          return;
+        }
+
+        var atCap = used >= d.max_pairs;
+        var color = atCap ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-white';
+
+        setText('cap-max', String(d.max_pairs), color);
+        if (card) {
+          card.title = d.target_name + ' (' + d.db_type + '): max_connections ' + d.max_connections +
+                       ' − ' + d.headroom + ' headroom ÷ ' + d.per_sink + ' per sink = ' + d.max_pairs +
+                       ' pairs (' + d.available + ' available)';
+        }
+        setText('cap-db-text',
+          d.max_pairs + ' pairs  ·  ' + used + ' used / ' + d.available + ' free',
+          'text-xs font-medium ' + (atCap ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-gray-300'));
+        setText('cap-db-detail',
+          'max_connections ' + d.max_connections + ' ÷ ' + d.per_sink + ' per sink − ' + d.headroom + ' headroom');
+      })
+      .catch(function () {
+        setText('cap-max', '?', 'text-yellow-500');
+        setText('cap-db-text', 'capacity check failed', 'text-xs font-medium text-yellow-600 dark:text-yellow-400');
+      })
+      .finally(function () {
+        icons.forEach(function (i) { if (i) i.classList.remove('animate-spin'); });
+      });
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', window.refreshSinkCapacity);
+  else window.refreshSinkCapacity();
+})();
+</script>

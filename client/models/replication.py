@@ -215,10 +215,8 @@ class NotificationLog(models.Model):
         ('sink_failed',       'Sink Connector Failed'),
         ('connector_missing', 'Connector Missing'),
         ('kafka_down',        'Kafka Connect Unreachable'),
-        ('batch_task_failed', 'Batch Task Failed'),
         ('ddl_task_failed',   'DDL Task Failed'),
         ('dlq_messages',      'DLQ Has Messages'),
-        ('batch_missed',      'Batch Missed Schedule'),
     ]
 
     replication_config = models.ForeignKey(
@@ -272,28 +270,6 @@ class ReplicationConfig(models.Model):
         ('disabled', 'Disabled'),
     ]
 
-    # ====== PROCESSING MODE ======
-    PROCESSING_MODE_CHOICES = [
-        ('cdc', 'CDC (Real-time)'),
-        ('batch', 'Batch Processing'),
-    ]
-
-    BATCH_INTERVAL_CHOICES = [
-        ('2m', 'Every 2 minutes'),
-        ('5m', 'Every 5 minutes'),
-        ('30m', 'Every 30 minutes'),
-        ('2h', 'Every 2 hours'),
-        ('6h', 'Every 6 hours'),
-        ('12h', 'Every 12 hours'),
-        ('24h', 'Every 24 hours (Daily)'),
-    ]
-
-    BATCH_MAX_CATCHUP_CHOICES = [
-        (5, '5 minutes'),
-        (10, '10 minutes'),
-        (20, '20 minutes'),
-    ]
-    
     client_database = models.ForeignKey(
         ClientDatabase, 
         on_delete=models.CASCADE, 
@@ -314,59 +290,6 @@ class ReplicationConfig(models.Model):
         help_text="How often to sync (ignored for real-time CDC)"
     )
 
-    # ====== PROCESSING MODE SETTINGS ======
-    processing_mode = models.CharField(
-        max_length=20,
-        choices=PROCESSING_MODE_CHOICES,
-        default='cdc',
-        help_text="CDC for real-time streaming, Batch for scheduled sync windows"
-    )
-
-    batch_interval = models.CharField(
-        max_length=10,
-        choices=BATCH_INTERVAL_CHOICES,
-        null=True,
-        blank=True,
-        help_text="Sync interval for batch processing mode"
-    )
-
-    batch_max_catchup_minutes = models.IntegerField(
-        choices=BATCH_MAX_CATCHUP_CHOICES,
-        default=5,
-        help_text="Maximum minutes to run during batch sync before pausing (throttle)"
-    )
-
-    last_batch_run = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="Timestamp of last batch sync execution"
-    )
-
-    next_batch_run = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="Scheduled timestamp for next batch sync"
-    )
-
-    batch_celery_task_name = models.CharField(
-        max_length=255,
-        null=True,
-        blank=True,
-        help_text="Celery Beat periodic task name for batch scheduling"
-    )
-
-    batch_sync_started_at = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="Timestamp when the current (or most recent) batch sync window started"
-    )
-
-    last_batch_operations = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Operation counters (inserts/updates/deletes/etc.) captured during the last batch sync window"
-    )
-
     # Status
     status = models.CharField(
         max_length=20, 
@@ -376,8 +299,6 @@ class ReplicationConfig(models.Model):
     is_active = models.BooleanField(default=False)  # Changed default to False
     
     # Timing
-    last_sync_at = models.DateTimeField(null=True, blank=True)
-    next_sync_at = models.DateTimeField(null=True, blank=True)
     last_success_at = models.DateTimeField(null=True, blank=True)
     
     # Debezium connector info
@@ -494,12 +415,6 @@ class ReplicationConfig(models.Model):
         default='UNKNOWN',
         help_text="[DEPRECATED] Kafka consumer state - replaced by sink_connector_state"
     )
-    consumer_task_id = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True,
-        help_text="[DEPRECATED] Celery task ID for running consumer - no longer used with sink connectors"
-    )
     consumer_last_heartbeat = models.DateTimeField(
         null=True,
         blank=True,
@@ -580,33 +495,6 @@ class ReplicationConfig(models.Model):
             self.status = 'stopping'
             self.consumer_state = 'STOPPING'
             self.save(using=using)
-
-            # Revoke Celery task if exists
-            if self.consumer_task_id:
-                try:
-                    from jovoclient.celery import app as celery_app
-
-                    # Try graceful termination
-                    celery_app.control.revoke(
-                        self.consumer_task_id,
-                        terminate=True,
-                        signal='SIGTERM'
-                    )
-                    logger.info(f"    ✓ Sent SIGTERM to task: {self.consumer_task_id}")
-
-                    # Wait briefly, then force kill
-                    import time
-                    time.sleep(1)
-
-                    celery_app.control.revoke(
-                        self.consumer_task_id,
-                        terminate=True,
-                        signal='SIGKILL'
-                    )
-                    logger.info(f"    ✓ Force killed task: {self.consumer_task_id}")
-
-                except Exception as e:
-                    logger.warning(f"    ⚠ Could not revoke task: {e}")
 
             # Check for any other tasks for this config and kill them too
             try:
@@ -787,14 +675,7 @@ class TableMapping(models.Model):
         ('incremental', 'Incremental'),
         ('realtime', 'Real-time CDC'),
     ]
-    
-    CONFLICT_RESOLUTION_CHOICES = [
-        ('source_wins', 'Source Always Wins'),
-        ('target_wins', 'Target Always Wins'),
-        ('newest_wins', 'Newest Timestamp Wins'),
-        ('manual', 'Manual Resolution'),
-    ]
-    
+
     replication_config = models.ForeignKey(
         ReplicationConfig,
         on_delete=models.CASCADE,
@@ -831,58 +712,7 @@ class TableMapping(models.Model):
         blank=True,
         help_text="Leave empty to inherit from ReplicationConfig"
     )
-    
-    # Incremental sync settings
-    incremental_column = models.CharField(
-        max_length=255,
-        blank=True,
-        null=True,
-        help_text="Column to track for incremental sync (e.g., updated_at, id)"
-    )
-    incremental_column_type = models.CharField(
-        max_length=50,
-        choices=[
-            ('timestamp', 'Timestamp'),
-            ('integer', 'Integer/ID'),
-            ('datetime', 'DateTime'),
-        ],
-        default='timestamp',
-        blank=True
-    )
-    last_incremental_value = models.CharField(
-        max_length=255,
-        blank=True,
-        null=True,
-        help_text="Last synced value of incremental column"
-    )
-    
-    # Conflict resolution
-    conflict_resolution = models.CharField(
-        max_length=20,
-        choices=CONFLICT_RESOLUTION_CHOICES,
-        default='source_wins',
-        help_text="How to handle conflicts during sync"
-    )
-    
-    # Statistics
-    total_rows_synced = models.BigIntegerField(default=0)
-    last_sync_at = models.DateTimeField(null=True, blank=True)
-    last_sync_duration = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Duration in seconds"
-    )
-    last_sync_status = models.CharField(
-        max_length=20,
-        choices=[
-            ('success', 'Success'),
-            ('failed', 'Failed'),
-            ('partial', 'Partial Success'),
-        ],
-        default='success',
-        blank=True
-    )
-    
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -899,14 +729,3 @@ class TableMapping(models.Model):
             return f"{self.source_table}"
         return f"{self.source_table} → {self.target_table}"
     
-    def get_effective_sync_type(self):
-        """Get sync type (from table or config)"""
-        return self.sync_type or self.replication_config.sync_type
-
-    def get_effective_sync_frequency(self):
-        """Get sync frequency (from table or config)"""
-        return self.sync_frequency or self.replication_config.sync_frequency
-    
-    def has_name_mapping(self):
-        """Check if table name is mapped (source != target)"""
-        return self.source_table != self.target_table

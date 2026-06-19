@@ -163,10 +163,26 @@ def monitoring_dashboard(request):
 
     STATE_PRIORITY = {'ERROR': 0, 'FAILED': 1, 'PAUSED': 2, 'RUNNING': 3, 'UNKNOWN': 4}
 
+    # Sink connectors are shared per target DB — cache state by name to avoid
+    # repeating the same Kafka Connect REST call for connectors sharing a sink.
+    sink_state_cache = {}
+
+    def get_sink_state(sink_name):
+        if not sink_name:
+            return 'NOT_CONFIGURED'
+        if sink_name in sink_state_cache:
+            return sink_state_cache[sink_name]
+        try:
+            s_exists, s_data = manager.get_connector_status(sink_name)
+            state = s_data.get('connector', {}).get('state', 'UNKNOWN') if (s_exists and s_data) else 'NOT_FOUND'
+        except Exception:
+            state = 'ERROR'
+        sink_state_cache[sink_name] = state
+        return state
+
     monitoring_data = []
     for config in active_replications:
         sink_db = sink_db_map.get(config.client_database.client_id)
-        is_batch = config.processing_mode == 'batch'
         try:
             exists, status_data = manager.get_connector_status(config.connector_name)
 
@@ -186,9 +202,7 @@ def monitoring_dashboard(request):
                 'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
                 'error_count': sum(1 for task in tasks if task.get('state') == 'FAILED'),
                 'sink_database': sink_db,
-                'last_batch_run': config.last_batch_run if is_batch else None,
-                'next_batch_run': config.next_batch_run if is_batch else None,
-                'batch_sync_started_at': config.batch_sync_started_at if is_batch else None,
+                'sink_state': get_sink_state(config.sink_connector_name),
             })
         except Exception as e:
             logger.error(f"Error fetching status for {config.connector_name}: {e}")
@@ -200,9 +214,7 @@ def monitoring_dashboard(request):
                 'error_count': 1,
                 'error_message': str(e),
                 'sink_database': sink_db,
-                'last_batch_run': config.last_batch_run if is_batch else None,
-                'next_batch_run': config.next_batch_run if is_batch else None,
-                'batch_sync_started_at': config.batch_sync_started_at if is_batch else None,
+                'sink_state': get_sink_state(config.sink_connector_name),
             })
 
     # Sort: FAILED/ERROR first, then PAUSED, then RUNNING; alpha within each group

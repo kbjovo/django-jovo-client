@@ -1,0 +1,18 @@
+{% comment %}
+Source → Sink database/host details for a connector row.
+Requires `config` (a ReplicationConfig) and `target_database` (the sink ClientDatabase) in context.
+{% endcomment %}
+<div class="text-xs space-y-0.5 min-w-0">
+  <p class="truncate">
+    <span class="text-gray-400 dark:text-gray-500">Src:</span>
+    <span class="font-medium text-gray-700 dark:text-gray-300">{{ config.client_database.db_type|upper }} · {{ config.client_database.host }}:{{ config.client_database.port }}/{{ config.client_database.database_name }}</span>
+  </p>
+  {% if target_database %}
+  <p class="truncate">
+    <span class="text-gray-400 dark:text-gray-500">Sink:</span>
+    <span class="font-medium text-gray-700 dark:text-gray-300">{{ target_database.db_type|upper }} · {{ target_database.host }}:{{ target_database.port }}/{{ target_database.database_name }}</span>
+  </p>
+  {% else %}
+  <p class="text-gray-400 dark:text-gray-500 italic">No sink database</p>
+  {% endif %}
+</div>

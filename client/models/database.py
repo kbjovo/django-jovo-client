@@ -345,11 +345,30 @@ class ClientDatabase(models.Model):
 
     def get_sink_connector_name(self):
         """
-        Get the shared sink connector name for this CLIENT.
-        All source databases for a client share a single sink connector.
-        Format: client_{client_id}_sink
+        Sink connector name for THIS source database's connector.
+
+        New architecture: one sink per source connector. Each source database has a
+        dedicated JDBC sink that drains only that source connector's topics into the
+        client's single target database.
+        Format: client_{client_id}_db_{db_id}_sink
+
+        NOTE: meaningful only for SOURCE databases. For client-wide operations
+        (target-DB credential updates, client/target deletion) use
+        get_all_sink_connector_names(client) to act on every per-source sink.
         """
-        return f"client_{self.client.id}_sink"
+        return f"client_{self.client.id}_db_{self.id}_sink"
+
+    @staticmethod
+    def get_all_sink_connector_names(client):
+        """
+        Return every per-source sink connector name for a client (one per source DB).
+
+        Replaces the old single shared sink for flows that must act on all sinks,
+        e.g. updating connection settings when the target DB changes, or tearing
+        down all sinks when the client/target is deleted.
+        """
+        source_dbs = client.client_databases.filter(is_target=False)
+        return [db.get_sink_connector_name() for db in source_dbs]
 
     def has_active_connectors(self):
         """

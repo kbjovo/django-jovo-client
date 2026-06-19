@@ -6,6 +6,9 @@ Connector List Views
 """
 
 import logging
+from django.conf import settings
+from django.db.models import Q
+from django.http import JsonResponse
 from django.shortcuts import render, get_object_or_404
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, TableMapping
@@ -13,6 +16,48 @@ from client.utils.database_utils import get_unassigned_tables
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
 logger = logging.getLogger(__name__)
+
+
+def client_sink_capacity(request, client_pk):
+    """
+    AJAX GET: how many source/sink pairs the client's shared target DB can support,
+    derived live from the target's max_connections. Re-queried on each call so the
+    UI can refresh after the DBA raises max_connections.
+    """
+    from client.models.client import Client
+    from client.utils.database_utils import get_max_connections
+
+    client = get_object_or_404(Client, pk=client_pk)
+
+    # Current pairs = configured source connectors (each has its own sink).
+    current_pairs = ReplicationConfig.objects.filter(
+        client_database__client=client,
+        status__in=['configured', 'active', 'paused', 'error'],
+    ).exclude(Q(connector_name__isnull=True) | Q(connector_name='')).count()
+
+    target = client.get_target_database()
+    if not target:
+        return JsonResponse({'success': True, 'has_target': False, 'current_pairs': current_pairs})
+
+    per_sink = settings.DEBEZIUM_CONFIG.get('CONNECTIONS_PER_SINK', 5)
+    headroom = settings.DEBEZIUM_CONFIG.get('TARGET_CONN_HEADROOM', 15)
+    max_conn = get_max_connections(target)
+
+    if max_conn is None:
+        return JsonResponse({
+            'success': True, 'has_target': True, 'reachable': False,
+            'target_name': target.connection_name, 'db_type': target.db_type.upper(),
+            'current_pairs': current_pairs,
+        })
+
+    max_pairs = max(0, (max_conn - headroom) // per_sink)
+    return JsonResponse({
+        'success': True, 'has_target': True, 'reachable': True,
+        'target_name': target.connection_name, 'db_type': target.db_type.upper(),
+        'max_connections': max_conn, 'per_sink': per_sink, 'headroom': headroom,
+        'max_pairs': max_pairs, 'current_pairs': current_pairs,
+        'available': max(0, max_pairs - current_pairs),
+    })
 
 
 # ========================================
@@ -178,19 +223,34 @@ def client_connectors_list(request, client_pk):
     failed_count = connectors_query.filter(status='error').count()
     configured_count = connectors_query.filter(status='configured').count()
 
-    # Get sink connector status (shared across all)
+    # Sink connectors are now one-per-source-connector. Aggregate their states into
+    # a single badge for the client-level list: RUNNING only if every sink is running,
+    # FAILED if any failed, PAUSED if any paused, else UNKNOWN.
     sink_connector_name = None
     sink_status = None
-    if databases.exists():
-        first_db = databases.first()
-        sink_connector_name = first_db.get_sink_connector_name()
+    sink_names = ClientDatabase.get_all_sink_connector_names(client)
+    if sink_names:
+        connector_manager = DebeziumConnectorManager()
+        states = []
+        for name in sink_names:
+            try:
+                exists, status_data = connector_manager.get_connector_status(name)
+                states.append((status_data or {}).get('connector', {}).get('state', 'UNKNOWN') if exists else 'NOT_CREATED')
+            except Exception as e:
+                logger.warning(f"Could not get sink connector status for {name}: {e}")
+                states.append('UNKNOWN')
 
-        try:
-            connector_manager = DebeziumConnectorManager()
-            sink_status = connector_manager.get_connector_status(sink_connector_name)
-        except Exception as e:
-            logger.warning(f"Could not get sink connector status: {e}")
-            sink_status = {'state': 'UNKNOWN'}
+        if any(s == 'FAILED' for s in states):
+            agg_state = 'FAILED'
+        elif any(s == 'PAUSED' for s in states):
+            agg_state = 'PAUSED'
+        elif states and all(s == 'RUNNING' for s in states):
+            agg_state = 'RUNNING'
+        else:
+            agg_state = 'UNKNOWN'
+
+        sink_connector_name = f"{len(sink_names)} sink connector(s)"
+        sink_status = {'state': agg_state}
 
     # Pagination
     paginator = Paginator(connectors_query, 10)  # 10 per page
@@ -277,6 +337,18 @@ def connector_list(request, database_pk):
             logger.warning(f"Could not get status for {config.connector_name}: {e}")
             config.debezium_status = {'state': 'UNKNOWN'}
 
+        # Sink connector status (per source connector; controlled via row toggle)
+        if config.sink_connector_name:
+            try:
+                s_exists, s_data = connector_manager.get_connector_status(config.sink_connector_name)
+                s_state = s_data.get('connector', {}).get('state', 'UNKNOWN') if (s_exists and s_data) else 'NOT_FOUND'
+            except Exception as e:
+                logger.warning(f"Could not get sink status for {config.sink_connector_name}: {e}")
+                s_state = 'ERROR'
+            config.sink_status = {'state': s_state}
+        else:
+            config.sink_status = {'state': 'NOT_CONFIGURED'}
+
         # Get table count
         config.table_count = config.get_table_count()
 
@@ -321,6 +393,7 @@ def connector_list(request, database_pk):
         'source_connectors': connectors_with_status,
         'sink_connector_name': sink_connector_name,
         'sink_status': sink_status,
+        'target_database': client.get_target_database(),
         'health_summary': health_summary,
         'can_add_connector': can_add_connector,
         'unassigned_count': unassigned_count,

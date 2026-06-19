@@ -136,49 +136,8 @@ def provision_source(request, config_pk):
             except Exception as cdc_err:
                 logger.warning(f'provision_source: CDC pre-flight check failed (skipping): {cdc_err}')
 
-        # ── Batch mode ───────────────────────────────────────────────────────
-        if replication_config.processing_mode == 'batch':
-            # Create the source connector directly — topics and sink are already
-            # provisioned by the earlier provision/topics/ and provision/sink/ steps.
-            # Do NOT call start_replication() here: that would bump the connector
-            # version to N+1 (creating a mismatch with the topics already created
-            # for version N), re-create topics, and update the sink redundantly.
-            table_mappings = replication_config.table_mappings.filter(is_enabled=True)
-            if database.db_type == 'oracle':
-                tables_list = [
-                    f"{tm.source_schema}.{tm.source_table}" if tm.source_schema else tm.source_table
-                    for tm in table_mappings
-                ]
-            else:
-                tables_list = [tm.source_table for tm in table_mappings]
-
-            source_config = get_connector_config_for_database(
-                db_config=database,
-                replication_config=replication_config,
-                tables_whitelist=tables_list,
-            )
-
-            source_success, source_error = connector_manager.create_connector(
-                replication_config.connector_name, source_config
-            )
-            if not source_success:
-                raise Exception(f"Failed to create source connector: {source_error}")
-
-            replication_config.status = 'active'
-            replication_config.is_active = True
-            replication_config.connector_state = 'RUNNING'
-            replication_config.save()
-
-            snapshot_pending = replication_config.snapshot_mode != 'never'
-            return JsonResponse({
-                'success': True,
-                'message': 'Source connector created — snapshot starting',
-                'processing_mode': 'batch',
-                'batch_interval': replication_config.batch_interval,
-                'snapshot_pending': snapshot_pending,
-            })
-
-        # ── CDC mode ─────────────────────────────────────────────────────────
+        # Create the source connector. Topics and the dedicated sink were already
+        # provisioned by the earlier provision/topics/ and provision/sink/ steps.
         table_mappings = replication_config.table_mappings.filter(is_enabled=True)
         if database.db_type == 'oracle':
             tables_list = [
@@ -206,7 +165,6 @@ def provision_source(request, config_pk):
         return JsonResponse({
             'success': True,
             'message': 'Source connector created (streaming)',
-            'processing_mode': 'cdc',
         })
 
     except Exception as e:
@@ -295,37 +253,6 @@ def provision_sink(request, config_pk):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
-def provision_batch_finalize(request, config_pk):
-    """
-    AJAX (batch mode only): Run post-snapshot finalization.
-    Called by the frontend after polling /status/ confirms the initial snapshot
-    is complete. Pauses the connector, adds FKs, and sets the Celery schedule.
-    This keeps the snapshot wait entirely in the browser so it never blocks a
-    Gunicorn worker.
-    """
-    if err := _require_post(request):
-        return err
-
-    replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-
-    try:
-        from client.replication.orchestrator import ReplicationOrchestrator
-        orchestrator = ReplicationOrchestrator(replication_config)
-        success, message = orchestrator.finalize_batch_replication()
-
-        if not success:
-            return JsonResponse({'success': False, 'error': message})
-
-        return JsonResponse({
-            'success': True,
-            'message': f'Connector ready — batch schedule: every {replication_config.batch_interval}',
-        })
-
-    except Exception as e:
-        logger.error(f'provision_batch_finalize failed for config {config_pk}: {e}', exc_info=True)
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
-
-
 def provision_cancel(request, config_pk):
     """
     AJAX: Cancel and revert an in-progress connector provisioning.
@@ -402,7 +329,6 @@ def provision_cancel(request, config_pk):
 def edit_save_settings(request, config_pk):
     """
     AJAX Step (edit flow): Persist connector settings changes.
-    Handles processing mode switches (CDC ↔ Batch) including Celery schedule setup/teardown.
     Regular form POST body (same field names as connector_edit_tables form).
     """
     if err := _require_post(request):
@@ -411,9 +337,6 @@ def edit_save_settings(request, config_pk):
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
 
     try:
-        from client.replication.orchestrator import ReplicationOrchestrator
-
-        old_mode = replication_config.processing_mode
         changed = False
 
         # Snapshot mode
@@ -442,49 +365,11 @@ def edit_save_settings(request, config_pk):
                     setattr(replication_config, field, val)
                     changed = True
 
-        # Processing mode
-        new_mode = request.POST.get('processing_mode', old_mode)
-        mode_switched = new_mode != old_mode
-        if mode_switched:
-            replication_config.processing_mode = new_mode
-            changed = True
-
-        if new_mode == 'batch':
-            batch_interval = request.POST.get('batch_interval')
-            if mode_switched and not batch_interval:
-                return JsonResponse({'success': False, 'error': 'Please select a sync interval for batch mode'}, status=400)
-            if batch_interval and batch_interval != replication_config.batch_interval:
-                replication_config.batch_interval = batch_interval
-                changed = True
-            batch_max_catchup = int(request.POST.get('batch_max_catchup_minutes', replication_config.batch_max_catchup_minutes))
-            if batch_max_catchup not in [5, 10, 20]:
-                batch_max_catchup = 5
-            if batch_max_catchup != replication_config.batch_max_catchup_minutes:
-                replication_config.batch_max_catchup_minutes = batch_max_catchup
-                changed = True
-        elif new_mode == 'cdc' and mode_switched:
-            replication_config.batch_interval = None
-            changed = True
-
         if not changed:
             return JsonResponse({'success': True, 'message': 'No settings changes detected'})
 
         replication_config.save()
-
-        orch = ReplicationOrchestrator(replication_config)
-        if mode_switched:
-            if new_mode == 'batch':
-                orch.setup_batch_schedule()
-                orch.pause_connector()
-                return JsonResponse({'success': True, 'message': 'Settings saved — switched to batch mode, connector paused'})
-            else:
-                orch.remove_batch_schedule()
-                orch.resume_connector()
-                return JsonResponse({'success': True, 'message': 'Settings saved — switched to CDC mode, connector resumed'})
-        else:
-            if new_mode == 'batch':
-                orch.setup_batch_schedule()
-            return JsonResponse({'success': True, 'message': 'Connector settings saved'})
+        return JsonResponse({'success': True, 'message': 'Connector settings saved'})
 
     except Exception as e:
         logger.error(f'edit_save_settings failed for config {config_pk}: {e}', exc_info=True)

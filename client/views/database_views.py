@@ -824,41 +824,51 @@ class SinkConnectorUpdateView(UpdateView):
         return redirect('client_detail', pk=self.object.client.pk)
 
     def _handle_kafka_connect_update(self, is_destructive, credentials_changed):
-        """Update the deployed Kafka Connect sink connector if it exists."""
+        """
+        Apply a target-DB change to every per-source sink connector.
+
+        New architecture: one sink per source connector, all writing into this single
+        target DB. A target-side change (host/credentials) must therefore be applied to
+        each deployed sink. Each sink is regenerated with its own source config so the
+        scoped topics.regex / DLQ are preserved.
+        """
         from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
         from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
 
-        sink_name = self.object.get_sink_connector_name()
+        target_db = self.object
+        client = target_db.client
         manager = DebeziumConnectorManager()
 
-        exists, _ = manager.get_connector_status(sink_name)
-        if not exists:
-            return  # Sink not deployed yet, nothing to do
+        for source_db in client.client_databases.filter(is_target=False):
+            sink_name = source_db.get_sink_connector_name()
 
-        if is_destructive:
-            # Delete old sink and redeploy with new config
-            logger.info(f"Destructive sink change detected — recreating sink connector: {sink_name}")
-            try:
-                manager.delete_connector(sink_name)
-            except Exception as e:
-                logger.warning(f"Error deleting old sink connector: {e}")
+            exists, _ = manager.get_connector_status(sink_name)
+            if not exists:
+                continue  # Sink not deployed for this source — nothing to do
+
+            # Representative config for this source DB so topics.regex/DLQ stay scoped.
+            source_config = source_db.replication_configs.filter(
+                status__in=['configured', 'active', 'paused', 'error']
+            ).first()
 
             sink_config = get_sink_connector_config_for_database(
-                db_config=self.object,
+                db_config=target_db,
                 delete_enabled=True,
-                custom_config={'name': sink_name}
+                custom_config={'name': sink_name},
+                replication_config=source_config,
             )
-            if sink_config:
+            if not sink_config:
+                continue
+
+            if is_destructive:
+                logger.info(f"Destructive sink change — recreating sink connector: {sink_name}")
+                try:
+                    manager.delete_connector(sink_name)
+                except Exception as e:
+                    logger.warning(f"Error deleting old sink connector {sink_name}: {e}")
                 manager.create_connector(sink_name, sink_config)
-        elif credentials_changed:
-            # Just update the config (PATCH)
-            logger.info(f"Credentials-only sink change — updating config: {sink_name}")
-            sink_config = get_sink_connector_config_for_database(
-                db_config=self.object,
-                delete_enabled=True,
-                custom_config={'name': sink_name}
-            )
-            if sink_config:
+            elif credentials_changed:
+                logger.info(f"Credentials-only sink change — updating config: {sink_name}")
                 manager.update_connector_config(sink_name, sink_config)
 
 
@@ -872,17 +882,18 @@ class SinkConnectorDeleteView(View):
         # Check if there are active source connectors — warn but allow
         from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
-        sink_name = database.get_sink_connector_name()
         manager = DebeziumConnectorManager()
 
-        # Delete the deployed sink connector from Kafka Connect
-        try:
-            exists, _ = manager.get_connector_status(sink_name)
-            if exists:
-                manager.delete_connector(sink_name)
-                logger.info(f"Deleted sink connector from Kafka Connect: {sink_name}")
-        except Exception as e:
-            logger.warning(f"Error deleting sink connector from Kafka Connect: {e}")
+        # One sink per source connector — delete every per-source sink that drains
+        # into this target DB.
+        for sink_name in ClientDatabase.get_all_sink_connector_names(client):
+            try:
+                exists, _ = manager.get_connector_status(sink_name)
+                if exists:
+                    manager.delete_connector(sink_name)
+                    logger.info(f"Deleted sink connector from Kafka Connect: {sink_name}")
+            except Exception as e:
+                logger.warning(f"Error deleting sink connector {sink_name} from Kafka Connect: {e}")
 
         database.delete()
 

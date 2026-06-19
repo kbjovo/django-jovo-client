@@ -540,6 +540,13 @@ DEBEZIUM_CONFIG = {
 
     # Max tables per source connector to prevent worker OOM during snapshots
     'MAX_TABLES_PER_CONNECTOR': int(os.getenv('MAX_TABLES_PER_CONNECTOR', '25')),
+
+    # Sink-pair capacity: each sink connector opens a c3p0 pool to the shared target
+    # DB (tasks.max=1 x max_size=5 => 5 connections per sink). The number of
+    # source/sink pairs the target can support is bounded by its max_connections:
+    #   max_pairs = floor((target.max_connections - HEADROOM) / CONNECTIONS_PER_SINK)
+    'CONNECTIONS_PER_SINK': int(os.getenv('CONNECTIONS_PER_SINK', '5')),
+    'TARGET_CONN_HEADROOM': int(os.getenv('TARGET_CONN_HEADROOM', '15')),
 }
 
 # ====================================

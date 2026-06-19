@@ -217,19 +217,12 @@
               </div>
             </div>
             <div class="flex items-center gap-1.5 flex-shrink-0">
-              {% if item.config.processing_mode == 'batch' %}
-              <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">Batch</span>
-              {% else %}
-              <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">CDC</span>
+              {% if item.config.sink_connector_name %}
+              <span class="sink-toggle inline-flex" data-pk="{{ item.config.pk }}"
+                    data-pause-url="{% url 'sink_pause' item.config.pk %}"
+                    data-resume-url="{% url 'sink_resume' item.config.pk %}"
+                    data-state="{{ item.sink_state }}"></span>
               {% endif %}
-              <span id="state-badge-{{ item.config.pk }}"
-                    class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold
-                {% if item.connector_state == 'RUNNING' %}bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400
-                {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400
-                {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400
-                {% else %}bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300{% endif %}">
-                {{ item.connector_state }}
-              </span>
             </div>
           </div>
         </div>
@@ -324,10 +317,7 @@
             <th class="w-8 px-4 py-3"></th>
             <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Connector</th>
             <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Source → Sink</th>
-            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Mode</th>
-            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">State</th>
             <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Sync</th>
-            <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">Timing</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
@@ -337,10 +327,18 @@
               x-show="isVisible({{ item.config.client_database.client.pk }}, '{{ item.config.connector_name|escapejs }}')"
               class="group transition-colors {% if not item.is_healthy %}bg-red-900/10 hover:bg-red-900/20{% else %}hover:bg-gray-100 dark:hover:bg-gray-700/20{% endif %}">
 
-            <!-- Status dot -->
+            <!-- Status dot + sink pause/resume toggle -->
             <td class="px-4 py-3">
-              <div id="list-status-dot-{{ item.config.pk }}"
-                   class="w-2.5 h-2.5 rounded-full {% if item.is_healthy %}bg-green-500{% else %}bg-red-500{% endif %}">
+              <div class="flex items-center gap-3">
+                <div id="list-status-dot-{{ item.config.pk }}"
+                     class="shrink-0 w-2.5 h-2.5 rounded-full {% if item.is_healthy %}bg-green-500{% else %}bg-red-500{% endif %}">
+                </div>
+                {% if item.config.sink_connector_name %}
+                <span class="sink-toggle inline-flex" data-pk="{{ item.config.pk }}"
+                      data-pause-url="{% url 'sink_pause' item.config.pk %}"
+                      data-resume-url="{% url 'sink_resume' item.config.pk %}"
+                      data-state="{{ item.sink_state }}"></span>
+                {% endif %}
               </div>
             </td>
 
@@ -374,36 +372,6 @@
               </div>
             </td>
 
-            <!-- Mode badge -->
-            <td class="px-4 py-3 whitespace-nowrap">
-              {% if item.config.processing_mode == 'batch' %}
-              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">Batch</span>
-              {% else %}
-              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">CDC</span>
-              {% endif %}
-            </td>
-
-            <!-- State badge -->
-            <td class="px-4 py-3 whitespace-nowrap">
-              <span id="list-state-badge-{{ item.config.pk }}"
-                    title="{{ item.connector_state }}"
-                    class="inline-flex items-center justify-center w-7 h-7 rounded-full
-                {% if item.connector_state == 'RUNNING' %}bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400
-                {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400
-                {% elif item.connector_state == 'PAUSED' %}bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400
-                {% else %}bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400{% endif %}">
-                {% if item.connector_state == 'RUNNING' %}
-                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                {% elif item.connector_state == 'PAUSED' %}
-                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                {% elif item.connector_state == 'FAILED' or item.connector_state == 'ERROR' %}
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
-                {% else %}
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01"/></svg>
-                {% endif %}
-              </span>
-            </td>
-
             <!-- Sync status -->
             <td class="px-4 py-3 whitespace-nowrap">
               <div id="list-sync-value-{{ item.config.pk }}">
@@ -412,38 +380,6 @@
                   <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
                 </svg>
               </div>
-            </td>
-
-            <!-- Timing (batch only) -->
-            <td class="px-4 py-3 min-w-[160px]"
-                data-processing-mode="{{ item.config.processing_mode }}"
-                data-last-batch-run="{% if item.last_batch_run %}{{ item.last_batch_run|date:'c' }}{% endif %}"
-                data-next-batch-run="{% if item.next_batch_run %}{{ item.next_batch_run|date:'c' }}{% endif %}"
-                data-batch-sync-started="{% if item.batch_sync_started_at %}{{ item.batch_sync_started_at|date:'c' }}{% endif %}">
-              {% if item.config.processing_mode == 'batch' %}
-              <div class="text-xs space-y-0.5">
-                <div class="flex items-center gap-1 text-gray-500 dark:text-gray-400">
-                  <span class="text-gray-400 dark:text-gray-500 w-8">Last</span>
-                  <span id="list-last-run-{{ item.config.pk }}" class="font-medium text-gray-700 dark:text-gray-300">
-                    {% if item.last_batch_run %}{{ item.last_batch_run|timesince }} ago{% else %}Never{% endif %}
-                  </span>
-                </div>
-                <div class="flex items-center gap-1 text-gray-500 dark:text-gray-400">
-                  <span class="text-gray-400 dark:text-gray-500 w-8">Next</span>
-                  <span id="list-next-run-{{ item.config.pk }}" class="font-medium text-gray-700 dark:text-gray-300">
-                    {% if item.next_batch_run %}{{ item.next_batch_run|date:"M d, g:i A" }}{% else %}—{% endif %}
-                  </span>
-                </div>
-                <div class="flex items-center gap-1 text-gray-500 dark:text-gray-400">
-                  <span class="text-gray-400 dark:text-gray-500 w-8">⏱</span>
-                  <span id="list-timer-{{ item.config.pk }}" class="font-mono font-medium text-gray-700 dark:text-gray-300">
-                    {% if item.batch_sync_started_at %}—{% else %}—{% endif %}
-                  </span>
-                </div>
-              </div>
-              {% else %}
-              <span class="text-xs text-gray-400 dark:text-gray-500">—</span>
-              {% endif %}
             </td>
 
           </tr>
@@ -515,6 +451,64 @@ function closeErrorModal() {
   document.body.style.overflow = '';
 }
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeErrorModal(); });
+
+// ─── Sink connector pause / resume ─────────────────────────────────────────────
+const CSRF_TOKEN = '{{ csrf_token }}';
+function sinkAction(url, pk) {
+  const loadingToast = notyf.open({ type: 'info', message: 'Working…', duration: 0, dismissible: false });
+  fetch(url, {
+    method: 'POST',
+    headers: { 'X-CSRFToken': CSRF_TOKEN, 'Content-Type': 'application/json' },
+  })
+    .then(r => r.json())
+    .then(data => {
+      notyf.dismiss(loadingToast);
+      showToast(data.success ? 'success' : 'error', data.message || data.error || (data.success ? 'Done' : 'Failed'));
+      // Refresh this card/row so the new state shows
+      const el = document.querySelector(`[data-config-pk="${pk}"][data-poll-url]`);
+      if (el) setTimeout(() => pollCard(pk, el.dataset.pollUrl), 800);
+    })
+    .catch(() => {
+      notyf.dismiss(loadingToast);
+      showToast('error', 'Request failed');
+    });
+}
+
+// ─── Sink toggle: the pause/resume button IS the status indicator ───────────────
+function sinkToggleMarkup(el, state) {
+  const pk = el.dataset.pk, pauseUrl = el.dataset.pauseUrl, resumeUrl = el.dataset.resumeUrl;
+  const pauseIcon = '<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
+  const playIcon  = '<svg class="w-4 h-4 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+  const errIcon   = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>';
+  const qIcon     = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01"/></svg>';
+  const btn = (url, title, cls, svg) =>
+    `<button type="button" title="${title}" onclick="sinkAction('${url}', ${pk})" class="inline-flex items-center justify-center w-7 h-7 rounded-full transition ${cls}">${svg}</button>`;
+  const tag = (title, cls, svg) =>
+    `<span title="${title}" class="inline-flex items-center justify-center w-7 h-7 rounded-full ${cls}">${svg}</span>`;
+  switch (state) {
+    case 'RUNNING':
+      return btn(pauseUrl, 'Sink running — click to pause',
+        'bg-green-100 text-green-600 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50', pauseIcon);
+    case 'PAUSED':
+      return btn(resumeUrl, 'Sink paused — click to resume',
+        'bg-yellow-100 text-yellow-600 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400 dark:hover:bg-yellow-900/50', playIcon);
+    case 'FAILED':
+    case 'ERROR':
+      return tag('Sink ' + state, 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400', errIcon);
+    case 'NOT_CONFIGURED':
+      return '';
+    default: // NOT_FOUND / UNKNOWN
+      return tag('Sink ' + (state || 'unknown'), 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400', qIcon);
+  }
+}
+function renderSinkToggle(el, state) { el.dataset.state = state; el.innerHTML = sinkToggleMarkup(el, state); }
+function initSinkToggles() {
+  document.querySelectorAll('.sink-toggle').forEach(el => renderSinkToggle(el, el.dataset.state));
+}
+function updateSinkToggles(pk, state) {
+  if (state === undefined || state === null) return;
+  document.querySelectorAll(`.sink-toggle[data-pk="${pk}"]`).forEach(el => renderSinkToggle(el, state));
+}
 
 // ─── Sync badge renderer ───────────────────────────────────────────────────────
 function renderSyncBadge(sync) {
@@ -590,29 +584,9 @@ function timeAgo(date) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function timeUntil(date) {
-  if (!date) return '—';
-  const secs = Math.floor((date.getTime() - Date.now()) / 1000);
-  if (secs <= 0) return 'now';
-  if (secs < 60) return `in ${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `in ${mins}m`;
-  return `in ${Math.floor(mins / 60)}h`;
-}
-
-function elapsed(date) {
-  if (!date) return '—';
-  const secs = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (secs < 0) return '—';
-  const h = Math.floor(secs / 3600).toString().padStart(2, '0');
-  const m = Math.floor((secs % 3600) / 60).toString().padStart(2, '0');
-  const s = (secs % 60).toString().padStart(2, '0');
-  return `${h}:${m}:${s}`;
-}
-
 // ─── Card + list DOM updater ───────────────────────────────────────────────────
 function applyCardUpdate(pk, data) {
-  const { card, sync, batch } = data;
+  const { card, sync } = data;
 
   // ── Card elements ──
   const header = document.getElementById(`card-header-${pk}`);
@@ -626,17 +600,8 @@ function applyCardUpdate(pk, data) {
       ? `<div class="w-10 h-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center"><svg class="w-5 h-5 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div>`
       : `<div class="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center"><svg class="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div>`;
   }
-  const badgeEl = document.getElementById(`state-badge-${pk}`);
-  if (badgeEl) {
-    const st = card.connector_state;
-    let cls = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ';
-    if (st === 'RUNNING') cls += 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
-    else if (st === 'FAILED' || st === 'ERROR') cls += 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
-    else if (st === 'PAUSED') cls += 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400';
-    else cls += 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
-    badgeEl.className = cls;
-    badgeEl.textContent = st;
-  }
+  // Sink pause/resume toggle reflects live sink state (card + list)
+  updateSinkToggles(pk, card.sink_state);
   const syncEl = document.getElementById(`sync-value-${pk}`);
   if (syncEl) syncEl.innerHTML = renderSyncBadge(sync);
   const tasksEl = document.getElementById(`tasks-section-${pk}`);
@@ -661,41 +626,8 @@ function applyCardUpdate(pk, data) {
   if (dot) {
     dot.className = `w-2.5 h-2.5 rounded-full ${card.is_healthy ? 'bg-green-500' : 'bg-red-500'}`;
   }
-  const listBadge = document.getElementById(`list-state-badge-${pk}`);
-  if (listBadge) {
-    const st = card.connector_state;
-    let cls = 'inline-flex items-center justify-center w-7 h-7 rounded-full ';
-    let icon = '';
-    if (st === 'RUNNING') {
-      cls += 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400';
-      icon = '<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
-    } else if (st === 'PAUSED') {
-      cls += 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400';
-      icon = '<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
-    } else if (st === 'FAILED' || st === 'ERROR') {
-      cls += 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400';
-      icon = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>';
-    } else {
-      cls += 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400';
-      icon = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01"/></svg>';
-    }
-    listBadge.className = cls;
-    listBadge.title = st;
-    listBadge.innerHTML = icon;
-  }
   const listSync = document.getElementById(`list-sync-value-${pk}`);
   if (listSync) listSync.innerHTML = renderSyncBadge(sync);
-
-  // Update list row batch timing data-attrs from API response
-  const listRow = document.getElementById(`list-row-${pk}`);
-  if (listRow && batch) {
-    const td = listRow.querySelector('[data-processing-mode="batch"]');
-    if (td) {
-      if (batch.last_batch_run) td.dataset.lastBatchRun = batch.last_batch_run;
-      if (batch.next_batch_run) td.dataset.nextBatchRun = batch.next_batch_run;
-      if (batch.batch_sync_started) td.dataset.batchSyncStarted = batch.batch_sync_started;
-    }
-  }
 
   // Update Alpine summary stats
   const root = document.getElementById('monitoring-root');
@@ -714,27 +646,6 @@ function pollCard(pk, url) {
     .then(r => r.json())
     .then(data => { if (data.success) applyCardUpdate(pk, data); })
     .catch(() => {});
-}
-
-// ─── Live batch timers (list view) ────────────────────────────────────────────
-function tickListTimers() {
-  document.querySelectorAll('[data-processing-mode="batch"]').forEach(td => {
-    const row = td.closest('tr');
-    if (!row) return;
-    const pk = row.dataset.configPk;
-
-    const lastRaw = td.dataset.lastBatchRun;
-    const nextRaw = td.dataset.nextBatchRun;
-    const startedRaw = td.dataset.batchSyncStarted;
-
-    const lastEl = document.getElementById(`list-last-run-${pk}`);
-    const nextEl = document.getElementById(`list-next-run-${pk}`);
-    const timerEl = document.getElementById(`list-timer-${pk}`);
-
-    if (lastEl && lastRaw) lastEl.textContent = timeAgo(new Date(lastRaw));
-    if (nextEl && nextRaw) nextEl.textContent = timeUntil(new Date(nextRaw));
-    if (timerEl) timerEl.textContent = startedRaw ? elapsed(new Date(startedRaw)) : '—';
-  });
 }
 
 const SPINNER_HTML = '<svg class="w-4 h-4 animate-spin text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>';
@@ -771,6 +682,9 @@ function refreshAll() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+  // Render sink pause/resume toggles from their initial server-provided state
+  initSinkToggles();
+
   const cards = document.querySelectorAll('[data-config-pk]');
   cards.forEach(function(el) {
     // Only poll from card elements (not list rows — they share the same pk)
@@ -780,10 +694,6 @@ document.addEventListener('DOMContentLoaded', function() {
     pollCard(pk, url);
     setInterval(() => pollCard(pk, url), 15000);
   });
-
-  // Tick list timers every second
-  tickListTimers();
-  setInterval(tickListTimers, 1000);
 });
 </script>
 

@@ -190,13 +190,9 @@ def _fix_sink_connector(config, sink_status):
 
     manager = DebeziumConnectorManager()
 
-    # Check if connector is paused
+    # Check if connector is paused. Connectors stream continuously now, so a paused
+    # sink is unintended and should be resumed.
     if sink_state == 'PAUSED':
-        # Don't auto-resume batch mode connectors - they're intentionally paused between sync windows
-        if config.processing_mode == 'batch':
-            logger.info(f"[{config.sink_connector_name}] Sink connector is PAUSED (batch mode) - skipping auto-resume")
-            return False
-
         logger.warning(f"[{config.sink_connector_name}] Sink connector is PAUSED, resuming...")
 
         try:
@@ -227,7 +223,7 @@ def _fix_source_connector(config, connector_status):
     Try to fix unhealthy connector.
 
     Checks:
-    1. Is connector PAUSED? → Resume it (unless in batch mode)
+    1. Is connector PAUSED? → Resume it
     2. Is connector FAILED? → Restart it
 
     Returns:
@@ -238,13 +234,10 @@ def _fix_source_connector(config, connector_status):
     connector_state = connector_status['state']
     manager = DebeziumConnectorManager()
 
-    # Check if connector is paused
+    # Check if connector is paused. The SOURCE connector now runs continuously in all
+    # modes (batch windows are driven by pausing the SINK, not the source), so a paused
+    # source is always unintended and should be resumed.
     if connector_state == 'PAUSED':
-        # Don't auto-resume batch mode connectors - they're intentionally paused between sync windows
-        if config.processing_mode == 'batch':
-            logger.info(f"[{config.connector_name}] Connector is PAUSED (batch mode) - skipping auto-resume")
-            return False
-
         logger.warning(f"[{config.connector_name}] Connector is PAUSED, resuming...")
 
         try:

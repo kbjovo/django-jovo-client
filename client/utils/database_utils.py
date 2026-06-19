@@ -213,6 +213,36 @@ def execute_query(db_config: ClientDatabase, query: str, params: Optional[Dict] 
         raise DatabaseOperationError(error_msg) from e
 
 
+def get_max_connections(db_config: ClientDatabase, connect_timeout: int = 5) -> Optional[int]:
+    """
+    Query the database's configured maximum connection/session limit (live).
+
+    Used to compute how many sink connectors (one c3p0 pool each) a shared target
+    database can support. Returns None if it can't be determined (unsupported
+    db type, missing privileges, or the database is unreachable).
+    """
+    db_type = db_config.db_type.lower()
+    queries = {
+        'mysql': "SHOW VARIABLES LIKE 'max_connections'",
+        'postgresql': "SELECT setting FROM pg_settings WHERE name = 'max_connections'",
+        'mssql': "SELECT @@MAX_CONNECTIONS",
+        'oracle': "SELECT value FROM v$parameter WHERE name = 'sessions'",
+    }
+    query = queries.get(db_type)
+    if not query:
+        return None
+    try:
+        with get_database_connection(db_config, connect_timeout=connect_timeout) as conn:
+            row = conn.execute(text(query)).fetchone()
+            if not row:
+                return None
+            # MySQL's SHOW VARIABLES returns (name, value); others return a single value.
+            return int(row[-1])
+    except Exception as e:
+        logger.warning(f"Could not read max_connections for {db_config.connection_name}: {e}")
+        return None
+
+
 def get_table_list(db_config: ClientDatabase, schema: Optional[str] = None) -> List[str]:
     """
     Get list of tables in database

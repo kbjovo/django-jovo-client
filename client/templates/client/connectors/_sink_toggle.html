@@ -1,0 +1,11 @@
+{% comment %}
+Sink pause/resume toggle container — rendered/updated client-side by
+_connector_actions_js.html (the button both shows the sink state and controls it,
+updating its own row in place without a full page reload).
+Requires `config` with `.sink_status.state` in context.
+{% endcomment %}
+<span class="sink-toggle shrink-0 inline-flex items-center justify-center w-8 h-8"
+      data-pk="{{ config.pk }}"
+      data-pause-url="{% url 'sink_pause' config.pk %}"
+      data-resume-url="{% url 'sink_resume' config.pk %}"
+      data-state="{{ config.sink_status.state }}"></span>

@@ -1,7 +1,7 @@
 """
 Connector Action Views (AJAX POST endpoints)
 - Source connector: pause, resume, restart, restart failed tasks, restart all tasks, sync schedule
-- Sink connector: restart, restart failed tasks, restart all tasks
+- Sink connector: pause, resume, restart, restart failed tasks, restart all tasks
 """
 
 import logging
@@ -94,21 +94,6 @@ def connector_restart_all_tasks(request, config_pk):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
-def connector_sync_schedule(request, config_pk):
-    """Re-establish batch schedule for a connector that is out of sync."""
-    if request.method != 'POST':
-        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
-    try:
-        config = get_object_or_404(ReplicationConfig, pk=config_pk)
-        from client.replication.orchestrator import ReplicationOrchestrator
-        orchestrator = ReplicationOrchestrator(config)
-        success, message = orchestrator.sync_with_schedule()
-        return JsonResponse({'success': success, 'message': message})
-    except Exception as e:
-        logger.error(f'Failed to sync schedule: {e}', exc_info=True)
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
-
-
 # ========================================
 # Sink Connector Action Endpoints (AJAX)
 # ========================================
@@ -128,6 +113,40 @@ def sink_restart(request, config_pk):
         return JsonResponse({'success': False, 'message': error})
     except Exception as e:
         logger.error(f'Failed to restart sink: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def sink_pause(request, config_pk):
+    """Pause the sink connector (also defers source TRUNCATEs until resume)."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        if not config.sink_connector_name:
+            return JsonResponse({'success': False, 'message': 'No sink connector configured'})
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.pause_sink_connector()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to pause sink: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def sink_resume(request, config_pk):
+    """Resume the sink connector and drain any deferred TRUNCATEs."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        if not config.sink_connector_name:
+            return JsonResponse({'success': False, 'message': 'No sink connector configured'})
+        from client.replication.orchestrator import ReplicationOrchestrator
+        orchestrator = ReplicationOrchestrator(config)
+        success, message = orchestrator.resume_sink_connector()
+        return JsonResponse({'success': success, 'message': message})
+    except Exception as e:
+        logger.error(f'Failed to resume sink: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 

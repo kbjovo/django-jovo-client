@@ -1,0 +1,80 @@
+{% comment %}
+Client-side sink pause/resume for the connector-list rows.
+Renders each .sink-toggle from its data-state and, on click, POSTs to the
+pause/resume endpoint and updates only that connector's row (toggle + sink-state
+label) — no full page reload. Relies on global notyf/showToast (from _toast.html).
+{% endcomment %}
+<script>
+(function () {
+  if (window.__connectorActionsLoaded) return;
+  window.__connectorActionsLoaded = true;
+  window.CSRF_TOKEN = window.CSRF_TOKEN || '{{ csrf_token }}';
+
+  var SVG = {
+    pause:   '<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path></svg>',
+    play:    '<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>',
+    err:     '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>',
+    unknown: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01"></path></svg>'
+  };
+  var BASE = 'inline-flex items-center justify-center w-8 h-8 rounded-full transition ';
+
+  function labelColor(s) {
+    if (s === 'RUNNING') return 'text-green-600 dark:text-green-400';
+    if (s === 'PAUSED') return 'text-yellow-600 dark:text-yellow-400';
+    if (s === 'FAILED' || s === 'ERROR') return 'text-red-600 dark:text-red-400';
+    return 'text-gray-400 dark:text-gray-500';
+  }
+
+  function renderToggle(el) {
+    var s = el.dataset.state;
+    if (s === 'RUNNING') {
+      el.innerHTML = '<button type="button" data-url="' + el.dataset.pauseUrl + '" data-next="PAUSED" onclick="window.sinkToggleAction(this)" title="Sink running — click to pause" class="' + BASE + 'bg-green-100 text-green-600 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400">' + SVG.pause + '</button>';
+    } else if (s === 'PAUSED') {
+      el.innerHTML = '<button type="button" data-url="' + el.dataset.resumeUrl + '" data-next="RUNNING" onclick="window.sinkToggleAction(this)" title="Sink paused — click to resume" class="' + BASE + 'bg-yellow-100 text-yellow-600 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400">' + SVG.play + '</button>';
+    } else if (s === 'FAILED' || s === 'ERROR') {
+      el.innerHTML = '<span title="Sink ' + s + '" class="' + BASE + 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400">' + SVG.err + '</span>';
+    } else {
+      el.innerHTML = '<span title="Sink ' + (s || 'unknown') + '" class="' + BASE + 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400">' + SVG.unknown + '</span>';
+    }
+  }
+
+  function updateRow(pk, state) {
+    document.querySelectorAll('.sink-toggle[data-pk="' + pk + '"]').forEach(function (el) {
+      el.dataset.state = state;
+      renderToggle(el);
+    });
+    document.querySelectorAll('.sink-state-label[data-pk="' + pk + '"]').forEach(function (el) {
+      el.textContent = state;
+      el.className = 'sink-state-label font-medium ' + labelColor(state);
+    });
+  }
+
+  window.sinkToggleAction = function (btn) {
+    var url = btn.dataset.url, next = btn.dataset.next;
+    var container = btn.closest('.sink-toggle');
+    var pk = container ? container.dataset.pk : null;
+    var loading = (typeof notyf !== 'undefined') ? notyf.open({ type: 'info', message: 'Working…', duration: 0, dismissible: false }) : null;
+    btn.disabled = true;
+    fetch(url, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': window.CSRF_TOKEN, 'Content-Type': 'application/json' }
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (loading) notyf.dismiss(loading);
+        if (typeof showToast === 'function') showToast(d.success ? 'success' : 'error', d.message || d.error || (d.success ? 'Done' : 'Failed'));
+        if (d.success && pk) updateRow(pk, next);
+        else btn.disabled = false;
+      })
+      .catch(function () {
+        if (loading) notyf.dismiss(loading);
+        if (typeof showToast === 'function') showToast('error', 'Request failed');
+        btn.disabled = false;
+      });
+  };
+
+  function init() { document.querySelectorAll('.sink-toggle').forEach(renderToggle); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
+</script>
