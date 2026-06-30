@@ -11,9 +11,11 @@ Supports:
 import json
 import logging
 import re
+import time
 from typing import Dict, List, Optional, Tuple, Any
 
 from confluent_kafka import Consumer, KafkaException, KafkaError
+from confluent_kafka.admin import AdminClient
 from sqlalchemy.engine import Engine
 
 from .base_processor import BaseDDLProcessor, DDLOperation, DDLOperationType
@@ -102,6 +104,15 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         # Requires connector config: skipped.operations="" (not the default "t").
         self.truncate_consumer: Optional[Any] = None
         self._truncate_deserializer: Optional[Any] = None
+        self._admin_client: Optional[AdminClient] = None
+        self._sink_consumer_group: Optional[str] = None
+        # op="t" events whose sink hasn't caught up yet — retried each poll, so a
+        # truncate is applied only once the sink has consumed past it (ordered like DML).
+        self._truncate_pending: List[Dict] = []
+        # Change-topic subscription state, refreshed so newly-added tables are watched.
+        self._truncate_topic_prefix: Optional[str] = None
+        self._watched_topics: set = set()
+        self._last_topic_refresh: float = 0.0
         if self.source_db_type in ('mysql', 'oracle'):
             self._init_truncate_watcher(replication_config, bootstrap_servers, group_id)
 
@@ -268,7 +279,13 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         elif ddl_upper.startswith('RENAME TABLE'):
             return self._handle_rename_table(ddl)
         elif ddl_upper.startswith('TRUNCATE'):
-            return self._handle_truncate(ddl)
+            # TRUNCATE is detected exclusively via the op="t" change-topic watcher
+            # (poll_truncate_events). Handling it here too would double-fire the
+            # resync, and the schema-history consumer reads from 'earliest' — so on
+            # a cold start it would replay every historical TRUNCATE and wipe the
+            # target spuriously. Ignore it on this path.
+            logger.debug("Ignoring TRUNCATE in schema-history (handled by op=t watcher)")
+            return True
         else:
             logger.debug(f"Ignoring DDL: {ddl[:50]}...")
             return True
@@ -462,13 +479,13 @@ class KafkaDDLProcessor(BaseDDLProcessor):
 
     def _handle_alter_from_ddl(self, ddl: str, source_table: str, target_table: str) -> bool:
         """
-        Parse ALTER TABLE DDL directly when tableChanges not available.
+        Parse ALTER TABLE DDL directly when tableChanges metadata is not available.
 
-        Fallback path: only reached when Debezium does not include tableChanges metadata
-        (rare with MySQL). Handles only the FIRST operation found in the DDL statement.
-        Multi-operation ALTERs (e.g. ADD COLUMN x, DROP COLUMN y) will have subsequent
-        operations silently ignored. The primary path (_handle_alter_table with tableChanges)
-        handles multiple operations correctly and should be preferred.
+        Fallback path: only reached when Debezium does not include tableChanges
+        metadata (rare with MySQL). Splits multi-operation ALTERs (e.g.
+        ADD COLUMN x, DROP COLUMN y) into individual clauses and applies each one,
+        so trailing operations are no longer silently ignored. The primary path
+        (_handle_alter_table with tableChanges) is still preferred when available.
         """
         # Check if table exists in target database
         if not self.target_adapter.table_exists(target_table):
@@ -478,17 +495,123 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             )
             return True
 
-        ddl_upper = ddl.upper()
+        clauses = self._split_alter_operations(ddl)
+
+        all_success = True
+        handled_any = False
+        for clause in clauses:
+            operation = self._parse_alter_clause(clause, target_table, source_table)
+            if operation is None:
+                logger.debug(f"Unhandled ALTER clause skipped: {clause[:80]}")
+                continue
+            handled_any = True
+            success, error = self.execute_operation(operation)
+            if not success:
+                logger.error(
+                    f"Failed ALTER clause on {target_table}: {clause[:80]} ({error})"
+                )
+                all_success = False
+
+        if not handled_any:
+            logger.debug(f"Unhandled ALTER TABLE DDL: {ddl[:100]}...")
+        return all_success
+
+    def _split_alter_operations(self, ddl: str) -> List[str]:
+        """
+        Split a (possibly multi-operation) ALTER TABLE statement into individual
+        operation clauses.
+
+        Splits on top-level commas only, tracking parenthesis depth so commas
+        inside type definitions (e.g. ``DECIMAL(10,2)``) or index column lists
+        (e.g. ``(a, b)``) do not split a clause. The leading
+        ``ALTER TABLE <table>`` prefix is stripped.
+
+        Example::
+
+            ALTER TABLE `t` ADD COLUMN a INT, DROP COLUMN b, MODIFY c DECIMAL(10,2)
+            -> ['ADD COLUMN a INT', 'DROP COLUMN b', 'MODIFY c DECIMAL(10,2)']
+        """
+        prefix = re.match(
+            r'\s*ALTER\s+TABLE\s+(?:`?\w+`?\.)?`?\w+`?\s+', ddl, re.IGNORECASE
+        )
+        body = ddl[prefix.end():] if prefix else ddl
+
+        clauses: List[str] = []
+        depth = 0
+        current: List[str] = []
+        for ch in body:
+            if ch == '(':
+                depth += 1
+                current.append(ch)
+            elif ch == ')':
+                depth = max(0, depth - 1)
+                current.append(ch)
+            elif ch == ',' and depth == 0:
+                clause = ''.join(current).strip().rstrip(';').strip()
+                if clause:
+                    clauses.append(clause)
+                current = []
+            else:
+                current.append(ch)
+
+        clause = ''.join(current).strip().rstrip(';').strip()
+        if clause:
+            clauses.append(clause)
+        return clauses
+
+    def _parse_alter_clause(
+        self, clause: str, target_table: str, source_table: str
+    ) -> Optional[DDLOperation]:
+        """
+        Parse a single ALTER TABLE operation clause into a DDLOperation.
+
+        Returns None if the clause is not a recognised operation. Index
+        operations are matched before column operations so an ``ADD ... INDEX``
+        clause is not misparsed as ``ADD COLUMN``.
+        """
+        clause_upper = clause.upper()
+
+        # ADD INDEX / KEY (before ADD COLUMN to avoid misparsing the index name)
+        index_match = re.search(
+            r'ADD\s+(UNIQUE\s+)?(?:INDEX|KEY)\s+`?(\w+)`?\s*\(([^)]+)\)',
+            clause, re.IGNORECASE
+        )
+        if index_match:
+            unique = bool(index_match.group(1))
+            index_name = index_match.group(2)
+            columns = [c.strip().strip('`') for c in index_match.group(3).split(',')]
+            return DDLOperation(
+                operation_type=DDLOperationType.ADD_INDEX,
+                table_name=target_table,
+                details={
+                    'index_name': index_name,
+                    'columns': columns,
+                    'unique': unique
+                },
+                is_destructive=False,
+                source_ddl=clause
+            )
+
+        # DROP INDEX / KEY (before DROP COLUMN)
+        drop_idx_match = re.search(r'DROP\s+(?:INDEX|KEY)\s+`?(\w+)`?', clause, re.IGNORECASE)
+        if drop_idx_match:
+            return DDLOperation(
+                operation_type=DDLOperationType.DROP_INDEX,
+                table_name=target_table,
+                details={'index_name': drop_idx_match.group(1)},
+                is_destructive=False,
+                source_ddl=clause
+            )
 
         # ADD COLUMN
         add_match = re.search(
             r'ADD\s+(?:COLUMN\s+)?`?(\w+)`?\s+(\w+(?:\([^)]+\))?)',
-            ddl, re.IGNORECASE
+            clause, re.IGNORECASE
         )
         if add_match:
             col_name = add_match.group(1)
             col_type = add_match.group(2)
-            operation = DDLOperation(
+            return DDLOperation(
                 operation_type=DDLOperationType.ADD_COLUMN,
                 table_name=target_table,
                 details={
@@ -496,38 +619,32 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                         'name': col_name,
                         'typeName': col_type.split('(')[0].upper(),
                         'length': self._extract_length(col_type),
-                        'optional': 'NOT NULL' not in ddl_upper,
+                        'optional': 'NOT NULL' not in clause_upper,
                         'sourceDbType': self.source_db_type
                     }
                 },
                 is_destructive=False,
-                source_ddl=ddl
+                source_ddl=clause
             )
-            success, _ = self.execute_operation(operation)
-            return success
 
         # DROP COLUMN - handle both "DROP COLUMN col" and "DROP col"
-        drop_match = re.search(r'DROP\s+(?:COLUMN\s+)?`?(\w+)`?', ddl, re.IGNORECASE)
-        if drop_match and ('DROP COLUMN' in ddl_upper or 'DROP `' in ddl_upper or re.search(r'DROP\s+\w', ddl_upper)):
+        drop_match = re.search(r'DROP\s+(?:COLUMN\s+)?`?(\w+)`?', clause, re.IGNORECASE)
+        if drop_match:
             col_name = drop_match.group(1)
-            # Skip if it looks like DROP INDEX/KEY/PRIMARY
-            if col_name.upper() in ('INDEX', 'KEY', 'PRIMARY', 'FOREIGN', 'CONSTRAINT'):
-                pass  # Not a column drop
-            else:
-                operation = DDLOperation(
+            # Skip if it looks like DROP PRIMARY/FOREIGN/CONSTRAINT (index/key handled above)
+            if col_name.upper() not in ('INDEX', 'KEY', 'PRIMARY', 'FOREIGN', 'CONSTRAINT'):
+                return DDLOperation(
                     operation_type=DDLOperationType.DROP_COLUMN,
                     table_name=target_table,
                     details={'column_name': col_name},
                     is_destructive=True,
-                    source_ddl=ddl
+                    source_ddl=clause
                 )
-                success, _ = self.execute_operation(operation)
-                return success
 
         # MODIFY/CHANGE COLUMN
         modify_match = re.search(
             r'(?:MODIFY|CHANGE)\s+(?:COLUMN\s+)?`?(\w+)`?\s+(?:`?(\w+)`?\s+)?(\w+(?:\([^)]+\))?)',
-            ddl, re.IGNORECASE
+            clause, re.IGNORECASE
         )
         if modify_match:
             old_name = modify_match.group(1)
@@ -543,8 +660,7 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 )
                 self._delete_schema_for_table(source_table)
 
-                # Rename column
-                operation = DDLOperation(
+                return DDLOperation(
                     operation_type=DDLOperationType.RENAME_COLUMN,
                     table_name=target_table,
                     details={
@@ -553,68 +669,28 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                         'column_type': col_type
                     },
                     is_destructive=False,
-                    source_ddl=ddl
+                    source_ddl=clause
                 )
-            else:
-                # Modify column type
-                operation = DDLOperation(
-                    operation_type=DDLOperationType.MODIFY_COLUMN,
-                    table_name=target_table,
-                    details={
-                        'column': {
-                            'name': old_name,
-                            'typeName': col_type.split('(')[0].upper(),
-                            'length': self._extract_length(col_type),
-                            'optional': 'NOT NULL' not in ddl_upper,
-                            'sourceDbType': self.source_db_type
-                        },
-                        'old_type': ''
-                    },
-                    is_destructive=False,
-                    source_ddl=ddl
-                )
-            success, _ = self.execute_operation(operation)
-            return success
 
-        # ADD INDEX
-        index_match = re.search(
-            r'ADD\s+(UNIQUE\s+)?(?:INDEX|KEY)\s+`?(\w+)`?\s*\(([^)]+)\)',
-            ddl, re.IGNORECASE
-        )
-        if index_match:
-            unique = bool(index_match.group(1))
-            index_name = index_match.group(2)
-            columns = [c.strip().strip('`') for c in index_match.group(3).split(',')]
-            operation = DDLOperation(
-                operation_type=DDLOperationType.ADD_INDEX,
+            # Modify column type
+            return DDLOperation(
+                operation_type=DDLOperationType.MODIFY_COLUMN,
                 table_name=target_table,
                 details={
-                    'index_name': index_name,
-                    'columns': columns,
-                    'unique': unique
+                    'column': {
+                        'name': old_name,
+                        'typeName': col_type.split('(')[0].upper(),
+                        'length': self._extract_length(col_type),
+                        'optional': 'NOT NULL' not in clause_upper,
+                        'sourceDbType': self.source_db_type
+                    },
+                    'old_type': ''
                 },
                 is_destructive=False,
-                source_ddl=ddl
+                source_ddl=clause
             )
-            success, _ = self.execute_operation(operation)
-            return success
 
-        # DROP INDEX
-        drop_idx_match = re.search(r'DROP\s+(?:INDEX|KEY)\s+`?(\w+)`?', ddl, re.IGNORECASE)
-        if drop_idx_match:
-            index_name = drop_idx_match.group(1)
-            operation = DDLOperation(
-                operation_type=DDLOperationType.DROP_INDEX,
-                table_name=target_table,
-                details={'index_name': index_name},
-                is_destructive=False,
-                source_ddl=ddl
-            )
-            success, _ = self.execute_operation(operation)
-            return success
-
-        logger.debug(f"Unhandled ALTER TABLE DDL: {ddl[:100]}...")
-        return True
+        return None
 
     def _handle_alter_from_metadata(self, table_name: str, table_info: Dict) -> bool:
         """Handle ALTER TABLE from metadata only (SQL Server)."""
@@ -692,30 +768,6 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         logger.debug(f"Ignoring Oracle DDL: {ddl[:60]}...")
         return True
 
-    def _handle_truncate(self, ddl: str) -> bool:
-        """
-        Handle TRUNCATE TABLE on a tracked source table (MySQL and Oracle).
-
-        MySQL and Oracle emit TRUNCATE as a DDL event in the schema history topic
-        — not as row-level deletes — so the sink connector never finds out.
-
-        This handler:
-          1. Truncates the corresponding target table (clears stale rows).
-          2. Sends an incremental snapshot signal so Debezium re-reads the source.
-
-        If the table is not in the active mappings the event is silently ignored.
-        """
-        # Optional schema/db prefix (e.g. `db`.`table`, "SCHEMA"."TABLE", schema.table)
-        match = re.search(
-            r'TRUNCATE\s+(?:TABLE\s+)?(?:[`"\[]?\w+[`"\]]?\s*\.\s*)?[`"\[]?(\w+)[`"\]]?',
-            ddl, re.IGNORECASE
-        )
-        if not match:
-            logger.warning(f"Could not parse table name from TRUNCATE DDL: {ddl[:80]}")
-            return True
-
-        return self._handle_truncate_for_table(match.group(1))
-
     def _handle_drop_table(self, ddl: str) -> bool:
         """Handle DROP TABLE."""
         match = re.search(
@@ -745,29 +797,70 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         return success
 
     def _handle_rename_table(self, ddl: str) -> bool:
-        """Handle RENAME TABLE."""
-        # MySQL: RENAME TABLE old_name TO new_name
-        match = re.search(
-            r'RENAME\s+TABLE\s+`?(\w+)`?\s+TO\s+`?(\w+)`?',
+        """
+        Handle RENAME TABLE on the target so it tracks the source rename instead of
+        leaving a stale table behind under the old name.
+
+        MySQL allows multiple renames in one statement:
+            RENAME TABLE a TO b, c TO d
+        Each (old -> new) pair is applied to the corresponding target table.
+
+        Guards:
+          - If the old target table doesn't exist, the rename is skipped (the sink
+            will create the new table from its topic via auto.create).
+          - If the new target table already exists, the rename is skipped to avoid
+            clobbering existing data.
+
+        Note: Debezium only keeps capturing the renamed table if the *new* name is in
+        table.include.list. A source rename to a name outside the selected set stops
+        replication for that table until it is re-selected — that reconfiguration is
+        handled by the add/remove-table flow, not here.
+        """
+        # Each pair: [schema.]old TO [schema.]new  (back-ticked or bare)
+        pairs = re.findall(
+            r'(?:[`"]?\w+[`"]?\.)?[`"]?(\w+)[`"]?\s+TO\s+(?:[`"]?\w+[`"]?\.)?[`"]?(\w+)[`"]?',
             ddl, re.IGNORECASE
         )
-        if not match:
+        if not pairs:
+            logger.warning(f"Could not parse RENAME TABLE: {ddl[:80]}")
             return True
 
-        old_name = match.group(1)
-        new_name = match.group(2)
+        all_ok = True
+        for old_src, new_src in pairs:
+            old_target = self._get_target_table_name(old_src)
+            new_target = self._get_target_table_name(new_src)
 
-        operation = DDLOperation(
-            operation_type=DDLOperationType.RENAME_TABLE,
-            table_name=self._get_target_table_name(old_name),
-            details={'new_name': self._get_target_table_name(new_name)},
-            is_destructive=False,
-            source_ddl=ddl
-        )
+            if not self.target_adapter.table_exists(old_target):
+                logger.info(
+                    f"RENAME: target '{old_target}' missing — sink will create "
+                    f"'{new_target}' from its topic, skipping rename"
+                )
+                continue
+            if self.target_adapter.table_exists(new_target):
+                logger.warning(
+                    f"RENAME: target '{new_target}' already exists — skipping rename "
+                    f"of '{old_target}' to avoid clobbering data"
+                )
+                continue
 
-        # Note: RENAME_TABLE not implemented in adapters yet
-        logger.warning(f"RENAME TABLE not fully supported: {ddl}")
-        return True
+            operation = DDLOperation(
+                operation_type=DDLOperationType.RENAME_TABLE,
+                table_name=old_target,
+                details={'new_name': new_target},
+                is_destructive=False,
+                source_ddl=ddl
+            )
+            success, error = self.execute_operation(operation)
+            if success:
+                logger.info(f"RENAME: target '{old_target}' -> '{new_target}'")
+                # Keep the schema cache coherent under the new source name.
+                if old_src in self.schema_cache:
+                    self.schema_cache[new_src] = self.schema_cache.pop(old_src)
+            else:
+                logger.error(f"RENAME failed '{old_target}' -> '{new_target}': {error}")
+                all_ok = False
+
+        return all_ok
 
     def _detect_schema_changes_by_position(
         self,
@@ -1005,8 +1098,14 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         Set up a second Kafka consumer that watches change topics for op="t" events.
 
         MySQL (and Oracle) emit TRUNCATE as op="t" to the change topic when
-        skipped.operations="" is configured on the source connector.
-        The schema history topic never receives TRUNCATE events.
+        skipped.operations="none" is configured on the source connector. This is the
+        single source of truth for truncate detection — the schema-history path
+        deliberately ignores TRUNCATE to avoid double-firing the resync.
+
+        A detected truncate is only applied once the sink connector has consumed
+        past it (see poll_truncate_events / _sink_caught_up), so the target is never
+        truncated ahead of in-flight DML and a paused sink defers it like any other
+        message.
 
         Uses a separate consumer group so it doesn't interfere with the sink.
         """
@@ -1022,23 +1121,20 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             # Use generic Avro deserializer — returns a dict
             self._truncate_deserializer = AvroDeserializer(sr_client)
 
-            # Build change topic list for all tracked tables
+            # AdminClient + sink consumer group are used to check whether the sink
+            # has consumed past a truncate before we apply it to the target.
+            # Kafka Connect names a sink's consumer group "connect-<connector_name>".
+            self._admin_client = AdminClient({'bootstrap.servers': bootstrap_servers})
+            sink_name = getattr(replication_config, 'sink_connector_name', None)
+            self._sink_consumer_group = f"connect-{sink_name}" if sink_name else None
+
+            # Topic prefix is stable for the processor's lifetime; cache it so the
+            # change-topic list can be rebuilt cheaply when tables are added/removed.
             db_config = replication_config.client_database
-            topic_prefix = replication_config.kafka_topic_prefix or (
+            self._truncate_topic_prefix = replication_config.kafka_topic_prefix or (
                 f"client_{db_config.client_id}_db_{db_config.id}_v_{replication_config.connector_version or 0}"
             )
-            if self.source_db_type == 'mysql':
-                db_name = db_config.database_name
-                change_topics = [
-                    f"{topic_prefix}.{db_name}.{m.source_table}"
-                    for m in replication_config.table_mappings.filter(is_enabled=True)
-                ]
-            else:  # oracle
-                change_topics = [
-                    f"{topic_prefix}.{m.source_schema or db_config.username.upper()}.{m.source_table}"
-                    for m in replication_config.table_mappings.filter(is_enabled=True)
-                ]
-
+            change_topics = self._build_change_topics()
             if not change_topics:
                 return
 
@@ -1050,7 +1146,9 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 'session.timeout.ms': 30000,
                 'max.poll.interval.ms': 300000,
             })
-            self.truncate_consumer.subscribe(change_topics)
+            self._watched_topics = set(change_topics)
+            self._last_topic_refresh = time.monotonic()
+            self.truncate_consumer.subscribe(sorted(self._watched_topics))
             logger.info(f"Truncate watcher initialized — watching {len(change_topics)} change topic(s)")
 
         except Exception as e:
@@ -1058,70 +1156,229 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             self.truncate_consumer = None
             self._truncate_deserializer = None
 
+    # How often the watcher re-queries the enabled table set to pick up newly
+    # added tables without a processor restart (a re-subscribe triggers a rebalance,
+    # so it is throttled rather than run every poll).
+    _TOPIC_REFRESH_INTERVAL_SEC = 30
+
+    def _build_change_topics(self) -> List[str]:
+        """Build the change-topic list for all currently-enabled tracked tables."""
+        rc = self.replication_config
+        db_config = rc.client_database
+        prefix = self._truncate_topic_prefix
+        mappings = rc.table_mappings.filter(is_enabled=True)
+        if self.source_db_type == 'mysql':
+            db_name = db_config.database_name
+            return [f"{prefix}.{db_name}.{m.source_table}" for m in mappings]
+        # oracle
+        return [
+            f"{prefix}.{m.source_schema or db_config.username.upper()}.{m.source_table}"
+            for m in mappings
+        ]
+
+    def _refresh_truncate_subscription(self) -> None:
+        """
+        Re-subscribe the watcher when the enabled table set has changed, so a table
+        added after the processor started gets its TRUNCATEs watched without a
+        restart. Throttled to _TOPIC_REFRESH_INTERVAL_SEC; only re-subscribes when
+        the desired topic set actually differs (a re-subscribe forces a rebalance).
+        """
+        if not self.truncate_consumer:
+            return
+        now = time.monotonic()
+        if now - self._last_topic_refresh < self._TOPIC_REFRESH_INTERVAL_SEC:
+            return
+        self._last_topic_refresh = now
+        try:
+            desired = set(self._build_change_topics())
+            if desired and desired != self._watched_topics:
+                added = sorted(desired - self._watched_topics)
+                removed = sorted(self._watched_topics - desired)
+                self.truncate_consumer.subscribe(sorted(desired))
+                self._watched_topics = desired
+                logger.info(
+                    f"Truncate watcher subscription updated "
+                    f"(added={added}, removed={removed})"
+                )
+        except Exception as e:
+            logger.debug(f"Truncate subscription refresh failed: {e}")
+
     def poll_truncate_events(self, timeout_sec: float = 2.0) -> int:
         """
-        Poll change topics for op="t" (TRUNCATE) events and trigger resync.
+        Poll change topics for op="t" (TRUNCATE) events and trigger a resync, but
+        only once the sink connector has consumed past the truncate event.
 
-        Returns number of truncate events handled.
+        Ordering guarantee: a TRUNCATE re-snapshots the target out-of-band, so it
+        must not run ahead of DML the sink hasn't applied yet. We therefore defer any
+        op="t" whose offset the sink hasn't committed past, and retry it on each poll.
+        A paused sink never advances its committed offset, so its truncates stay
+        deferred until it resumes — exactly how buffered DML behaves.
+
+        Un-applied truncates are kept in memory and the consumer's committed offset
+        is held at the earliest un-applied truncate, so a restart re-reads them.
+
+        Returns number of truncate events applied this call.
         """
         if not self.truncate_consumer or not self._truncate_deserializer:
             return 0
 
-        from confluent_kafka.schema_registry.avro import AvroDeserializer
-        from confluent_kafka import SerializingProducer
+        # Pick up tables added since the watcher started (throttled internally).
+        self._refresh_truncate_subscription()
 
         handled = 0
         try:
+            # 1) Retry truncates deferred on a previous poll (sink may have caught up).
+            handled += self._retry_pending_truncates()
+
+            # 2) Consume new change-topic messages and dispatch op="t" events.
             msgs = self.truncate_consumer.consume(num_messages=50, timeout=timeout_sec)
-            last_msg = None
             for msg in msgs:
-                if msg.error():
-                    continue
-                if msg.value() is None:
-                    continue  # tombstone
+                if msg.error() or msg.value() is None:
+                    continue  # error / tombstone
 
                 try:
-                    # Avro deserialize — returns a dict with 'payload' key
                     record = self._truncate_deserializer(msg.value(), None)
                     if not record:
                         continue
-
                     op = record.get('op') or record.get('payload', {}).get('op')
                     if op != 't':
                         continue
-
-                    # Extract table name from topic: prefix.db.table
-                    topic = msg.topic()
-                    table_name = topic.rsplit('.', 1)[-1]
-
-                    logger.info(f"op=t detected on topic '{topic}' — triggering resync for '{table_name}'")
-                    self._handle_truncate_for_table(table_name)
-                    handled += 1
-
                 except Exception as e:
                     logger.debug(f"Could not decode change topic message: {e}")
+                    continue
 
-                last_msg = msg
+                topic = msg.topic()
+                table_name = topic.rsplit('.', 1)[-1]  # prefix.db.table -> table
+                entry = {
+                    'table': table_name,
+                    'topic': topic,
+                    'partition': msg.partition(),
+                    'offset': msg.offset(),
+                }
 
-            if last_msg is not None:
-                self.truncate_consumer.commit(last_msg)
-            else:
-                # No messages received — commit current fetch positions so the next
-                # run (or supervisor restart) doesn't reset to 'latest' and skip
-                # any truncate event that arrives between now and the next poll.
-                try:
-                    assignment = self.truncate_consumer.assignment()
-                    if assignment:
-                        positions = self.truncate_consumer.position(assignment)
-                        if positions:
-                            self.truncate_consumer.commit(offsets=positions, asynchronous=False)
-                except Exception as e:
-                    logger.debug(f"Truncate watcher position commit failed: {e}")
+                if self._sink_caught_up(topic, msg.partition(), msg.offset()):
+                    if self._handle_truncate_for_table(table_name):
+                        logger.info(
+                            f"op=t on '{topic}' (offset {msg.offset()}) — sink caught up, "
+                            f"resynced '{table_name}'"
+                        )
+                        handled += 1
+                    else:
+                        logger.warning(
+                            f"op=t on '{topic}' (offset {msg.offset()}) — resync of "
+                            f"'{table_name}' failed, will retry"
+                        )
+                        self._truncate_pending.append(entry)
+                else:
+                    logger.info(
+                        f"op=t on '{topic}' (offset {msg.offset()}) — sink not caught up, "
+                        f"deferring resync of '{table_name}'"
+                    )
+                    self._truncate_pending.append(entry)
+
+            # 3) Commit a watermark that never advances past an un-applied truncate.
+            self._commit_truncate_watermark()
 
         except Exception as e:
             logger.error(f"Truncate watcher poll error: {e}")
 
         return handled
+
+    def _retry_pending_truncates(self) -> int:
+        """
+        Re-evaluate deferred op="t" events. Apply those the sink has now passed; keep
+        any still behind the sink, or whose resync failed (e.g. the snapshot signal
+        didn't go through), so they are retried on the next poll.
+        """
+        if not self._truncate_pending:
+            return 0
+
+        still_pending: List[Dict] = []
+        handled = 0
+        for entry in self._truncate_pending:
+            if not self._sink_caught_up(entry['topic'], entry['partition'], entry['offset']):
+                still_pending.append(entry)
+                continue
+            if self._handle_truncate_for_table(entry['table']):
+                logger.info(
+                    f"Deferred op=t for '{entry['table']}' (offset {entry['offset']}) — "
+                    f"sink caught up, resynced"
+                )
+                handled += 1
+            else:
+                logger.warning(
+                    f"Deferred op=t for '{entry['table']}' — resync failed, will retry"
+                )
+                still_pending.append(entry)
+        self._truncate_pending = still_pending
+        return handled
+
+    def _sink_caught_up(self, topic: str, partition: int, offset: int) -> bool:
+        """
+        Return True if the sink connector has consumed past *offset* on (topic,
+        partition) — i.e. it has applied every DML record up to and including the
+        truncate event, so truncating the target now won't drop in-flight rows.
+
+        The sink's committed offset is the NEXT offset it will read, so
+        committed > offset means the truncate event itself has been consumed.
+
+        Degrades safely: if the sink group/offset can't be read, returns True so a
+        truncate is never stuck forever — the pause check in
+        _handle_truncate_for_table still guards the explicit paused case.
+        """
+        if not self._admin_client or not self._sink_consumer_group:
+            return True
+        try:
+            from confluent_kafka import ConsumerGroupTopicPartitions, TopicPartition
+
+            req = ConsumerGroupTopicPartitions(
+                self._sink_consumer_group, [TopicPartition(topic, partition)]
+            )
+            futures = self._admin_client.list_consumer_group_offsets([req])
+            result = futures[self._sink_consumer_group].result(timeout=10)
+            for tp in result.topic_partitions:
+                if tp.topic == topic and tp.partition == partition:
+                    committed = tp.offset
+                    if committed is None or committed < 0:
+                        return False  # sink hasn't committed here yet
+                    return committed > offset
+            return False  # no committed offset for this partition yet
+        except Exception as e:
+            logger.warning(
+                f"Could not read sink offset for {topic}[{partition}] "
+                f"(group={self._sink_consumer_group}): {e} — proceeding"
+            )
+            return True
+
+    def _commit_truncate_watermark(self) -> None:
+        """
+        Commit the truncate watcher's offsets, holding each partition at the earliest
+        un-applied truncate so a restart re-reads deferred truncates rather than
+        skipping them (the consumer starts from 'latest').
+        """
+        try:
+            assignment = self.truncate_consumer.assignment()
+            if not assignment:
+                return
+            positions = self.truncate_consumer.position(assignment)
+
+            # Earliest still-deferred truncate offset per (topic, partition).
+            pending_min: Dict[Tuple[str, int], int] = {}
+            for p in self._truncate_pending:
+                key = (p['topic'], p['partition'])
+                pending_min[key] = min(pending_min.get(key, p['offset']), p['offset'])
+
+            commit_list = []
+            for tp in positions:
+                key = (tp.topic, tp.partition)
+                if key in pending_min:
+                    tp.offset = pending_min[key]  # resume here on restart
+                if tp.offset is not None and tp.offset >= 0:
+                    commit_list.append(tp)
+            if commit_list:
+                self.truncate_consumer.commit(offsets=commit_list, asynchronous=False)
+        except Exception as e:
+            logger.debug(f"Truncate watermark commit failed: {e}")
 
     def close(self):
         """Close Kafka consumers."""

@@ -240,9 +240,9 @@ def get_mysql_connector_config(
         # Tombstones on delete
         "tombstones.on.delete": "true",
 
-        # Emit truncate events (op="t") to change topics so the system can detect
-        # TRUNCATE TABLE and trigger an automatic resync on the target.
-        # Default is "t" (skip truncate) — "none" means skip nothing.
+        # Emit TRUNCATE as op="t" on the change topic so the DDL processor's truncate
+        # watcher (KafkaDDLProcessor.poll_truncate_events) can detect it and resync the
+        # target. Default is "t" (skip truncate); "none" means skip nothing.
         "skipped.operations": "none",
 
         # Snapshot fetch size - controls JDBC fetchSize during initial snapshot

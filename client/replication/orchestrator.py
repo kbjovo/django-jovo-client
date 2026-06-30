@@ -2019,13 +2019,38 @@ class ReplicationOrchestrator:
             return {'state': 'ERROR', 'healthy': False, 'message': str(e)}
 
     def _calculate_overall_health(self, connector_status: Dict, sink_status: Dict) -> str:
-        """Calculate overall health: 'healthy' or 'unhealthy'."""
+        """Calculate overall health: 'healthy', 'degraded', or 'unhealthy'.
+
+        'degraded' means at least one side is unhealthy but in a state the health
+        monitor can auto-recover (PAUSED, FAILED, or RUNNING with a FAILED task —
+        e.g. the source database went unresponsive). 'unhealthy' means a
+        non-recoverable state (NOT_FOUND, ERROR, NOT_CONFIGURED, UNKNOWN) that
+        needs manual intervention.
+        """
         connector_healthy = connector_status.get('healthy', False)
         sink_healthy = sink_status.get('healthy', False)
 
         if connector_healthy and sink_healthy:
             return 'healthy'
+
+        if self._is_recoverable(connector_status) and self._is_recoverable(sink_status):
+            return 'degraded'
         return 'unhealthy'
+
+    @staticmethod
+    def _is_recoverable(status: Dict) -> bool:
+        """Whether a connector status can be auto-recovered by a resume/restart.
+
+        Healthy sides are trivially recoverable (nothing to do). An unhealthy side
+        is recoverable when it is PAUSED, FAILED, or RUNNING with a FAILED task
+        (the typical shape of a source/sink DB outage — the connector stays RUNNING
+        while its task fails). NOT_FOUND / ERROR / NOT_CONFIGURED / UNKNOWN are not.
+        """
+        if status.get('healthy'):
+            return True
+        if status.get('state') in ('PAUSED', 'FAILED'):
+            return True
+        return any(t.get('state') == 'FAILED' for t in status.get('tasks', []))
 
     # ==========================================
     # Batch Connector State Helpers

@@ -553,6 +553,11 @@ DEBEZIUM_CONFIG = {
 # KAFKA TOPIC CONFIGURATION
 # ====================================
 KAFKA_TOPIC_CONFIG = {
+    # WARNING: keep this at 1. TRUNCATE (op="t") events are keyless, so with >1
+    # partition Kafka gives no ordering between a truncate and the row events of the
+    # same table (Debezium documents this). A single partition keeps each table's
+    # change stream — truncate included — in strict binlog order, which the truncate
+    # watcher's sink-offset gating relies on. Raise only if you accept weaker ordering.
     'PARTITIONS': int(os.getenv('KAFKA_TOPIC_PARTITIONS', '1')),
     'REPLICATION_FACTOR': int(os.getenv('KAFKA_TOPIC_REPLICATION_FACTOR', '3')),
     'RETENTION_MS': int(os.getenv('KAFKA_TOPIC_RETENTION_MS', '604800000')),  # 7 days

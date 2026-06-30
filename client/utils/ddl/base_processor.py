@@ -325,6 +325,10 @@ def _apply_truncate_and_snapshot(replication_config, source_table: str, table_ma
 
     logger.info(f"  ✓ Target table '{table_mapping.target_table}' truncated")
 
+    # The target is now empty; the snapshot signal is what refills it. If the signal
+    # fails we MUST report failure so the caller retries the whole truncate+snapshot
+    # (the watcher keeps it pending; the orchestrator keeps it in pending_truncates).
+    # Returning success here would leave the target permanently empty.
     try:
         from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
         signal_id, method = send_incremental_snapshot_signal(
@@ -333,10 +337,10 @@ def _apply_truncate_and_snapshot(replication_config, source_table: str, table_ma
             [source_table]
         )
         logger.info(f"  ✓ Snapshot signal sent (ID: {signal_id}, via {method})")
+        return True
     except Exception as e:
         logger.error(
             f"  ✗ Snapshot signal failed for '{source_table}': {e} "
-            f"— target is truncated, manual resync may be needed"
+            f"— target is truncated and empty; resync will be retried"
         )
-
-    return True
+        return False

@@ -54,6 +54,7 @@ class PostgreSQLTargetAdapter(BaseTargetAdapter):
             DDLOperationType.DROP_INDEX: self._handle_drop_index,
             DDLOperationType.ADD_PRIMARY_KEY: self._handle_add_primary_key,
             DDLOperationType.DROP_PRIMARY_KEY: self._handle_drop_primary_key,
+            DDLOperationType.RENAME_TABLE: self._handle_rename_table,
         }
 
         handler = handlers.get(operation.operation_type)
@@ -177,6 +178,17 @@ class PostgreSQLTargetAdapter(BaseTargetAdapter):
         constraint_name = f"{operation.table_name}_pkey"
         sql = f'ALTER TABLE {full_table} DROP CONSTRAINT IF EXISTS "{constraint_name}"'
         logger.info(f"Dropping primary key from {operation.table_name}")
+        return self.execute_sql(sql)
+
+    def _handle_rename_table(self, operation: 'DDLOperation') -> Tuple[bool, Optional[str]]:
+        """Handle RENAME TABLE operation."""
+        new_name = operation.details.get('new_name')
+        if not new_name:
+            return False, "RENAME_TABLE missing 'new_name'"
+        full_table = self._full_table_name(operation.table_name)
+        # PostgreSQL: the new name in RENAME TO must be unqualified (same schema).
+        sql = f'ALTER TABLE {full_table} RENAME TO "{new_name}"'
+        logger.info(f"Renaming table {operation.table_name} -> {new_name}")
         return self.execute_sql(sql)
 
     def generate_create_table(

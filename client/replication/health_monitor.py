@@ -56,8 +56,6 @@ def monitor_replication_health():
             overall_health = status['overall']
             source_connector_health = status['source_connector']['healthy']
             sink_connector_health = status['sink_connector']['healthy']
-            source_state = status['source_connector']['state']
-            sink_state = status['sink_connector']['state']
 
             logger.info(f"[{config.connector_name}] Health: {overall_health} "
                        f"(Source: {'✓' if source_connector_health else '✗'}, "
@@ -77,7 +75,7 @@ def monitor_replication_health():
             elif overall_health == 'degraded':
                 degraded_count += 1
                 # Send alerts for specific failure states
-                _check_and_alert(config, source_state, sink_state)
+                _check_and_alert(config, status['source_connector'], status['sink_connector'])
                 # Try to fix degraded state
                 if _try_fix_degraded(config, status):
                     fixed_count += 1
@@ -85,7 +83,7 @@ def monitor_replication_health():
             else:
                 failed_count += 1
                 # Send alerts for specific failure states
-                _check_and_alert(config, source_state, sink_state)
+                _check_and_alert(config, status['source_connector'], status['sink_connector'])
                 # Update config to error state
                 config.status = 'error'
                 config.save()
@@ -105,19 +103,33 @@ def monitor_replication_health():
     logger.info("=" * 60)
 
 
-def _check_and_alert(config, source_state, sink_state):
+def _has_failed_task(status):
+    """True if any task in the connector status is in the FAILED state."""
+    return any(t.get('state') == 'FAILED' for t in status.get('tasks', []))
+
+
+def _check_and_alert(config, source_status, sink_status):
     """
     Fire transition-based alert emails for FAILED / NOT_FOUND connector states.
+
+    A connector whose top-level state is RUNNING but which has a FAILED task
+    (the usual shape of a source/sink DB outage) is treated as failed too.
     maybe_send_alert ensures only one email per incident (no spam).
     """
     src = config.connector_name or ''
     snk = config.sink_connector_name or ''
 
-    if source_state == 'FAILED':
+    source_state = source_status.get('state')
+    sink_state = sink_status.get('state')
+    source_failed = source_state == 'FAILED' or _has_failed_task(source_status)
+    sink_failed = sink_state == 'FAILED' or _has_failed_task(sink_status)
+
+    if source_failed:
         maybe_send_alert(
             config, 'source_failed',
             subject=f"Source Connector FAILED: {src}",
-            body=f"Source connector entered FAILED state. Check Kafka Connect logs for details.",
+            body="Source connector (or its task) entered FAILED state — the source "
+                 "database may be unresponsive. Check Kafka Connect logs for details.",
             connector_name=src,
         )
     elif source_state == 'NOT_FOUND':
@@ -128,11 +140,11 @@ def _check_and_alert(config, source_state, sink_state):
             connector_name=src,
         )
 
-    if sink_state == 'FAILED' and snk:
+    if sink_failed and snk:
         maybe_send_alert(
             config, 'sink_failed',
             subject=f"Sink Connector FAILED: {snk}",
-            body=f"Sink connector entered FAILED state. Check Kafka Connect logs for details.",
+            body="Sink connector (or its task) entered FAILED state. Check Kafka Connect logs for details.",
             connector_name=snk,
         )
 
@@ -203,7 +215,7 @@ def _fix_sink_connector(config, sink_status):
             logger.error(f"[{config.sink_connector_name}] Failed to resume sink connector: {e}")
             return False
 
-    # Check if connector is failed
+    # Connector-level FAILED → restart the whole connector
     elif sink_state == 'FAILED':
         logger.warning(f"[{config.sink_connector_name}] Sink connector is FAILED, restarting...")
 
@@ -215,7 +227,9 @@ def _fix_sink_connector(config, sink_status):
             logger.error(f"[{config.sink_connector_name}] Failed to restart sink connector: {e}")
             return False
 
-    return False
+    # Connector RUNNING but one or more tasks FAILED (e.g. target DB outage) →
+    # restart just the failed task(s).
+    return _restart_failed_tasks(config, config.sink_connector_name, sink_status)
 
 
 def _fix_source_connector(config, connector_status):
@@ -248,7 +262,7 @@ def _fix_source_connector(config, connector_status):
             logger.error(f"[{config.connector_name}] Failed to resume connector: {e}")
             return False
 
-    # Check if connector is failed
+    # Connector-level FAILED → restart the whole connector
     elif connector_state == 'FAILED':
         logger.warning(f"[{config.connector_name}] Connector is FAILED, restarting...")
 
@@ -260,4 +274,30 @@ def _fix_source_connector(config, connector_status):
             logger.error(f"[{config.connector_name}] Failed to restart connector: {e}")
             return False
 
-    return False
+    # Connector RUNNING but one or more tasks FAILED (e.g. source DB went
+    # unresponsive / lost the binlog connection) → restart just the failed task(s).
+    return _restart_failed_tasks(config, config.connector_name, connector_status)
+
+
+def _restart_failed_tasks(config, connector_name, status) -> bool:
+    """
+    Restart every FAILED task of a connector whose top-level state is otherwise
+    RUNNING. This is the recovery path for a source/target DB outage, where the
+    connector stays RUNNING while its task drops into FAILED.
+
+    Delegates to the orchestrator's canonical restart_failed_tasks() (handles the
+    task-level restart calls, error aggregation and audit logging).
+
+    Returns True if the restart succeeded.
+    """
+    if not _has_failed_task(status):
+        return False
+
+    from .orchestrator import ReplicationOrchestrator
+
+    success, message = ReplicationOrchestrator(config).restart_failed_tasks(connector_name)
+    if success:
+        logger.info(f"[{connector_name}] ✓ {message}")
+    else:
+        logger.error(f"[{connector_name}] Failed to restart tasks: {message}")
+    return success

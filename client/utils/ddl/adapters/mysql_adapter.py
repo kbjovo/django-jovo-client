@@ -46,6 +46,7 @@ class MySQLTargetAdapter(BaseTargetAdapter):
             DDLOperationType.DROP_INDEX: self._handle_drop_index,
             DDLOperationType.ADD_PRIMARY_KEY: self._handle_add_primary_key,
             DDLOperationType.DROP_PRIMARY_KEY: self._handle_drop_primary_key,
+            DDLOperationType.RENAME_TABLE: self._handle_rename_table,
         }
 
         handler = handlers.get(operation.operation_type)
@@ -189,6 +190,15 @@ class MySQLTargetAdapter(BaseTargetAdapter):
         """Handle DROP PRIMARY KEY operation."""
         sql = f"ALTER TABLE `{operation.table_name}` DROP PRIMARY KEY"
         logger.info(f"Dropping primary key from {operation.table_name}")
+        return self.execute_sql(sql)
+
+    def _handle_rename_table(self, operation: 'DDLOperation') -> Tuple[bool, Optional[str]]:
+        """Handle RENAME TABLE operation."""
+        new_name = operation.details.get('new_name')
+        if not new_name:
+            return False, "RENAME_TABLE missing 'new_name'"
+        sql = f"RENAME TABLE `{operation.table_name}` TO `{new_name}`"
+        logger.info(f"Renaming table {operation.table_name} -> {new_name}")
         return self.execute_sql(sql)
 
     def generate_create_table(

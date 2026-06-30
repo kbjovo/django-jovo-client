@@ -134,7 +134,7 @@ def get_mysql_sink_connector_config(
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
     schema_registry_url: str = None,
-    delete_enabled: bool = False,
+    delete_enabled: bool = True,  # must stay coupled to the hard-delete unwrap transform below
     custom_config: Optional[Dict[str, Any]] = None,
     replication_config=None,
 ) -> Dict[str, Any]:
@@ -160,7 +160,10 @@ def get_mysql_sink_connector_config(
     connector_name = ''.join(c for c in connector_name if c.isalnum() or c == '_')
 
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
-    jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}?autoReconnect=true"
+    # autoReconnect dropped: Connector/J advises against it (can resurrect a connection in a
+    # bad state). c3p0 testConnectionOnCheckout below is the correct liveness mechanism.
+    # connectTimeout fails fast when the target is down so control returns to the retry loop.
+    jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}?connectTimeout=30000"
 
     # Source DB id scopes this sink to a single source connector's topics (one sink per
     # source connector). Falls back to a wildcard only if no replication_config is given.
@@ -189,8 +192,11 @@ def get_mysql_sink_connector_config(
         # 3. extractTableName: routes remaining topics using the $1_$2 pattern.
         # Custom rename transforms are injected below after querying table mappings.
         "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-        "transforms.unwrap.drop.tombstones": "true",
-        "transforms.unwrap.delete.handling.mode": "rewrite",
+        # Hard deletes: keep the null-value tombstone and pass the delete event through
+        # untouched so the JDBC sink (delete.enabled=true) issues a physical DELETE on the
+        # target row. 'rewrite' would instead soft-delete by upserting __deleted=true.
+        "transforms.unwrap.drop.tombstones": "false",
+        "transforms.unwrap.delete.handling.mode": "none",
 
         "transforms.extractTableName.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.extractTableName.regex": ".*\\.([^.]+)\\.([^.]+)",
@@ -212,11 +218,18 @@ def get_mysql_sink_connector_config(
         "primary.key.mode": "record_key",
         "delete.enabled": str(delete_enabled).lower(),
         "batch.size": str(replication_config.sink_batch_size) if replication_config and hasattr(replication_config, 'sink_batch_size') else "3000",
-        "max.retries": "10",
-        "retry.backoff.ms": "3000",
+        # Long retry window so a multi-hour target outage doesn't fail the task.
+        # 600 x 30s = ~5h. Belt-and-suspenders alongside errors.retry.timeout below, which is
+        # the framework-level lever the Debezium JDBC sink actually honors on connection loss.
+        "max.retries": "600",
+        "retry.backoff.ms": "30000",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
         "topic.tracking.refresh.interval.ms": "5000",
+        # Must exceed the retry window: while put() is blocked retrying a downed target the
+        # task isn't polling, and if that gap exceeds max.poll.interval.ms the consumer is
+        # evicted from the group (rebalance/flap). 6h > the ~5h retry window above.
+        "consumer.override.max.poll.interval.ms": "21600000",
         "consumer.override.metadata.max.age.ms": "10000",
         # Permanent: controls how many records sink pulls per poll (should be >= batch.size)
         "consumer.override.max.poll.records": str(replication_config.sink_max_poll_records) if replication_config and hasattr(replication_config, 'sink_max_poll_records') else "5000",
@@ -232,6 +245,11 @@ def get_mysql_sink_connector_config(
         # Error handling (configurable via settings)
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
+        # Framework-level retry: on a retriable write failure (e.g. target DB down) keep
+        # retrying for up to 5h before the task fails, backing off up to 60s between tries.
+        # errors.tolerance stays 'none' so rows are never silently skipped — retry, then wait.
+        "errors.retry.timeout": "18000000",
+        "errors.retry.delay.max.ms": "60000",
     }
 
     # Apply DLQ settings from Django settings
@@ -257,17 +275,6 @@ def get_mysql_sink_connector_config(
     if primary_key_fields:
         config["primary.key.fields"] = primary_key_fields
 
-    # Use topics.regex for auto-subscription to all source connector topics
-    # This allows sink to automatically subscribe when new source connectors are added
-    # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
-    # Excludes: ddl_events and debezium_signal tables (DDL events are processed separately)
-    # Note: signals topic (client_X_db_Y_v_Z.signals) is naturally excluded as it has only 2 parts
-    # Matches both 3-segment topics (MySQL/PostgreSQL: prefix.db.table) and
-    # 4-segment topics (SQL Server/Oracle: prefix.db.schema.table).
-    # The middle optional group (?:[^.]+\.)? absorbs the extra schema segment.
-    # Scope to a single source connector's topics: client_{cid}_db_{src_db_id}_v_{ver}.*
-    # (one sink per source connector). Fall back to the client-wide wildcard only when
-    # no replication_config was supplied.
     db_segment = str(src_db_id) if src_db_id else "\\d+"
     topic_regex = f"client_{client.id}_db_{db_segment}_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
@@ -296,7 +303,7 @@ def get_postgresql_sink_connector_config(
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
     schema_registry_url: str = None,
-    delete_enabled: bool = False,
+    delete_enabled: bool = True,  # must stay coupled to the hard-delete unwrap transform below
     custom_config: Optional[Dict[str, Any]] = None,
     replication_config=None,
 ) -> Dict[str, Any]:
@@ -346,8 +353,11 @@ def get_postgresql_sink_connector_config(
         # not at the top level — causing the connector task to fail and preventing table creation.
         # Custom per-table rename transforms are injected below after querying table mappings.
         "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-        "transforms.unwrap.drop.tombstones": "true",
-        "transforms.unwrap.delete.handling.mode": "rewrite",
+        # Hard deletes: keep the null-value tombstone and pass the delete event through
+        # untouched so the JDBC sink (delete.enabled=true) issues a physical DELETE on the
+        # target row. 'rewrite' would instead soft-delete by upserting __deleted=true.
+        "transforms.unwrap.drop.tombstones": "false",
+        "transforms.unwrap.delete.handling.mode": "none",
 
         "transforms.extractTableName.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.extractTableName.regex": ".*\\.([^.]+)\\.([^.]+)",
@@ -379,11 +389,18 @@ def get_postgresql_sink_connector_config(
         "primary.key.mode": "record_key",
         "delete.enabled": str(delete_enabled).lower(),
         "batch.size": str(replication_config.sink_batch_size) if replication_config and hasattr(replication_config, 'sink_batch_size') else "3000",
-        "max.retries": "10",
-        "retry.backoff.ms": "3000",
+        # Long retry window so a multi-hour target outage doesn't fail the task.
+        # 600 x 30s = ~5h. Belt-and-suspenders alongside errors.retry.timeout below, which is
+        # the framework-level lever the Debezium JDBC sink actually honors on connection loss.
+        "max.retries": "600",
+        "retry.backoff.ms": "30000",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
         "topic.tracking.refresh.interval.ms": "5000",
+        # Must exceed the retry window: while put() is blocked retrying a downed target the
+        # task isn't polling, and if that gap exceeds max.poll.interval.ms the consumer is
+        # evicted from the group (rebalance/flap). 6h > the ~5h retry window above.
+        "consumer.override.max.poll.interval.ms": "21600000",
         "consumer.override.metadata.max.age.ms": "10000",
         # Permanent: controls how many records sink pulls per poll (should be >= batch.size)
         "consumer.override.max.poll.records": str(replication_config.sink_max_poll_records) if replication_config and hasattr(replication_config, 'sink_max_poll_records') else "5000",
@@ -399,6 +416,11 @@ def get_postgresql_sink_connector_config(
         # Error handling (configurable via settings)
         "errors.log.enable": "true",
         "errors.log.include.messages": "true",
+        # Framework-level retry: on a retriable write failure (e.g. target DB down) keep
+        # retrying for up to 5h before the task fails, backing off up to 60s between tries.
+        # errors.tolerance stays 'none' so rows are never silently skipped — retry, then wait.
+        "errors.retry.timeout": "18000000",
+        "errors.retry.delay.max.ms": "60000",
     }
 
     # Apply DLQ settings from Django settings
@@ -460,7 +482,7 @@ def get_sink_connector_config_for_database(
     topics: Optional[List[str]] = None,
     kafka_bootstrap_servers: str = None,
     schema_registry_url: str = None,
-    delete_enabled: bool = False,
+    delete_enabled: bool = True,  # must stay coupled to the hard-delete unwrap transform below
     custom_config: Optional[Dict[str, Any]] = None,
     primary_key_fields: Optional[str] = None,  # Deprecated - pass via custom_config instead
     replication_config=None,
