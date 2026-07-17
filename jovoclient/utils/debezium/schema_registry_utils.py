@@ -300,14 +300,21 @@ def get_schema_field_info(topic_prefix: str, table_name: str) -> Dict[str, Any]:
         }
 
 
-def delete_schema_subject(subject_name: str, permanent: bool = True) -> bool:
+def delete_schema_subject(subject_name: str, permanent: bool = False) -> bool:
     """
     Delete a schema subject from Schema Registry
 
     Args:
         subject_name: Schema subject name (e.g., 'client_1_db_2.kbe.busyuk_items-key')
-        permanent: If True, performs hard delete (removes all versions permanently)
-                  If False, performs soft delete (can be restored)
+        permanent: If True, hard delete — removes every version AND the schema ids
+                  permanently. Only safe when the backing topic is also being deleted:
+                  any messages still retained on the topic carry the schema id, and a
+                  hard delete makes them undeserializable, so the sink fails with
+                  "Schema <id> not found; error code: 40403".
+                  Default False (soft delete): the subject is hidden and a new,
+                  even incompatible, version can still be registered, but
+                  GET /schemas/ids/{id} keeps resolving so already-published
+                  messages stay readable.
 
     Returns:
         True if deletion was successful, False otherwise
@@ -347,14 +354,17 @@ def delete_schema_subject(subject_name: str, permanent: bool = True) -> bool:
         return False
 
 
-def delete_table_schemas(topic_prefix: str, table_name: str, permanent: bool = True) -> Dict[str, bool]:
+def delete_table_schemas(topic_prefix: str, table_name: str, permanent: bool = False) -> Dict[str, bool]:
     """
     Delete both key and value schemas for a table
 
     Args:
         topic_prefix: Debezium topic prefix (e.g., 'client_1_db_2')
         table_name: Full table name including database (e.g., 'kbe.busyuk_items')
-        permanent: If True, performs hard delete (default: True)
+        permanent: If True, hard delete (default: False — soft delete). Only pass
+                  True when the table's topic is also being deleted; see
+                  delete_schema_subject() for why hard-deleting a live topic's
+                  schemas breaks the sink.
 
     Returns:
         Dict with deletion results for key and value schemas
@@ -376,14 +386,14 @@ def delete_table_schemas(topic_prefix: str, table_name: str, permanent: bool = T
     return results
 
 
-def delete_schemas_for_tables(topic_prefix: str, table_names: List[str], permanent: bool = True) -> Dict[str, Dict[str, bool]]:
+def delete_schemas_for_tables(topic_prefix: str, table_names: List[str], permanent: bool = False) -> Dict[str, Dict[str, bool]]:
     """
     Delete schemas for multiple tables
 
     Args:
         topic_prefix: Debezium topic prefix
         table_names: List of table names
-        permanent: If True, performs hard delete
+        permanent: If True, performs hard delete (default: False — soft delete)
 
     Returns:
         Dict mapping table names to their deletion results

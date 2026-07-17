@@ -29,6 +29,7 @@ from client.models.replication import ReplicationConfig, ConnectorHistory
 from client.utils.database_utils import get_table_cdc_status
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
+from jovoclient.utils.debezium.schema_registry_utils import set_compatibility_mode
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
 
@@ -152,6 +153,13 @@ def provision_source(request, config_pk):
             replication_config=replication_config,
             tables_whitelist=tables_list,
         )
+
+        # Disable Schema Registry compatibility checks (global NONE) so breaking DDL
+        # (rename/drop column, type change) can register a new schema version without
+        # deleting the old one. Deleting a schema orphans retained messages that carry
+        # its id -> sink fails with 40403 "Schema not found".
+        if not set_compatibility_mode(None, "NONE"):
+            logger.warning("Could not set Schema Registry compatibility to NONE before provisioning source")
 
         source_success, source_error = connector_manager.create_connector(replication_config.connector_name, source_config)
         if not source_success:

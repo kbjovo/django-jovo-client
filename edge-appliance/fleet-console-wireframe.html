@@ -1,0 +1,465 @@
+<style>
+  :root {
+    /* cool-slate neutrals, biased toward the signal-blue accent */
+    --page: #F4F6F8;
+    --surface: #FFFFFF;
+    --surface-2: #EEF1F4;
+    --ink: #1C2530;
+    --muted: #5C6875;
+    --faint: #8A96A3;
+    --line: #D8DDE4;
+    --line-strong: #C2C9D2;
+    --accent: #2E6E96;
+    --accent-ink: #1F5578;
+
+    --ok: #2F8A5B;      --ok-bg: #E4F1EA;
+    --warn: #A9781F;    --warn-bg: #F5ECD8;
+    --bad: #B34A3F;     --bad-bg: #F4E2DF;
+    --pending: #6B7683; --pending-bg: #E7EAEE;
+
+    --r: 8px;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0F1318; --surface: #171C23; --surface-2: #1D242C;
+      --ink: #E7EBF0; --muted: #97A3B2; --faint: #6E7A88;
+      --line: #2A313B; --line-strong: #3A424E;
+      --accent: #5BA3D0; --accent-ink: #7FBBE0;
+      --ok: #5FBE8C; --ok-bg: #16281E;
+      --warn: #D6AC4D; --warn-bg: #2B2413;
+      --bad: #DB7A6E; --bad-bg: #2E1B18;
+      --pending: #93A0AE; --pending-bg: #1E252D;
+    }
+  }
+  :root[data-theme="light"] {
+    --page: #F4F6F8; --surface: #FFFFFF; --surface-2: #EEF1F4;
+    --ink: #1C2530; --muted: #5C6875; --faint: #8A96A3;
+    --line: #D8DDE4; --line-strong: #C2C9D2;
+    --accent: #2E6E96; --accent-ink: #1F5578;
+    --ok: #2F8A5B; --ok-bg: #E4F1EA;
+    --warn: #A9781F; --warn-bg: #F5ECD8;
+    --bad: #B34A3F; --bad-bg: #F4E2DF;
+    --pending: #6B7683; --pending-bg: #E7EAEE;
+  }
+  :root[data-theme="dark"] {
+    --page: #0F1318; --surface: #171C23; --surface-2: #1D242C;
+    --ink: #E7EBF0; --muted: #97A3B2; --faint: #6E7A88;
+    --line: #2A313B; --line-strong: #3A424E;
+    --accent: #5BA3D0; --accent-ink: #7FBBE0;
+    --ok: #5FBE8C; --ok-bg: #16281E;
+    --warn: #D6AC4D; --warn-bg: #2B2413;
+    --bad: #DB7A6E; --bad-bg: #2E1B18;
+    --pending: #93A0AE; --pending-bg: #1E252D;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font-family: var(--sans); line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 72px; }
+  .stack { display: flex; flex-direction: column; }
+  h1, h2, h3 { text-wrap: balance; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  p { margin: 0; }
+  .mono { font-family: var(--mono); }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--faint);
+  }
+
+  /* ---- page header ---- */
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }
+  .head h1 { font-size: 26px; }
+  .head .sub { color: var(--muted); font-size: 14px; margin-top: 6px; max-width: 62ch; }
+  .badge {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+    border: 1px dashed var(--line-strong); color: var(--muted);
+    padding: 6px 10px; border-radius: 6px; white-space: nowrap;
+  }
+
+  /* ---- screen region (wireframe container) ---- */
+  .screen {
+    position: relative; background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--r);
+    padding: 20px; margin-top: 34px;
+  }
+  .screen-tag {
+    position: absolute; top: -11px; left: 16px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    background: var(--page); color: var(--faint);
+    padding: 2px 8px; border: 1px solid var(--line); border-radius: 5px;
+  }
+  .screen > h2 { font-size: 16px; margin-bottom: 4px; }
+  .screen > .note { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+
+  /* ---- browser chrome frame ---- */
+  .frame { border: 1px solid var(--line-strong); border-radius: 10px; overflow: hidden; background: var(--surface); }
+  .frame-bar { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+  .dots { display: flex; gap: 6px; }
+  .dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--line-strong); display: block; }
+  .url { font-family: var(--mono); font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; flex: 1; }
+  .frame-body { padding: 18px; }
+  .frame-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .frame-topbar h3 { font-size: 15px; }
+
+  /* ---- buttons ---- */
+  .btn { font-family: var(--sans); font-size: 13px; font-weight: 600; border-radius: 6px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---- stat tiles ---- */
+  .tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
+  .tile { border: 1px solid var(--line); border-radius: var(--r); padding: 12px 14px; background: var(--surface); }
+  .tile .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+  .tile .v { font-size: 24px; font-weight: 650; margin-top: 4px; }
+  .tile .v small { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .tile.ok .v { color: var(--ok); } .tile.warn .v { color: var(--warn); }
+  .tile.bad .v { color: var(--bad); } .tile.pending .v { color: var(--pending); }
+
+  /* ---- table ---- */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 720px; }
+  th { text-align: left; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); font-weight: 500; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+  td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  .appl { font-weight: 600; }
+  .appl small { display: block; font-family: var(--mono); font-size: 11px; color: var(--faint); font-weight: 400; }
+  .plat { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+  /* ---- status pill ---- */
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 9px; border-radius: 20px; font-weight: 500; }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.ok { color: var(--ok); background: var(--ok-bg); }
+  .pill.warn { color: var(--warn); background: var(--warn-bg); }
+  .pill.bad { color: var(--bad); background: var(--bad-bg); }
+  .pill.pending { color: var(--pending); background: var(--pending-bg); }
+
+  /* ---- annotation chips + legend ---- */
+  .anno { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--accent); color: var(--accent); font-family: var(--mono); font-size: 10.5px; font-weight: 700; vertical-align: middle; margin-left: 6px; }
+  .legend { margin-top: 34px; border-top: 1px solid var(--line); padding-top: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
+  .legend .li { display: flex; gap: 10px; font-size: 13px; color: var(--muted); }
+  .legend .li b { color: var(--ink); font-weight: 600; }
+
+  /* ---- concept topology strip ---- */
+  .topo { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }
+  .node { flex: 1; min-width: 150px; border: 1px solid var(--line); border-radius: var(--r); padding: 14px; background: var(--surface); }
+  .node .t { font-weight: 600; font-size: 13px; }
+  .node .d { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 4px; }
+  .arrow { display: flex; align-items: center; justify-content: center; padding: 0 10px; color: var(--faint); font-family: var(--mono); font-size: 12px; text-align: center; min-width: 92px; }
+  .arrow span { display: block; }
+  .arrow small { font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+
+  /* ---- stepper ---- */
+  .stepper { display: flex; gap: 0; margin-bottom: 18px; flex-wrap: wrap; }
+  .step { flex: 1; min-width: 140px; border: 1px solid var(--line); border-right: none; padding: 12px 14px; background: var(--surface); }
+  .step:last-child { border-right: 1px solid var(--line); border-radius: 0 var(--r) var(--r) 0; }
+  .step:first-child { border-radius: var(--r) 0 0 var(--r); }
+  .step .n { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .step .l { font-size: 13px; font-weight: 600; margin-top: 3px; }
+  .step.active { border-color: var(--accent); background: var(--surface); }
+  .step.active .n { color: var(--accent); }
+  .step.active .l { color: var(--accent-ink); }
+
+  /* ---- form-factor cards ---- */
+  .ff { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .ff-card { border: 1px solid var(--line); border-radius: var(--r); padding: 16px; background: var(--surface); position: relative; }
+  .ff-card.rec { border-color: var(--accent); }
+  .ff-card .rec-tag { position: absolute; top: -9px; right: 12px; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; background: var(--accent); color: #fff; padding: 2px 7px; border-radius: 4px; }
+  .ff-card h4 { margin: 0 0 4px; font-size: 14px; }
+  .ff-card .os { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .ff-card ul { margin: 12px 0 0; padding-left: 16px; font-size: 12px; color: var(--muted); }
+  .ff-card li { margin-bottom: 4px; }
+
+  /* ---- token row ---- */
+  .token-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+  .token { font-family: var(--mono); font-size: 13px; background: var(--surface-2); border: 1px dashed var(--line-strong); border-radius: 6px; padding: 8px 12px; color: var(--ink); letter-spacing: 0.04em; }
+
+  /* ---- detail grid ---- */
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .panel { border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; background: var(--surface); }
+  .panel h4 { font-size: 12px; font-family: var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); font-weight: 500; margin-bottom: 10px; }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 13px; border-bottom: 1px dotted var(--line); }
+  .kv:last-child { border-bottom: none; }
+  .kv .kk { color: var(--muted); }
+  .kv .vv { font-family: var(--mono); font-size: 12px; text-align: right; }
+
+  /* component health strip */
+  .comp-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+  .comp { border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; background: var(--surface); display: flex; align-items: center; gap: 8px; }
+  .comp .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+  .comp .nm { font-size: 12px; }
+  .comp .nm small { display: block; font-family: var(--mono); font-size: 10px; color: var(--faint); }
+
+  /* data flow mini */
+  .flow { display: flex; align-items: stretch; gap: 0; margin-top: 12px; flex-wrap: wrap; }
+  .flow .fnode { flex: 1; min-width: 130px; border: 1px solid var(--line); border-radius: var(--r); padding: 12px; background: var(--surface-2); text-align: center; }
+  .flow .fnode .ft { font-size: 12px; font-weight: 600; }
+  .flow .fnode .fd { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 3px; }
+  .flow .farrow { display: flex; align-items: center; justify-content: center; padding: 0 8px; color: var(--accent); font-family: var(--mono); font-size: 11px; min-width: 84px; text-align: center; }
+
+  /* ---- delivery matrix ---- */
+  .matrix td .plat { color: var(--ink); }
+  .matrix .deliver { font-weight: 600; }
+
+  @media (max-width: 720px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .ff, .detail-grid, .comp-strip { grid-template-columns: 1fr; }
+    .legend { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="wrap">
+
+  <div class="head">
+    <div>
+      <div class="eyebrow">Replication Edge · Product Concept</div>
+      <h1 style="margin-top:8px;">Edge Appliance — Fleet Console</h1>
+      <p class="sub">How the data-plane appliance is installed at a client, phones home, and is
+        driven by the central application. Screens below are low-fidelity wireframes for
+        discussion — layout and flow, not final visuals.</p>
+    </div>
+    <div class="badge">WIREFRAME · v0.1<br>for management review</div>
+  </div>
+
+  <!-- CONCEPT TOPOLOGY -->
+  <div class="screen">
+    <span class="screen-tag">Concept · one appliance</span>
+    <h2>Central control, local data</h2>
+    <p class="note">The appliance runs beside the client's databases. Only small HTTP control
+      messages cross the network<span class="anno">4</span> — the data never leaves the client LAN<span class="anno">6</span>.</p>
+    <div class="topo">
+      <div class="node">
+        <div class="t">Central · jovoserver</div>
+        <div class="d">Django + Celery<br>fleet console</div>
+      </div>
+      <div class="arrow"><span>◀──▶<br><small>HTTP tunnel</small><br>Connect REST</span></div>
+      <div class="node" style="border-color:var(--accent);">
+        <div class="t">Edge Appliance</div>
+        <div class="d">Kafka · Connect · SR<br>DDL consumer · agent</div>
+      </div>
+      <div class="arrow"><span>◀──▶<br><small>client LAN</small><br>&lt;1 ms</span></div>
+      <div class="node">
+        <div class="t">Client databases</div>
+        <div class="d">source ·&nbsp;sink<br>(any OS)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN 1: FLEET CONSOLE -->
+  <div class="screen">
+    <span class="screen-tag">Screen 1 · Fleet overview</span>
+    <h2>Appliance fleet at a glance</h2>
+    <p class="note">One row per deployed appliance. State is encoded as a colored pill so anything
+      needing attention reads instantly.</p>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <div class="url">fleet.replication.internal / appliances</div>
+      </div>
+      <div class="frame-body">
+        <div class="frame-topbar">
+          <h3>Appliances</h3>
+          <button class="btn primary">+ Enroll appliance<span class="anno" style="border-color:#fff;color:#fff;">1</span></button>
+        </div>
+
+        <div class="tiles">
+          <div class="tile"><div class="k">Total</div><div class="v">24</div></div>
+          <div class="tile ok"><div class="k">Online</div><div class="v">19</div></div>
+          <div class="tile warn"><div class="k">Degraded</div><div class="v">3</div></div>
+          <div class="tile bad"><div class="k">Offline</div><div class="v">1</div></div>
+          <div class="tile pending"><div class="k">Pending</div><div class="v">1</div></div>
+        </div>
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Appliance</th><th>Client</th><th>Platform</th><th>Version</th><th>Status</th><th>Last heartbeat</th><th>Throughput</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="appl">edge-acme-01<small>ID a1f3·9c</small></td>
+                <td>Acme Corp</td>
+                <td class="plat">VM · Hyper-V</td>
+                <td class="plat">1.4.2</td>
+                <td><span class="pill ok">online</span></td>
+                <td class="plat">4s ago</td>
+                <td class="plat">1,240 r/s</td>
+              </tr>
+              <tr>
+                <td class="appl">edge-northwind<small>ID b7e0·22</small></td>
+                <td>Northwind Ltd</td>
+                <td class="plat">Linux · Docker</td>
+                <td class="plat">1.4.2</td>
+                <td><span class="pill ok">online</span></td>
+                <td class="plat">6s ago</td>
+                <td class="plat">318 r/s</td>
+              </tr>
+              <tr>
+                <td class="appl">edge-globex-02<small>ID 4dd1·af</small></td>
+                <td>Globex</td>
+                <td class="plat">Windows · WSL2</td>
+                <td class="plat">1.3.9</td>
+                <td><span class="pill warn">degraded</span></td>
+                <td class="plat">31s ago</td>
+                <td class="plat">— lagging</td>
+              </tr>
+              <tr>
+                <td class="appl">edge-initech<small>ID 90ac·1b</small></td>
+                <td>Initech</td>
+                <td class="plat">VM · VMware</td>
+                <td class="plat">1.4.2</td>
+                <td><span class="pill bad">offline</span></td>
+                <td class="plat">12m ago</td>
+                <td class="plat">—</td>
+              </tr>
+              <tr>
+                <td class="appl">edge-umbrella<small>awaiting first contact</small></td>
+                <td>Umbrella Inc</td>
+                <td class="plat">Windows · MSI</td>
+                <td class="plat">—</td>
+                <td><span class="pill pending">enrolling</span></td>
+                <td class="plat">never</td>
+                <td class="plat">—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN 2: ENROLL -->
+  <div class="screen">
+    <span class="screen-tag">Screen 2 · Enroll appliance</span>
+    <h2>Onboarding — same four steps on every OS</h2>
+    <p class="note">Only the downloaded artifact differs by platform<span class="anno">2</span>. The appliance
+      registers itself on first boot<span class="anno">3</span>.</p>
+
+    <div class="stepper">
+      <div class="step"><div class="n">01</div><div class="l">Pick client</div></div>
+      <div class="step active"><div class="n">02</div><div class="l">Choose platform</div></div>
+      <div class="step"><div class="n">03</div><div class="l">Token &amp; download</div></div>
+      <div class="step"><div class="n">04</div><div class="l">Phone home</div></div>
+    </div>
+
+    <div class="ff">
+      <div class="ff-card rec">
+        <span class="rec-tag">Recommended</span>
+        <h4>VM appliance</h4>
+        <div class="os">OVA · VHDX · QCOW2</div>
+        <ul>
+          <li>Import &amp; power on</li>
+          <li>OS-independent</li>
+          <li>Runs its own Linux</li>
+        </ul>
+      </div>
+      <div class="ff-card">
+        <h4>Windows installer</h4>
+        <div class="os">.exe / MSI · service</div>
+        <ul>
+          <li>Docker / Podman on WSL2</li>
+          <li>Registers Windows Service</li>
+          <li>Broker stays in a container</li>
+        </ul>
+      </div>
+      <div class="ff-card">
+        <h4>Linux service</h4>
+        <div class="os">install.sh · .deb / .rpm</div>
+        <ul>
+          <li>Docker / Podman native</li>
+          <li>systemd unit, autostart</li>
+          <li>Lightest footprint</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="token-row">
+      <span class="eyebrow">One-time enrollment token</span>
+      <span class="token">EDGE-4K9F-2XQ7-M1AB · expires 24h</span>
+      <button class="btn">Copy</button>
+      <button class="btn primary">Download artifact</button>
+    </div>
+  </div>
+
+  <!-- SCREEN 3: DETAIL -->
+  <div class="screen">
+    <span class="screen-tag">Screen 3 · Appliance detail</span>
+    <div class="frame-topbar" style="margin-bottom:14px;">
+      <h2>edge-acme-01 · Acme Corp <span class="pill ok" style="vertical-align:middle;">online</span></h2>
+      <button class="btn">Restart stack</button>
+    </div>
+
+    <div class="detail-grid">
+      <div class="panel">
+        <h4>Connection<span class="anno">4</span></h4>
+        <div class="kv"><span class="kk">Tunnel</span><span class="vv" style="color:var(--ok);">WireGuard · up</span></div>
+        <div class="kv"><span class="kk">Connect endpoint</span><span class="vv">100.82.14.3:8083</span></div>
+        <div class="kv"><span class="kk">Last heartbeat</span><span class="vv">4s ago</span></div>
+        <div class="kv"><span class="kk">Enrolled</span><span class="vv">2026-05-12</span></div>
+      </div>
+      <div class="panel">
+        <h4>Version &amp; updates</h4>
+        <div class="kv"><span class="kk">Running</span><span class="vv">1.4.2</span></div>
+        <div class="kv"><span class="kk">Available</span><span class="vv" style="color:var(--warn);">1.4.3</span></div>
+        <div class="kv"><span class="kk">Platform</span><span class="vv">VM · Hyper-V</span></div>
+        <div class="kv"><span class="kk"></span><span class="vv"><button class="btn primary" style="padding:5px 12px;">Update &amp; roll</button></span></div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;"><span class="eyebrow">Stack health<span class="anno">5</span></span></div>
+    <div class="comp-strip">
+      <div class="comp"><span class="dot"></span><span class="nm">Kafka<small>1 broker · RF1</small></span></div>
+      <div class="comp"><span class="dot"></span><span class="nm">Connect<small>src + sink</small></span></div>
+      <div class="comp"><span class="dot"></span><span class="nm">Schema Registry<small>local</small></span></div>
+      <div class="comp"><span class="dot"></span><span class="nm">DDL consumer<small>on-appliance</small></span></div>
+    </div>
+
+    <div style="margin-top:18px;"><span class="eyebrow">Data flow · stays on client LAN<span class="anno">6</span></span></div>
+    <div class="flow">
+      <div class="fnode"><div class="ft">Source DB</div><div class="fd">SQL Server · Win</div></div>
+      <div class="farrow">──▶<br>1,240 r/s</div>
+      <div class="fnode" style="border-color:var(--accent);"><div class="ft">Edge appliance</div><div class="fd">capture · buffer · write</div></div>
+      <div class="farrow">──▶<br>lag 0.4s</div>
+      <div class="fnode"><div class="ft">Sink DB</div><div class="fd">PostgreSQL · Linux</div></div>
+    </div>
+  </div>
+
+  <!-- DELIVERY MATRIX -->
+  <div class="screen">
+    <span class="screen-tag">Reference · cross-platform delivery</span>
+    <h2>One stack, delivered to any system</h2>
+    <p class="note">The database's OS is irrelevant — Debezium reaches it over the network. Only
+      the appliance's runtime matters, and containers (or the VM) normalize that away.</p>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead>
+          <tr><th>Client environment</th><th>Delivery</th><th>Runtime under the hood</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="plat">Windows Server w/ Hyper-V</td><td class="deliver">VM appliance (VHDX)</td><td class="plat">Linux VM</td></tr>
+          <tr><td class="plat">Windows Server / 10 / 11, no VM</td><td class="deliver">Windows installer (.exe/MSI)</td><td class="plat">Docker / Podman on WSL2</td></tr>
+          <tr><td class="plat">Linux server</td><td class="deliver">install.sh · .deb / .rpm</td><td class="plat">Docker / Podman native</td></tr>
+          <tr><td class="plat">VMware / Proxmox / Nutanix</td><td class="deliver">VM appliance (OVA/QCOW2)</td><td class="plat">Linux VM</td></tr>
+          <tr><td class="plat">Client cloud (AWS/Azure/GCP)</td><td class="deliver">VM image / Terraform</td><td class="plat">Linux instance</td></tr>
+          <tr><td class="plat">Locked-down · no container, no VM</td><td class="deliver">Native Debezium Server</td><td class="plat">JVM service (no Kafka)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- LEGEND -->
+  <div class="legend">
+    <div class="li"><span class="anno">1</span><span><b>Self-registering.</b> Enroll starts the flow; the appliance completes it by phoning home.</span></div>
+    <div class="li"><span class="anno">2</span><span><b>Cross-platform.</b> Same stack, three artifacts — VM, Windows installer, Linux service.</span></div>
+    <div class="li"><span class="anno">3</span><span><b>One-time token.</b> Binds the appliance to a client; expires; single use.</span></div>
+    <div class="li"><span class="anno">4</span><span><b>Outbound tunnel.</b> Appliance dials out — no inbound firewall change at the client.</span></div>
+    <div class="li"><span class="anno">5</span><span><b>Full stack on the box.</b> DDL consumer included, so Kafka never leaves the LAN.</span></div>
+    <div class="li"><span class="anno">6</span><span><b>Data stays local.</b> Only HTTP control crosses the wire; rows move client-side only.</span></div>
+  </div>
+
+</div>

@@ -6,7 +6,7 @@ from django.conf import settings
 from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 from jovoclient.utils.debezium.jolokia_client import JolokiaClient
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager, format_topic_name
-from jovoclient.utils.debezium.schema_registry_utils import delete_schema_subject
+from jovoclient.utils.debezium.schema_registry_utils import delete_schema_subject, set_compatibility_mode
 from jovoclient.utils.debezium.connector_templates import get_connector_config_for_database
 from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
 from client.utils.table_creator import drop_tables_for_mappings, truncate_tables_for_mappings
@@ -1038,6 +1038,17 @@ class ReplicationOrchestrator:
 
             versioned_connector_name = self.config.connector_name
 
+            # Disable Schema Registry compatibility checks (global NONE) before the source
+            # starts registering schemas. This lets breaking DDL (rename/drop column, type
+            # change) register a new schema version without us ever deleting the old one —
+            # deleting a schema orphans messages still retained on the topic that reference
+            # its id, making the sink fail with 40403 "Schema <id> not found".
+            if not set_compatibility_mode(None, "NONE"):
+                self._log_warning(
+                    "Could not set Schema Registry compatibility to NONE; breaking DDL "
+                    "changes may be rejected when the source registers a new schema"
+                )
+
             # Create connector
             success, error = self.connector_manager.create_connector(
                 connector_name=versioned_connector_name,
@@ -1219,9 +1230,11 @@ class ReplicationOrchestrator:
 
             deleted_topics = []
             for topic in topics_to_delete:
+                topic_deleted = False
                 try:
                     topic_ok, topic_err = self.topic_manager.delete_topic(topic)
                     if topic_ok:
+                        topic_deleted = True
                         deleted_topics.append(topic)
                         self._log_info(f"  ✓ Deleted topic: {topic}")
                     else:
@@ -1229,11 +1242,16 @@ class ReplicationOrchestrator:
                 except Exception as e:
                     self._log_warning(f"  ⚠️ Error deleting topic {topic}: {e}")
 
-                # Delete schema registry subjects regardless of topic deletion outcome
+                # Delete schema subjects in the correct order: hard-delete ONLY when the
+                # topic is gone (no retained message can reference the ids any more). If the
+                # topic survived, soft-delete so any still-retained messages stay
+                # deserializable — a hard delete there orphans them and fails the sink with
+                # 40403 "Schema not found".
                 try:
-                    delete_schema_subject(f"{topic}-key")
-                    delete_schema_subject(f"{topic}-value")
-                    self._log_info(f"  ✓ Deleted schema subjects for: {topic}")
+                    delete_schema_subject(f"{topic}-key", permanent=topic_deleted)
+                    delete_schema_subject(f"{topic}-value", permanent=topic_deleted)
+                    mode = "hard" if topic_deleted else "soft"
+                    self._log_info(f"  ✓ Deleted schema subjects ({mode}) for: {topic}")
                 except Exception as e:
                     self._log_warning(f"  ⚠️ Error deleting schema subjects for {topic}: {e}")
 

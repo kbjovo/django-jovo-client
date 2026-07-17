@@ -21,7 +21,6 @@ from sqlalchemy.engine import Engine
 from .base_processor import BaseDDLProcessor, DDLOperation, DDLOperationType
 from .type_maps import get_type_map
 from client.models.replication import ReplicationConfig
-from jovoclient.utils.debezium.schema_registry_utils import delete_table_schemas
 
 logger = logging.getLogger(__name__)
 
@@ -450,22 +449,10 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         else:
             logger.info(f"No schema changes detected for {target_table_name}")
 
-        # Check if any operations would cause schema compatibility issues
-        # Column renames, drops, or significant type changes are breaking changes in Avro
-        has_breaking_changes = any(
-            op.operation_type in (
-                DDLOperationType.RENAME_COLUMN,
-                DDLOperationType.DROP_COLUMN,
-            )
-            for op in operations
-        )
-
-        if has_breaking_changes:
-            logger.info(
-                f"Breaking schema changes detected for {source_table_name}. "
-                "Deleting schema subjects to prevent compatibility issues."
-            )
-            self._delete_schema_for_table(source_table_name)
+        # Breaking Avro changes (rename/drop column, type change) need no Schema Registry
+        # cleanup here: the registry is provisioned with compatibility NONE, so the source
+        # registers the new schema version directly. We never delete a live topic's subject
+        # — that orphans retained messages carrying the old id → sink 40403 "Schema not found".
 
         for op in operations:
             success, error = self.execute_operation(op)
@@ -652,13 +639,10 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             col_type = modify_match.group(3)
 
             if old_name != new_name:
-                # Column rename detected - this is a breaking schema change in Avro
-                # Delete schema subjects from Schema Registry to allow new schema registration
-                logger.info(
-                    f"Column rename detected: {old_name} -> {new_name} in {source_table}. "
-                    "Deleting schema subjects to prevent compatibility issues."
-                )
-                self._delete_schema_for_table(source_table)
+                # Column rename = breaking Avro change, but no schema cleanup is needed:
+                # the registry runs compatibility NONE, so the new schema version registers
+                # directly and old ids stay resolvable for the sink.
+                logger.info(f"Column rename detected: {old_name} -> {new_name} in {source_table}")
 
                 return DDLOperation(
                     operation_type=DDLOperationType.RENAME_COLUMN,
@@ -730,21 +714,9 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         else:
             logger.info(f"No schema changes detected for {target_table}")
 
-        # Check if any operations would cause schema compatibility issues
-        has_breaking_changes = any(
-            op.operation_type in (
-                DDLOperationType.RENAME_COLUMN,
-                DDLOperationType.DROP_COLUMN,
-            )
-            for op in operations
-        )
-
-        if has_breaking_changes:
-            logger.info(
-                f"Breaking schema changes detected for {table_name}. "
-                "Deleting schema subjects to prevent compatibility issues."
-            )
-            self._delete_schema_for_table(table_name)
+        # Breaking Avro changes need no Schema Registry cleanup here — the registry runs
+        # compatibility NONE, so the new schema version registers directly and we never
+        # delete a live topic's subject (which would orphan retained messages → 40403).
 
         for op in operations:
             success, error = self.execute_operation(op)
@@ -1051,47 +1023,11 @@ class KafkaDDLProcessor(BaseDDLProcessor):
         match = re.search(r'\((\d+)', type_str)
         return int(match.group(1)) if match else None
 
-    def _delete_schema_for_table(self, source_table: str) -> bool:
-        """
-        Delete Schema Registry subjects for a table.
-
-        This is needed when a breaking schema change occurs (e.g., column rename)
-        that would cause Avro schema compatibility issues.
-
-        Args:
-            source_table: Source table name (without database prefix)
-
-        Returns:
-            True if deletion was successful, False otherwise
-        """
-        try:
-            # Get topic prefix (used in schema subject naming)
-            # Format: client_{client_id}_db_{db_id}_v_{version}
-            db_config = self.replication_config.client_database
-            client = db_config.client
-            version = self.replication_config.connector_version or 0
-            topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{version}"
-
-            # Schema subject format: {topic_prefix}.{database}.{table}
-            # For MySQL: topic_prefix.database_name.table_name
-            full_table_name = f"{db_config.database_name}.{source_table}"
-
-            logger.info(
-                f"Deleting schema subjects for {full_table_name} due to breaking schema change"
-            )
-
-            result = delete_table_schemas(topic_prefix, full_table_name, permanent=True)
-
-            if result.get('key') and result.get('value'):
-                logger.info(f"Successfully deleted schema subjects for {full_table_name}")
-                return True
-            else:
-                logger.warning(f"Schema deletion result for {full_table_name}: {result}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Failed to delete schema subjects: {e}")
-            return False
+    # _delete_schema_for_table was removed: the registry is provisioned with compatibility
+    # NONE, so breaking DDL registers a new schema version directly. We must never delete a
+    # live topic's subject — that orphans retained messages carrying the old id (sink 40403).
+    # Schemas are only deleted during full teardown (see orchestrator), together with their
+    # topic.
 
     def _init_truncate_watcher(self, replication_config, bootstrap_servers: str, schema_group_id: str) -> None:
         """

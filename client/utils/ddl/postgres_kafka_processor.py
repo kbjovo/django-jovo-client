@@ -387,8 +387,8 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
         if drop_match:
             col_name = drop_match.group(1)
 
-            # Delete schema from registry for breaking change
-            self._delete_schema_for_table(source_table, schema_name)
+            # No Schema Registry cleanup: the registry runs compatibility NONE, so the new
+            # schema version registers directly and old ids stay resolvable for the sink.
 
             operation = DDLOperation(
                 operation_type=DDLOperationType.DROP_COLUMN,
@@ -412,8 +412,8 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
             old_name = rename_match.group(1)
             new_name = rename_match.group(2)
 
-            # Delete schema from registry for breaking change
-            self._delete_schema_for_table(source_table, schema_name)
+            # No Schema Registry cleanup: the registry runs compatibility NONE, so the new
+            # schema version registers directly and old ids stay resolvable for the sink.
 
             operation = DDLOperation(
                 operation_type=DDLOperationType.RENAME_COLUMN,
@@ -603,42 +603,11 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
         # For now, we rely on Kafka consumer offsets
         pass
 
-    def _delete_schema_for_table(self, source_table: str, schema_name: str) -> bool:
-        """
-        Delete Schema Registry subjects for a table.
-
-        This is needed when a breaking schema change occurs (e.g., column rename/drop)
-        that would cause Avro schema compatibility issues.
-        """
-        try:
-            from jovoclient.utils.debezium.schema_registry_utils import delete_table_schemas
-
-            db_config = self.replication_config.client_database
-            client = db_config.client
-            version = self.replication_config.connector_version or 0
-            topic_prefix = f"client_{client.id}_db_{db_config.id}_v_{version}"
-
-            # Schema subject format after RegexRouter transform:
-            # {topic_prefix}.{database_name}.{table}  (NOT schema_name, because the
-            # RegexRouter replaces schema with database_name in all topic/subject names)
-            full_table_name = f"{self.source_database}.{source_table}"
-
-            logger.info(
-                f"Deleting schema subjects for {full_table_name} due to breaking schema change"
-            )
-
-            result = delete_table_schemas(topic_prefix, full_table_name, permanent=True)
-
-            if result.get('key') and result.get('value'):
-                logger.info(f"Successfully deleted schema subjects for {full_table_name}")
-                return True
-            else:
-                logger.warning(f"Schema deletion result for {full_table_name}: {result}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Failed to delete schema subjects: {e}")
-            return False
+    # _delete_schema_for_table was removed: the registry is provisioned with compatibility
+    # NONE, so breaking DDL registers a new schema version directly. We must never delete a
+    # live topic's subject — that orphans retained messages carrying the old id (sink 40403).
+    # Schemas are only deleted during full teardown (see orchestrator), together with their
+    # topic.
 
     def _init_truncate_watcher(self, replication_config, bootstrap_servers: str, schema_group_id: str) -> None:
         """Subscribe to change topics to detect op='t' (TRUNCATE) events."""
