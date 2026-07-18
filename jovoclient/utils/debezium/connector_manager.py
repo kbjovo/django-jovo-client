@@ -6,6 +6,8 @@ import logging
 import requests
 import json
 import time
+import threading
+from urllib.parse import urlparse
 from typing import Dict, List, Optional, Any, Tuple
 from requests.adapters import HTTPAdapter
 from django.conf import settings
@@ -26,6 +28,58 @@ _HTTP_SESSION = requests.Session()
 _HTTP_ADAPTER = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
 _HTTP_SESSION.mount('http://', _HTTP_ADAPTER)
 _HTTP_SESSION.mount('https://', _HTTP_ADAPTER)
+
+
+# Process-global reachability tracking for the Kafka Connect REST endpoint.
+# When Connect is down, the health monitor (every 60s) x N connectors x several
+# calls each would otherwise emit an ERROR line per request — dozens per outage.
+# Connect is a single shared endpoint, so we track "is it down" once per host and
+# log only on the down/up transitions: one WARNING when it goes unreachable, one
+# INFO when it recovers. Shared across all manager instances and the status-cache
+# thread pool, hence module-level + a lock. Repeat failures drop to DEBUG.
+_CONNECT_DOWN: Dict[str, bool] = {}   # host:port -> True once the outage is logged
+_CONNECT_DOWN_LOCK = threading.Lock()
+
+
+def _connect_host(url: str) -> str:
+    """Return host:port for a Connect URL, used as the reachability state key."""
+    try:
+        return urlparse(url).netloc or url
+    except Exception:
+        return url
+
+
+def _note_connect_reachable(url: str) -> None:
+    """Called whenever an HTTP response comes back (any status = TCP is up).
+
+    Logs recovery once, only on the down->up transition. Fast-paths the common
+    steady-state case (already known reachable) without taking the lock.
+    """
+    host = _connect_host(url)
+    if not _CONNECT_DOWN.get(host):
+        return  # already reachable (or never seen) — nothing to do
+    with _CONNECT_DOWN_LOCK:
+        was_down = _CONNECT_DOWN.get(host, False)
+        _CONNECT_DOWN[host] = False
+    if was_down:
+        logger.info(f"Kafka Connect is reachable again at {host}")
+
+
+def _note_connect_unreachable(url: str, error: str) -> None:
+    """Called on a connection error. Logs one WARNING on the up->down transition;
+    subsequent failures during the same outage drop to DEBUG to kill the noise.
+    """
+    host = _connect_host(url)
+    with _CONNECT_DOWN_LOCK:
+        already_down = _CONNECT_DOWN.get(host, False)
+        _CONNECT_DOWN[host] = True
+    if already_down:
+        logger.debug(f"Kafka Connect still unreachable at {host}: {error}")
+    else:
+        logger.warning(
+            f"Kafka Connect unreachable at {host}: {error} "
+            f"— suppressing repeat connection errors until it recovers"
+        )
 
 
 class DebeziumException(Exception):
@@ -110,6 +164,9 @@ class DebeziumConnectorManager:
             else:
                 return False, None, f"Unsupported HTTP method: {method}"
             logger.debug(f"method: {method}, url: {url}")
+            # A response came back at all => the endpoint is reachable. Clears the
+            # outage state and logs recovery once if we were previously down.
+            _note_connect_reachable(url)
             # Check if request was successful
             # 200: OK, 201: Created, 202: Accepted (async operations), 204: No Content
             if response.status_code in [200, 201, 202, 204]:
@@ -150,7 +207,8 @@ class DebeziumConnectorManager:
             return False, None, error_msg
         except requests.exceptions.ConnectionError as e:
             error_msg = f"Connection error: {str(e)}"
-            logger.error(error_msg)
+            # Deduped: one WARNING per outage instead of an ERROR per request.
+            _note_connect_unreachable(url, str(e))
             return False, None, error_msg
         except Exception as e:
             error_msg = f"Request failed: {str(e)}"
