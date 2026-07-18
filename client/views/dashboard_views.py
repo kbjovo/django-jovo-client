@@ -30,9 +30,15 @@ def dashboard(request):
     - No tabs - just stats
     - Links to dedicated pages via sidebar
     """
-    # Calculate statistics
-    total_clients = Client.objects.filter(status__in=["active", "inactive"]).count()
-    active_clients = Client.objects.filter(status="active").count()
+    from django.db.models import Count
+
+    # Client + connector counts — one aggregate query each instead of several COUNTs.
+    client_stats = Client.objects.aggregate(
+        total=Count('id', filter=Q(status__in=["active", "inactive"])),
+        active=Count('id', filter=Q(status="active")),
+    )
+    total_clients = client_stats['total']
+    active_clients = client_stats['active']
 
     all_connectors = ReplicationConfig.objects.select_related(
         'client_database', 'client_database__client'
@@ -40,40 +46,40 @@ def dashboard(request):
         Q(connector_name__isnull=True) | Q(connector_name='')
     )
 
-    total_connectors = all_connectors.count()
-    active_connectors = all_connectors.filter(status='active').count()
-    failed_connectors = all_connectors.filter(status='error').count()
+    conn_stats = all_connectors.aggregate(
+        total=Count('id'),
+        active=Count('id', filter=Q(status='active')),
+        failed=Count('id', filter=Q(status='error')),
+    )
+    total_connectors = conn_stats['total']
+    active_connectors = conn_stats['active']
+    failed_connectors = conn_stats['failed']
 
     # Recently active connectors (ordered by last updated)
     recent_active_connectors = all_connectors.filter(
         status='active'
     ).order_by('-updated_at')[:5]
 
-    # Recent connectors with issues — verify live against Debezium to avoid stale DB state
-    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
-    _manager = DebeziumConnectorManager()
-    _candidates = ReplicationConfig.objects.select_related(
+    # Recent connectors with issues — classified against the background-refreshed
+    # status cache (no blocking Connect calls, no writes in this GET). Reconciling
+    # stale DB status is owned by the monitor_replication_health beat task.
+    from client.utils.connector_status_cache import get_statuses
+    _candidates = list(ReplicationConfig.objects.select_related(
         'client_database', 'client_database__client'
-    ).filter(status='error').order_by('-updated_at')[:20]
+    ).filter(status='error').order_by('-updated_at')[:20])
 
+    _statuses = get_statuses([c.connector_name for c in _candidates if c.connector_name])
     recent_failed = []
     for _config in _candidates:
-        try:
-            _exists, _status_data = _manager.get_connector_status(_config.connector_name)
-            if not _exists or not _status_data:
-                recent_failed.append(_config)
-                continue
+        _status_data = _statuses.get(_config.connector_name)
+        if not _status_data:
+            # Not known to Connect (or unreachable) — still surface as an issue.
+            recent_failed.append(_config)
+        else:
             _connector_state = _status_data.get('connector', {}).get('state', 'UNKNOWN')
-            _tasks = _status_data.get('tasks', [])
-            _has_failed = any(t.get('state') == 'FAILED' for t in _tasks)
+            _has_failed = any(t.get('state') == 'FAILED' for t in _status_data.get('tasks', []))
             if _connector_state == 'FAILED' or _has_failed:
                 recent_failed.append(_config)
-            else:
-                # Connector recovered — clear the stale error status
-                _config.status = 'active'
-                _config.save(update_fields=['status'])
-        except Exception:
-            recent_failed.append(_config)
         if len(recent_failed) == 5:
             break
 
@@ -141,16 +147,16 @@ def monitoring_dashboard(request):
     """
     Real-time monitoring dashboard for all active replications.
     """
-    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
     from client.models.database import ClientDatabase
+    from client.utils.connector_status_cache import get_statuses
 
-    active_replications = ReplicationConfig.objects.select_related(
+    active_replications = list(ReplicationConfig.objects.select_related(
         'client_database', 'client_database__client'
     ).filter(
         is_active=True,
     ).exclude(
         Q(connector_name__isnull=True) | Q(connector_name='')
-    ).order_by('-updated_at')
+    ).order_by('-updated_at'))
 
     # Pre-fetch sink (target) databases keyed by client_id to avoid N+1
     client_ids = {c.client_database.client_id for c in active_replications}
@@ -159,32 +165,28 @@ def monitoring_dashboard(request):
         for db in ClientDatabase.objects.filter(client_id__in=client_ids, is_target=True)
     }
 
-    manager = DebeziumConnectorManager()
+    # Single bulk read of all source + sink connector states from the
+    # background-refreshed cache — no per-connector Connect REST calls here.
+    all_names = [c.connector_name for c in active_replications]
+    all_names += [c.sink_connector_name for c in active_replications if c.sink_connector_name]
+    statuses = get_statuses(all_names)
 
     STATE_PRIORITY = {'ERROR': 0, 'FAILED': 1, 'PAUSED': 2, 'RUNNING': 3, 'UNKNOWN': 4}
-
-    # Sink connectors are shared per target DB — cache state by name to avoid
-    # repeating the same Kafka Connect REST call for connectors sharing a sink.
-    sink_state_cache = {}
 
     def get_sink_state(sink_name):
         if not sink_name:
             return 'NOT_CONFIGURED'
-        if sink_name in sink_state_cache:
-            return sink_state_cache[sink_name]
-        try:
-            s_exists, s_data = manager.get_connector_status(sink_name)
-            state = s_data.get('connector', {}).get('state', 'UNKNOWN') if (s_exists and s_data) else 'NOT_FOUND'
-        except Exception:
-            state = 'ERROR'
-        sink_state_cache[sink_name] = state
-        return state
+        s_data = statuses.get(sink_name)
+        if not s_data:
+            return 'NOT_FOUND'
+        return s_data.get('connector', {}).get('state', 'UNKNOWN')
 
     monitoring_data = []
     for config in active_replications:
         sink_db = sink_db_map.get(config.client_database.client_id)
         try:
-            exists, status_data = manager.get_connector_status(config.connector_name)
+            status_data = statuses.get(config.connector_name)
+            exists = status_data is not None
 
             if not exists or not status_data:
                 logger.warning(f"Connector {config.connector_name} not found in Kafka Connect — skipping from monitoring")

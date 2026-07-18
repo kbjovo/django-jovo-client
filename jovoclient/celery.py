@@ -43,6 +43,12 @@ app.conf.beat_schedule = {
         'task': 'client.tasks.sync_postgresql_schemas',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
     },
+    # Refresh the Redis-cached Debezium connector status served to dashboards, so
+    # page loads never block on per-connector Kafka Connect REST calls.
+    'refresh-connector-status-cache': {
+        'task': 'client.tasks.refresh_connector_status_cache',
+        'schedule': 30.0,  # Every 30 seconds
+    },
 }
 
 app.conf.task_routes = {

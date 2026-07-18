@@ -7,6 +7,7 @@ import requests
 import json
 import time
 from typing import Dict, List, Optional, Any, Tuple
+from requests.adapters import HTTPAdapter
 from django.conf import settings
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig
@@ -14,6 +15,17 @@ from client.utils.notification_utils import send_connector_status_email, log_and
 from jovoclient.utils.kafka.topic_manager import KafkaTopicManager
 
 logger = logging.getLogger(__name__)
+
+
+# Shared, connection-pooled HTTP session for all Kafka Connect REST calls.
+# Reusing one session gives HTTP keep-alive so repeated same-host calls (e.g. the
+# per-connector status polling) skip the TCP/handshake cost. urllib3's pool manager
+# is thread-safe, so this is safe to share across the status-cache ThreadPool.
+# max_retries=0 keeps failures fast — callers handle retries/timeouts themselves.
+_HTTP_SESSION = requests.Session()
+_HTTP_ADAPTER = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
+_HTTP_SESSION.mount('http://', _HTTP_ADAPTER)
+_HTTP_SESSION.mount('https://', _HTTP_ADAPTER)
 
 
 class DebeziumException(Exception):
@@ -88,13 +100,13 @@ class DebeziumConnectorManager:
             headers = {'Content-Type': 'application/json'}
             
             if method == 'GET':
-                response = requests.get(url, headers=headers, timeout=timeout)
+                response = _HTTP_SESSION.get(url, headers=headers, timeout=timeout)
             elif method == 'POST':
-                response = requests.post(url, headers=headers, json=data, timeout=timeout)
+                response = _HTTP_SESSION.post(url, headers=headers, json=data, timeout=timeout)
             elif method == 'PUT':
-                response = requests.put(url, headers=headers, json=data, timeout=timeout)
+                response = _HTTP_SESSION.put(url, headers=headers, json=data, timeout=timeout)
             elif method == 'DELETE':
-                response = requests.delete(url, headers=headers, timeout=timeout)
+                response = _HTTP_SESSION.delete(url, headers=headers, timeout=timeout)
             else:
                 return False, None, f"Unsupported HTTP method: {method}"
             logger.debug(f"method: {method}, url: {url}")
@@ -188,19 +200,21 @@ class DebeziumConnectorManager:
             logger.error(f"Error listing connectors: {str(e)}")
             return []
     
-    def get_connector_status(self, connector_name: str) -> Tuple[bool, Optional[Dict]]:
+    def get_connector_status(self, connector_name: str, timeout: int = 30) -> Tuple[bool, Optional[Dict]]:
         """
         Get connector status
-        
+
         Args:
             connector_name: Name of the connector
-            
+            timeout: Request timeout in seconds. The status-polling / dashboard path
+                     passes a short timeout so one sick connector can't stall a page.
+
         Returns:
             Tuple[bool, Optional[Dict]]: (exists, status_data)
         """
         try:
             url = f"{self.connectors_url}/{connector_name}/status"
-            success, data, error = self._make_request('GET', url)
+            success, data, error = self._make_request('GET', url, timeout=timeout)
             
             if success and data:
                 logger.debug(f"Connector {connector_name} status: {data.get('connector', {}).get('state', 'UNKNOWN')}")

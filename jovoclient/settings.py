@@ -37,7 +37,10 @@ os.chmod(LOGS_DIR, 0o777)
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-sd-&4j-s=6t(tj47cyr2fzx2&yn9r5+pu(8#_foh&u@9s8$oqs')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get("DEBUG", "False")
+# NOTE: os.environ.get returns a string; a non-empty string like "False" is truthy,
+# so this must be parsed to a real bool. Set DEBUG=False in the production .env.
+# When DEBUG=False, ALLOWED_HOSTS must be populated for the site to serve requests.
+DEBUG = os.environ.get("DEBUG", "False").strip().lower() in ("true", "1", "yes")
 
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "").split(",")
 
@@ -131,6 +134,61 @@ DATABASES = {
         'CONN_MAX_AGE': 600,
     }
 }
+
+# ====================================
+# CACHE CONFIGURATION
+# ====================================
+# Redis-backed cache (Django 4.0+ built-in backend, uses the already-installed
+# `redis` package — no extra dependency). Used for the background-refreshed
+# connector-status cache (see client.utils.connector_status_cache) and general
+# view/fragment caching.
+def _redis_cache_url():
+    """Resolve the cache's Redis URL entirely from environment (.env / .env.docker),
+    so it works in every deployment without code changes.
+
+    Precedence:
+      1. REDIS_CACHE_URL — explicit full URL, wins if set.
+      2. redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CACHE_DB} — built from the same
+         REDIS_HOST/REDIS_PORT the Celery broker uses, on a dedicated cache db
+         (default 2; broker uses 0 and results 1, so no key collisions).
+      3. redis://localhost:6379/{REDIS_CACHE_DB} — host-dev fallback when REDIS_HOST
+         is unset (Redis is published to the host, so localhost works).
+    """
+    explicit = os.getenv('REDIS_CACHE_URL')
+    if explicit:
+        return explicit
+    cache_db = os.getenv('REDIS_CACHE_DB', '2')
+    host = os.getenv('REDIS_HOST')
+    port = os.getenv('REDIS_PORT', '6379')
+    if host:
+        return f'redis://{host}:{port}/{cache_db}'
+    return f'redis://localhost:{port}/{cache_db}'
+
+
+# Fail fast if Redis is unreachable/slow so a blip can't hang a worker; the
+# connector-status cache degrades to live calls on any backend error.
+_REDIS_CACHE_SOCKET_TIMEOUT = int(os.getenv('REDIS_CACHE_SOCKET_TIMEOUT', '2'))
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': _redis_cache_url(),
+        'KEY_PREFIX': 'jovoclient',
+        'TIMEOUT': 300,  # default 5 min; per-key TTLs override this
+        'OPTIONS': {
+            'socket_connect_timeout': _REDIS_CACHE_SOCKET_TIMEOUT,
+            'socket_timeout': _REDIS_CACHE_SOCKET_TIMEOUT,
+        },
+    }
+}
+
+# TTL (seconds) for cached Debezium connector status served to dashboards. The
+# background beat task refreshes well within this window; kept a few cycles long so
+# a couple of missed beats don't blank the dashboards.
+CONNECTOR_STATUS_CACHE_TTL = int(os.getenv('CONNECTOR_STATUS_CACHE_TTL', '180'))
+# Short per-call timeout (seconds) for the status polling path so one sick connector
+# can't stall the background refresh or a cold-cache page load.
+CONNECTOR_STATUS_TIMEOUT = int(os.getenv('CONNECTOR_STATUS_TIMEOUT', '8'))
 
 PROMETHEUS_METRIC_NAMESPACE = 'jovoclient'
 
@@ -293,9 +351,12 @@ LOGGING = {
     },
     
     'handlers': {
-        # Console output - human readable for development
+        # Console output - human readable for development.
+        # In production (DEBUG=False) the JSON files + Promtail are the log pipeline,
+        # and stdout is already captured by the process manager, so raise the console
+        # threshold to WARNING to avoid re-formatting/writing every INFO line twice.
         'console': {
-            'level': 'INFO',
+            'level': 'INFO' if DEBUG else 'WARNING',
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
         },

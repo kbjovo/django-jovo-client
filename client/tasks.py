@@ -749,6 +749,25 @@ def sync_postgresql_schemas():
 
 
 
+@shared_task(ignore_result=True)
+def refresh_connector_status_cache():
+    """
+    Periodic task: refresh the Redis-cached Debezium connector status.
+
+    Dashboards read this cache instead of making blocking per-connector Kafka
+    Connect REST calls on every page load. See
+    client.utils.connector_status_cache.refresh_all.
+    """
+    from client.utils.connector_status_cache import refresh_all
+    try:
+        count = refresh_all()
+        logger.debug(f"Refreshed connector status cache for {count} connectors")
+        return {'refreshed': count}
+    except Exception as e:
+        logger.warning(f"Connector status cache refresh failed: {e}")
+        return {'refreshed': 0, 'error': str(e)}
+
+
 @shared_task
 def monitor_connectors():
     """

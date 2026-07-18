@@ -13,7 +13,6 @@ from django.shortcuts import render, get_object_or_404
 from client.models.database import ClientDatabase
 from client.models.replication import ReplicationConfig, TableMapping
 from client.utils.database_utils import get_unassigned_tables
-from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
 
 logger = logging.getLogger(__name__)
 
@@ -110,34 +109,42 @@ def connectors_list(request):
     if sort_by in allowed_sorts:
         connectors_query = connectors_query.order_by(sort_by)
 
-    # Calculate summary stats (before pagination)
-    total_count = connectors_query.count()
-    active_count = connectors_query.filter(status='active').count()
-    paused_count = connectors_query.filter(status='paused').count()
-    failed_count = connectors_query.filter(status='error').count()
-    configured_count = connectors_query.filter(status='configured').count()
+    # Summary stats — a single aggregate query with conditional counts instead of
+    # five separate COUNT round-trips.
+    stats = connectors_query.aggregate(
+        total=Count('id'),
+        active=Count('id', filter=Q(status='active')),
+        paused=Count('id', filter=Q(status='paused')),
+        failed=Count('id', filter=Q(status='error')),
+        configured=Count('id', filter=Q(status='configured')),
+    )
+    total_count = stats['total']
+    active_count = stats['active']
+    paused_count = stats['paused']
+    failed_count = stats['failed']
+    configured_count = stats['configured']
 
     # Pagination
     paginator = Paginator(connectors_query, 15)  # 15 per page for global view
     page_number = request.GET.get('page', 1)
     page_obj = paginator.get_page(page_number)
 
-    # Get Debezium status for connectors on current page
-    connector_manager = DebeziumConnectorManager()
+    # Debezium status is served from the background-refreshed Redis cache
+    # (client.utils.connector_status_cache) — one bulk read, no blocking per-row
+    # Connect REST calls in the request path.
+    from client.utils.connector_status_cache import get_statuses
+    statuses = get_statuses([c.connector_name for c in page_obj if c.connector_name])
     for connector in page_obj:
-        try:
-            exists, status_data = connector_manager.get_connector_status(connector.connector_name)
-            if exists and status_data:
-                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-                connector.debezium_status = {'state': connector_state, 'raw': status_data}
-            else:
-                connector.debezium_status = {'state': 'NOT_FOUND'}
-        except Exception as e:
-            logger.warning(f"Could not get status for {connector.connector_name}: {e}")
-            connector.debezium_status = {'state': 'UNKNOWN'}
+        status_data = statuses.get(connector.connector_name)
+        if status_data:
+            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            connector.debezium_status = {'state': connector_state, 'raw': status_data}
+        else:
+            connector.debezium_status = {'state': 'NOT_FOUND'}
 
-        # Get table count
-        connector.table_count = connector.table_mappings.filter(is_enabled=True).count()
+        # table_mappings is prefetched — count enabled ones in Python to avoid a
+        # per-connector COUNT query (.filter() on the manager would bypass the cache).
+        connector.table_count = sum(1 for tm in connector.table_mappings.all() if tm.is_enabled)
 
     # Get all clients and databases for filter dropdowns
     all_clients = Client.objects.filter(status='active').order_by('name')
@@ -216,29 +223,35 @@ def client_connectors_list(request, client_pk):
     if sort_by in allowed_sorts:
         connectors_query = connectors_query.order_by(sort_by)
 
-    # Calculate summary stats (before pagination)
-    total_count = connectors_query.count()
-    active_count = connectors_query.filter(status='active').count()
-    paused_count = connectors_query.filter(status='paused').count()
-    failed_count = connectors_query.filter(status='error').count()
-    configured_count = connectors_query.filter(status='configured').count()
+    # Summary stats — single aggregate query instead of five COUNTs.
+    stats = connectors_query.aggregate(
+        total=Count('id'),
+        active=Count('id', filter=Q(status='active')),
+        paused=Count('id', filter=Q(status='paused')),
+        failed=Count('id', filter=Q(status='error')),
+        configured=Count('id', filter=Q(status='configured')),
+    )
+    total_count = stats['total']
+    active_count = stats['active']
+    paused_count = stats['paused']
+    failed_count = stats['failed']
+    configured_count = stats['configured']
+
+    from client.utils.connector_status_cache import get_statuses
 
     # Sink connectors are now one-per-source-connector. Aggregate their states into
     # a single badge for the client-level list: RUNNING only if every sink is running,
-    # FAILED if any failed, PAUSED if any paused, else UNKNOWN.
+    # FAILED if any failed, PAUSED if any paused, else UNKNOWN. States come from the
+    # background-refreshed status cache (one bulk read, no blocking Connect calls).
     sink_connector_name = None
     sink_status = None
     sink_names = ClientDatabase.get_all_sink_connector_names(client)
     if sink_names:
-        connector_manager = DebeziumConnectorManager()
-        states = []
-        for name in sink_names:
-            try:
-                exists, status_data = connector_manager.get_connector_status(name)
-                states.append((status_data or {}).get('connector', {}).get('state', 'UNKNOWN') if exists else 'NOT_CREATED')
-            except Exception as e:
-                logger.warning(f"Could not get sink connector status for {name}: {e}")
-                states.append('UNKNOWN')
+        sink_statuses = get_statuses(sink_names)
+        states = [
+            (sink_statuses.get(name) or {}).get('connector', {}).get('state', 'NOT_CREATED')
+            for name in sink_names
+        ]
 
         if any(s == 'FAILED' for s in states):
             agg_state = 'FAILED'
@@ -257,22 +270,18 @@ def client_connectors_list(request, client_pk):
     page_number = request.GET.get('page', 1)
     page_obj = paginator.get_page(page_number)
 
-    # Get Debezium status for connectors on current page
-    connector_manager = DebeziumConnectorManager()
+    # Debezium status for connectors on current page — one bulk cache read.
+    statuses = get_statuses([c.connector_name for c in page_obj if c.connector_name])
     for connector in page_obj:
-        try:
-            exists, status_data = connector_manager.get_connector_status(connector.connector_name)
-            if exists and status_data:
-                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-                connector.debezium_status = {'state': connector_state, 'raw': status_data}
-            else:
-                connector.debezium_status = {'state': 'NOT_FOUND'}
-        except Exception as e:
-            logger.warning(f"Could not get status for {connector.connector_name}: {e}")
-            connector.debezium_status = {'state': 'UNKNOWN'}
+        status_data = statuses.get(connector.connector_name)
+        if status_data:
+            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            connector.debezium_status = {'state': connector_state, 'raw': status_data}
+        else:
+            connector.debezium_status = {'state': 'NOT_FOUND'}
 
-        # Get table count
-        connector.table_count = connector.table_mappings.filter(is_enabled=True).count()
+        # table_mappings is prefetched — count enabled ones in Python (no extra query).
+        connector.table_count = sum(1 for tm in connector.table_mappings.all() if tm.is_enabled)
 
     context = {
         'client': client,
@@ -320,31 +329,29 @@ def connector_list(request, database_pk):
     # Get connector health summary
     health_summary = database.get_connector_health_summary()
 
-    # Get detailed status from Debezium for each connector
-    connector_manager = DebeziumConnectorManager()
+    # Detailed status from the background-refreshed cache — one bulk read for all
+    # source + sink connectors instead of a blocking Connect call per row.
+    from client.utils.connector_status_cache import get_statuses
+    _names = [c.connector_name for c in source_connectors if c.connector_name]
+    _names += [c.sink_connector_name for c in source_connectors if c.sink_connector_name]
+    if sink_connector_name:
+        _names.append(sink_connector_name)
+    _statuses = get_statuses(_names)
 
     connectors_with_status = []
     for config in source_connectors:
-        try:
-            exists, status_data = connector_manager.get_connector_status(config.connector_name)
-            if exists and status_data:
-                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-                config.debezium_status = {'state': connector_state, 'raw': status_data}
-            else:
-                config.debezium_status = {'state': 'NOT_FOUND'}
-                logger.warning(f"Connector {config.connector_name} not found in Kafka Connect — showing as stale")
-        except Exception as e:
-            logger.warning(f"Could not get status for {config.connector_name}: {e}")
-            config.debezium_status = {'state': 'UNKNOWN'}
+        status_data = _statuses.get(config.connector_name)
+        if status_data:
+            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            config.debezium_status = {'state': connector_state, 'raw': status_data}
+        else:
+            config.debezium_status = {'state': 'NOT_FOUND'}
+            logger.warning(f"Connector {config.connector_name} not found in Kafka Connect — showing as stale")
 
         # Sink connector status (per source connector; controlled via row toggle)
         if config.sink_connector_name:
-            try:
-                s_exists, s_data = connector_manager.get_connector_status(config.sink_connector_name)
-                s_state = s_data.get('connector', {}).get('state', 'UNKNOWN') if (s_exists and s_data) else 'NOT_FOUND'
-            except Exception as e:
-                logger.warning(f"Could not get sink status for {config.sink_connector_name}: {e}")
-                s_state = 'ERROR'
+            s_data = _statuses.get(config.sink_connector_name)
+            s_state = s_data.get('connector', {}).get('state', 'UNKNOWN') if s_data else 'NOT_FOUND'
             config.sink_status = {'state': s_state}
         else:
             config.sink_status = {'state': 'NOT_CONFIGURED'}
@@ -364,12 +371,9 @@ def connector_list(request, database_pk):
     )
     health_summary['total_tables'] = sum(c.table_count for c in connectors_with_status)
 
-    # Get sink connector status
-    try:
-        sink_status = connector_manager.get_connector_status(sink_connector_name)
-    except Exception as e:
-        logger.warning(f"Could not get sink connector status: {e}")
-        sink_status = {'state': 'NOT_CREATED'}
+    # Aggregate sink connector status (from the same bulk cache read above)
+    _sink_data = _statuses.get(sink_connector_name)
+    sink_status = {'state': _sink_data.get('connector', {}).get('state', 'UNKNOWN')} if _sink_data else {'state': 'NOT_CREATED'}
 
     # Check if there are unassigned tables
     try:
