@@ -49,9 +49,9 @@ class SinkConnectorMixin:
                 return False, "No target database configured"
 
             # Generate sink connector name using consistent naming convention.
-            # IMPORTANT: Must match ClientDatabase.get_sink_connector_name() for consistency.
-            # Format: client_{client_id}_db_{src_db_id}_sink (one sink per source connector).
-            sink_connector_name = self.config.client_database.get_sink_connector_name()
+            # IMPORTANT: Must match ReplicationConfig.get_sink_connector_name().
+            # Format: client_{cid}_db_{src_db_id}_v_{ver}_sink (one sink per source connector).
+            sink_connector_name = self.config.get_sink_connector_name()
 
             # Topics for THIS source connector only (one sink per source connector).
             current_topics = self._get_kafka_topics_for_config()
@@ -271,7 +271,7 @@ class SinkConnectorMixin:
                 from client.models import ConnectorHistory
                 ConnectorHistory.mark_connector_deleted(
                     connector_name=sink_connector_name,
-                    notes="Deleted via orchestrator (no remaining sources)"
+                    notes="Deleted via orchestrator (owning source connector removed)"
                 )
                 self._log_info(f"✓ Deleted sink: {sink_connector_name}")
                 return True

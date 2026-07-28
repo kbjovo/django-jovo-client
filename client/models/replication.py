@@ -457,7 +457,25 @@ class ReplicationConfig(models.Model):
     def get_table_count(self):
         """Get count of enabled table mappings"""
         return self.table_mappings.filter(is_enabled=True).count()
-    
+
+    def get_sink_connector_name(self):
+        """
+        Sink connector name dedicated to THIS source connector.
+
+        One sink per source connector: the sink subscribes only to this connector's
+        versioned topic prefix (client_{cid}_db_{db_id}_v_{ver}.*), so pausing,
+        resuming or restarting it affects this connector alone — never its siblings
+        on the same source database or other sources writing to the same target DB.
+
+        Format: client_{client_id}_db_{db_id}_v_{version}_sink
+        """
+        return (
+            f"client_{self.client_database.client_id}"
+            f"_db_{self.client_database_id}"
+            f"_v_{self.connector_version}_sink"
+        )
+
+
     def delete(self, using=None, keep_parents=False, *args, **kwargs):
         """
         Override delete to ensure proper cleanup of all CDC resources.

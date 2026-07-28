@@ -185,7 +185,7 @@ def provision_source(request, config_pk):
 
 def provision_sink(request, config_pk):
     """
-    AJAX Step 4 (create flow): Create or update the shared sink connector.
+    AJAX Step 4 (create flow): Create or update this connector's dedicated sink.
     Returns created_new=True if the sink was freshly created (used by cancel logic).
     """
     if err := _require_post(request):
@@ -197,7 +197,9 @@ def provision_sink(request, config_pk):
 
     try:
         connector_manager = DebeziumConnectorManager()
-        sink_connector_name = database.get_sink_connector_name()
+        # One sink per source connector — named and topic-scoped to THIS config so its
+        # pause/resume/restart never touches sibling connectors.
+        sink_connector_name = replication_config.get_sink_connector_name()
 
         target_database = ClientDatabase.objects.filter(
             client=client,
@@ -216,6 +218,7 @@ def provision_sink(request, config_pk):
             topics=None,
             delete_enabled=True,
             custom_config={'name': sink_connector_name},
+            replication_config=replication_config,
         )
 
         exists, _ = connector_manager.get_connector_status(sink_connector_name)
@@ -225,10 +228,9 @@ def provision_sink(request, config_pk):
             if not sink_success:
                 raise Exception(f"Failed to create sink connector: {sink_error}")
 
-            database.replication_configs.update(
-                sink_connector_name=sink_connector_name,
-                sink_connector_state='RUNNING',
-            )
+            replication_config.sink_connector_name = sink_connector_name
+            replication_config.sink_connector_state = 'RUNNING'
+            replication_config.save(update_fields=['sink_connector_name', 'sink_connector_state'])
 
             ConnectorHistory.record_connector_creation(
                 replication_config,
@@ -271,7 +273,6 @@ def provision_cancel(request, config_pk):
         return err
 
     replication_config = get_object_or_404(ReplicationConfig, pk=config_pk)
-    database = replication_config.client_database
 
     body, _ = _parse_json_body(request)
     completed_steps = body.get('completed_steps', [])
@@ -287,7 +288,7 @@ def provision_cancel(request, config_pk):
 
     if sink_was_new and 'sink_provisioned' in completed_steps:
         try:
-            sink_name = database.get_sink_connector_name()
+            sink_name = replication_config.get_sink_connector_name()
             connector_manager.delete_connector(sink_name, delete_topics=False)
             reverted.append('sink_deleted')
             logger.info(f'provision_cancel: deleted sink connector {sink_name}')

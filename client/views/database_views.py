@@ -825,12 +825,12 @@ class SinkConnectorUpdateView(UpdateView):
 
     def _handle_kafka_connect_update(self, is_destructive, credentials_changed):
         """
-        Apply a target-DB change to every per-source sink connector.
+        Apply a target-DB change to every sink connector.
 
-        New architecture: one sink per source connector, all writing into this single
-        target DB. A target-side change (host/credentials) must therefore be applied to
-        each deployed sink. Each sink is regenerated with its own source config so the
-        scoped topics.regex / DLQ are preserved.
+        One sink per source connector, all writing into this single target DB. A
+        target-side change (host/credentials) must therefore be applied to each deployed
+        sink. Each sink is regenerated from its own owning config so the scoped
+        topics.regex / DLQ / rename transforms are preserved.
         """
         from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
         from jovoclient.utils.debezium.sink_connector_templates import get_sink_connector_config_for_database
@@ -840,36 +840,33 @@ class SinkConnectorUpdateView(UpdateView):
         manager = DebeziumConnectorManager()
 
         for source_db in client.client_databases.filter(is_target=False):
-            sink_name = source_db.get_sink_connector_name()
+            for source_config in source_db.get_source_connectors():
+                sink_name = source_config.get_sink_connector_name()
 
-            exists, _ = manager.get_connector_status(sink_name)
-            if not exists:
-                continue  # Sink not deployed for this source — nothing to do
+                exists, _ = manager.get_connector_status(sink_name)
+                if not exists:
+                    continue  # Sink not deployed for this connector — nothing to do
 
-            # Representative config for this source DB so topics.regex/DLQ stay scoped.
-            source_config = source_db.replication_configs.filter(
-                status__in=['configured', 'active', 'paused', 'error']
-            ).first()
+                # Regenerate from the owning config so topics.regex/DLQ stay scoped to it.
+                sink_config = get_sink_connector_config_for_database(
+                    db_config=target_db,
+                    delete_enabled=True,
+                    custom_config={'name': sink_name},
+                    replication_config=source_config,
+                )
+                if not sink_config:
+                    continue
 
-            sink_config = get_sink_connector_config_for_database(
-                db_config=target_db,
-                delete_enabled=True,
-                custom_config={'name': sink_name},
-                replication_config=source_config,
-            )
-            if not sink_config:
-                continue
-
-            if is_destructive:
-                logger.info(f"Destructive sink change — recreating sink connector: {sink_name}")
-                try:
-                    manager.delete_connector(sink_name)
-                except Exception as e:
-                    logger.warning(f"Error deleting old sink connector {sink_name}: {e}")
-                manager.create_connector(sink_name, sink_config)
-            elif credentials_changed:
-                logger.info(f"Credentials-only sink change — updating config: {sink_name}")
-                manager.update_connector_config(sink_name, sink_config)
+                if is_destructive:
+                    logger.info(f"Destructive sink change — recreating sink connector: {sink_name}")
+                    try:
+                        manager.delete_connector(sink_name)
+                    except Exception as e:
+                        logger.warning(f"Error deleting old sink connector {sink_name}: {e}")
+                    manager.create_connector(sink_name, sink_config)
+                elif credentials_changed:
+                    logger.info(f"Credentials-only sink change — updating config: {sink_name}")
+                    manager.update_connector_config(sink_name, sink_config)
 
 
 class SinkConnectorDeleteView(View):
@@ -884,8 +881,8 @@ class SinkConnectorDeleteView(View):
 
         manager = DebeziumConnectorManager()
 
-        # One sink per source connector — delete every per-source sink that drains
-        # into this target DB.
+        # One sink per source connector — delete every sink that drains into this
+        # target DB.
         for sink_name in ClientDatabase.get_all_sink_connector_names(client):
             try:
                 exists, _ = manager.get_connector_status(sink_name)

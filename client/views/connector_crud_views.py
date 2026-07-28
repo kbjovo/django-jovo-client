@@ -379,8 +379,10 @@ def connector_create_debezium(request, config_pk):
 
         messages.success(request, f"Source connector {replication_config.connector_name} created successfully")
 
-        # Step 3: Check if sink connector exists, if not create it
-        sink_connector_name = database.get_sink_connector_name()
+        # Step 3: Check if this connector's dedicated sink exists, if not create it.
+        # One sink per source connector — name and topics.regex are scoped to THIS
+        # config, so pausing it never affects sibling connectors or other sources.
+        sink_connector_name = replication_config.get_sink_connector_name()
 
         exists, _ = connector_manager.get_connector_status(sink_connector_name)
         if not exists:
@@ -409,7 +411,8 @@ def connector_create_debezium(request, config_pk):
                     custom_config={
                         'name': sink_connector_name,
                         # Do NOT include 'primary.key.fields' - record_key mode extracts keys automatically
-                    }
+                    },
+                    replication_config=replication_config,
                 )
 
                 # Create sink connector
@@ -417,11 +420,10 @@ def connector_create_debezium(request, config_pk):
                 if not sink_success:
                     raise Exception(f"Failed to create sink connector: {sink_error}")
 
-                # Update all configs with sink name
-                database.replication_configs.update(
-                    sink_connector_name=sink_connector_name,
-                    sink_connector_state='RUNNING'
-                )
+                # Record the sink on its owning config only — siblings have their own sinks
+                replication_config.sink_connector_name = sink_connector_name
+                replication_config.sink_connector_state = 'RUNNING'
+                replication_config.save(update_fields=['sink_connector_name', 'sink_connector_state'])
 
                 # Record sink in history
                 ConnectorHistory.record_connector_creation(
@@ -449,7 +451,8 @@ def connector_create_debezium(request, config_pk):
                     delete_enabled=True,
                     custom_config={
                         'name': sink_connector_name,
-                    }
+                    },
+                    replication_config=replication_config,
                 )
 
                 connector_manager.update_connector_config(sink_connector_name, sink_config)

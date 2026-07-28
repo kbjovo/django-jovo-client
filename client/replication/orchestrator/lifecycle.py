@@ -376,22 +376,12 @@ class LifecycleMixin:
                 except Exception as e:
                     self._log_warning(f"⚠️ Source deletion error: {e}")
 
-            # Sink connector is dedicated to THIS source connector (one sink per source DB).
-            # Delete it unless another active config still uses the same source database
-            # (which would share the same per-source sink name).
+            # The sink is dedicated to THIS source connector (one sink per source connector),
+            # so it always goes with it — sibling configs on the same source database have
+            # their own separately named sinks and are unaffected.
             if sink_connector_name:
-                from client.models import ReplicationConfig
-
-                siblings = ReplicationConfig.objects.filter(
-                    client_database=self.config.client_database,
-                    status__in=['configured', 'active', 'paused', 'error'],
-                ).exclude(pk=config_id)
-
-                if siblings.exists():
-                    self._log_info("ℹ️ Another config still uses this source DB — keeping its sink connector")
-                else:
-                    self._log_info("ℹ️ Deleting dedicated sink connector")
-                    self._delete_sink_connector(sink_connector_name)
+                self._log_info("ℹ️ Deleting dedicated sink connector")
+                self._delete_sink_connector(sink_connector_name)
 
             # Optionally delete Kafka topics and their schema registry subjects
             if delete_topics:

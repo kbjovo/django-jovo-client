@@ -323,8 +323,8 @@ def connector_list(request, database_pk):
     # Get all source connectors for this database
     source_connectors = database.get_source_connectors()
 
-    # Get sink connector info
-    sink_connector_name = database.get_sink_connector_name()
+    # Sink connectors are one-per-source-connector, so this database has one per config.
+    sink_connector_names = [c.get_sink_connector_name() for c in source_connectors]
 
     # Get connector health summary
     health_summary = database.get_connector_health_summary()
@@ -334,8 +334,7 @@ def connector_list(request, database_pk):
     from client.utils.connector_status_cache import get_statuses
     _names = [c.connector_name for c in source_connectors if c.connector_name]
     _names += [c.sink_connector_name for c in source_connectors if c.sink_connector_name]
-    if sink_connector_name:
-        _names.append(sink_connector_name)
+    _names += sink_connector_names
     _statuses = get_statuses(_names)
 
     connectors_with_status = []
@@ -371,9 +370,21 @@ def connector_list(request, database_pk):
     )
     health_summary['total_tables'] = sum(c.table_count for c in connectors_with_status)
 
-    # Aggregate sink connector status (from the same bulk cache read above)
-    _sink_data = _statuses.get(sink_connector_name)
-    sink_status = {'state': _sink_data.get('connector', {}).get('state', 'UNKNOWN')} if _sink_data else {'state': 'NOT_CREATED'}
+    # Aggregate this database's sink connectors into one badge (from the same bulk cache
+    # read above): FAILED if any failed, PAUSED if any paused, RUNNING only if all are.
+    # Per-connector state stays on config.sink_status — that's what the row toggle drives.
+    _sink_states = [
+        (_statuses.get(name) or {}).get('connector', {}).get('state', 'NOT_CREATED')
+        for name in sink_connector_names
+    ]
+    if any(s == 'FAILED' for s in _sink_states):
+        sink_status = {'state': 'FAILED'}
+    elif any(s == 'PAUSED' for s in _sink_states):
+        sink_status = {'state': 'PAUSED'}
+    elif _sink_states and all(s == 'RUNNING' for s in _sink_states):
+        sink_status = {'state': 'RUNNING'}
+    else:
+        sink_status = {'state': 'NOT_CREATED' if not _sink_states else 'UNKNOWN'}
 
     # Check if there are unassigned tables
     try:
@@ -395,7 +406,7 @@ def connector_list(request, database_pk):
         'database': database,
         'client': client,
         'source_connectors': connectors_with_status,
-        'sink_connector_name': sink_connector_name,
+        'sink_connector_names': sink_connector_names,
         'sink_status': sink_status,
         'target_database': client.get_target_database(),
         'health_summary': health_summary,

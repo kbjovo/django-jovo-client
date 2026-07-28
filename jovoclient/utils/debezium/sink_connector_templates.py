@@ -21,7 +21,38 @@ from client.models.database import ClientDatabase
 logger = logging.getLogger(__name__)
 
 
-def _get_custom_table_transforms(client: Client, config: Dict, source_db_id: Optional[int] = None) -> List[str]:
+def _get_sink_topic_scope(client: Client, replication_config=None) -> tuple:
+    """
+    Build the topic-prefix regex and DLQ topic that scope a sink to ONE source connector.
+
+    One sink per source connector: the scope pins both the source database id and the
+    connector version, so a sink never consumes another connector's topics. Without
+    this pinning a single sink drains every connector's topics, which is what made
+    pause/resume appear to act on all connectors at once.
+
+    Falls back to a client-wide wildcard only when no replication_config is supplied —
+    that fallback is a bug at the call site, so it is logged loudly.
+
+    Returns:
+        (topic_prefix_regex, dlq_topic)
+    """
+    if replication_config is None:
+        logger.warning(
+            "Sink config built without replication_config — falling back to a client-wide "
+            "topic scope. This sink will consume EVERY source connector's topics and its "
+            "pause/resume will affect all of them."
+        )
+        return f"client_{client.id}_db_\\d+_v_\\d+", f"client_{client.id}.dlq"
+
+    prefix = (
+        f"client_{client.id}"
+        f"_db_{replication_config.client_database_id}"
+        f"_v_{replication_config.connector_version}"
+    )
+    return prefix, f"{prefix}.dlq"
+
+
+def _get_custom_table_transforms(client: Client, config: Dict, replication_config=None) -> List[str]:
     """
     Build per-table RegexRouter transforms for tables whose target_table name
     differs from the default sink connector naming ({schema}_{table}).
@@ -36,6 +67,8 @@ def _get_custom_table_transforms(client: Client, config: Dict, source_db_id: Opt
     Args:
         client: Client instance (used to query all table mappings)
         config: Sink connector config dict to update in-place
+        replication_config: Scope transforms to this source connector's own mappings.
+            When None, every mapping for the client is included (wildcard fallback).
 
     Returns:
         List of transform names (in insertion order, duplicates removed)
@@ -49,10 +82,12 @@ def _get_custom_table_transforms(client: Client, config: Dict, source_db_id: Opt
             is_enabled=True,
         ).select_related('replication_config__client_database').order_by('-id')
 
-        # Scope to a single source DB so each per-source sink only carries its own
-        # rename transforms (one sink per source connector).
-        if source_db_id is not None:
-            all_mappings = all_mappings.filter(replication_config__client_database__id=source_db_id)
+        # Scope to a single source connector so each sink only carries its own rename
+        # transforms (one sink per source connector).
+        version_segment = "_v_\\d+"
+        if replication_config is not None:
+            all_mappings = all_mappings.filter(replication_config=replication_config)
+            version_segment = f"_v_{replication_config.connector_version}"
 
         custom_transform_names: List[str] = []
         seen_names: set = set()
@@ -89,22 +124,22 @@ def _get_custom_table_transforms(client: Client, config: Dict, source_db_id: Opt
                 continue  # Already added (same source db/schema/table)
             seen_names.add(transform_name)
 
-            # Match the specific topic for this source db / schema / table across
-            # any connector version.
-            # MySQL/PostgreSQL/Oracle: client_{cid}_db_{db_id}_v_\d+.{schema}.{table}  (3 segments)
-            # SQL Server:              client_{cid}_db_{db_id}_v_\d+.{db_name}.{schema}.{table} (4 segments)
+            # Match the specific topic for this source db / schema / table, pinned to
+            # this sink's own connector version (or any version in the wildcard fallback).
+            # MySQL/PostgreSQL/Oracle: client_{cid}_db_{db_id}_v_{ver}.{schema}.{table}  (3 segments)
+            # SQL Server:              client_{cid}_db_{db_id}_v_{ver}.{db_name}.{schema}.{table} (4 segments)
             # Oracle topics are 3-segment (prefix.SCHEMA.TABLE) — NOT 4-segment like SQL Server.
             # Use single backslash escaping: Python \\d+ -> string \d+ -> Java regex digit+
             if db_type in ('mssql', 'sqlserver'):
                 topic_regex = (
-                    f"client_{client.id}_db_{db_id}_v_\\d+"
+                    f"client_{client.id}_db_{db_id}{version_segment}"
                     f"\\.{_re.escape(source_db.database_name)}"
                     f"\\.{_re.escape(schema_in_topic)}"
                     f"\\.{_re.escape(source_table)}"
                 )
             else:
                 topic_regex = (
-                    f"client_{client.id}_db_{db_id}_v_\\d+"
+                    f"client_{client.id}_db_{db_id}{version_segment}"
                     f"\\.{_re.escape(schema_in_topic)}"
                     f"\\.{_re.escape(source_table)}"
                 )
@@ -165,9 +200,8 @@ def get_mysql_sink_connector_config(
     # connectTimeout fails fast when the target is down so control returns to the retry loop.
     jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}?connectTimeout=30000"
 
-    # Source DB id scopes this sink to a single source connector's topics (one sink per
-    # source connector). Falls back to a wildcard only if no replication_config is given.
-    src_db_id = replication_config.client_database.id if replication_config else None
+    # Scopes this sink to a single source connector's topics (one sink per source connector).
+    topic_prefix_regex, dlq_topic = _get_sink_topic_scope(client, replication_config)
 
     # Default configuration
     config = {
@@ -265,8 +299,7 @@ def get_mysql_sink_connector_config(
 
     # Add Dead Letter Queue configuration if enabled
     if dlq_enabled and errors_tolerance == 'all':
-        # Per source-DB DLQ for isolation (one sink per source connector).
-        dlq_topic = f"client_{client.id}_db_{src_db_id}.dlq" if src_db_id else f"client_{client.id}.dlq"
+        # Per source-connector DLQ for isolation (one sink per source connector).
         config["errors.deadletterqueue.topic.name"] = dlq_topic
         config["errors.deadletterqueue.topic.replication.factor"] = str(dlq_replication_factor)
         config["errors.deadletterqueue.context.headers.enable"] = str(dlq_context_headers).lower()
@@ -275,8 +308,7 @@ def get_mysql_sink_connector_config(
     if primary_key_fields:
         config["primary.key.fields"] = primary_key_fields
 
-    db_segment = str(src_db_id) if src_db_id else "\\d+"
-    topic_regex = f"client_{client.id}_db_{db_segment}_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
+    topic_regex = f"{topic_prefix_regex}\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
@@ -284,7 +316,7 @@ def get_mysql_sink_connector_config(
     # Custom transforms are prepended so they run before the generic extractTableName.
     # Topics that match a custom rename get routed to the custom table name;
     # the generic $1_$2 extractTableName handles all remaining topics.
-    custom_transforms = _get_custom_table_transforms(client, config, source_db_id=src_db_id)
+    custom_transforms = _get_custom_table_transforms(client, config, replication_config=replication_config)
     if custom_transforms:
         config["transforms"] = "unwrap," + ",".join(custom_transforms) + ",extractTableName"
     else:
@@ -330,9 +362,8 @@ def get_postgresql_sink_connector_config(
     primary_key_fields = custom_config.get('primary.key.fields', '') if custom_config else ''
     jdbc_url = f"jdbc:postgresql://{db_config.host}:{db_config.port}/{db_config.database_name}"
 
-    # Source DB id scopes this sink to a single source connector's topics (one sink per
-    # source connector). Falls back to a wildcard only if no replication_config is given.
-    src_db_id = replication_config.client_database.id if replication_config else None
+    # Scopes this sink to a single source connector's topics (one sink per source connector).
+    topic_prefix_regex, dlq_topic = _get_sink_topic_scope(client, replication_config)
 
     # Default configuration
     config = {
@@ -436,8 +467,7 @@ def get_postgresql_sink_connector_config(
 
     # Add Dead Letter Queue configuration if enabled
     if dlq_enabled and errors_tolerance == 'all':
-        # Per source-DB DLQ for isolation (one sink per source connector).
-        dlq_topic = f"client_{client.id}_db_{src_db_id}.dlq" if src_db_id else f"client_{client.id}.dlq"
+        # Per source-connector DLQ for isolation (one sink per source connector).
         config["errors.deadletterqueue.topic.name"] = dlq_topic
         config["errors.deadletterqueue.topic.replication.factor"] = str(dlq_replication_factor)
         config["errors.deadletterqueue.context.headers.enable"] = str(dlq_context_headers).lower()
@@ -446,25 +476,22 @@ def get_postgresql_sink_connector_config(
     if primary_key_fields:
         config["primary.key.fields"] = primary_key_fields
 
-    # Use topics.regex for auto-subscription to all source connector topics
-    # This allows sink to automatically subscribe when new source connectors are added
-    # Pattern matches: client_{id}_db_{id}_v_{version}.{database}.{table}
+    # Use topics.regex so the sink auto-subscribes to this source connector's tables.
+    # Pattern matches: client_{cid}_db_{db_id}_v_{ver}.{database}.{table}
     # Excludes: ddl_events and debezium_signal tables (DDL events are processed separately)
     # Note: signals topic (client_X_db_Y_v_Z.signals) is naturally excluded as it has only 2 parts
     # Matches both 3-segment topics (MySQL/PostgreSQL: prefix.db.table) and
     # 4-segment topics (SQL Server/Oracle: prefix.db.schema.table).
     # The middle optional group (?:[^.]+\.)? absorbs the extra schema segment.
-    # Scope to a single source connector's topics: client_{cid}_db_{src_db_id}_v_{ver}.*
-    # (one sink per source connector). Fall back to the client-wide wildcard only when
-    # no replication_config was supplied.
-    db_segment = str(src_db_id) if src_db_id else "\\d+"
-    topic_regex = f"client_{client.id}_db_{db_segment}_v_\\d+\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
+    # The prefix pins db id AND connector version, so this sink never picks up another
+    # connector's topics — that is what keeps pause/resume isolated to one connector.
+    topic_regex = f"{topic_prefix_regex}\\.[^.]+\\.(?:[^.]+\\.)?(?!ddl_events$|debezium_signal$)[^.]+"
     config["topics.regex"] = topic_regex
     logger.info(f"Using topics.regex for auto-subscription: {topic_regex}")
 
     # Build custom per-table rename transforms and assemble the full transforms chain.
     # Order: unwrap (flatten envelope) → custom renames → extractTableName → castMicroTime
-    custom_transforms = _get_custom_table_transforms(client, config, source_db_id=src_db_id)
+    custom_transforms = _get_custom_table_transforms(client, config, replication_config=replication_config)
     if custom_transforms:
         config["transforms"] = "unwrap," + ",".join(custom_transforms) + ",extractTableName,castMicroTime"
     else:

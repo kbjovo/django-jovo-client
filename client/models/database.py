@@ -343,32 +343,31 @@ class ClientDatabase(models.Model):
             status__in=['configured', 'active', 'paused', 'error']
         ).order_by('connector_version')
 
-    def get_sink_connector_name(self):
+    def get_sink_connector_names(self):
         """
-        Sink connector name for THIS source database's connector.
+        Sink connector names for this source database — one per source connector.
 
-        New architecture: one sink per source connector. Each source database has a
-        dedicated JDBC sink that drains only that source connector's topics into the
-        client's single target database.
-        Format: client_{client_id}_db_{db_id}_sink
+        Each ReplicationConfig owns a dedicated JDBC sink scoped to its own versioned
+        topic prefix, so a database with several source connectors has several sinks.
+        Use ReplicationConfig.get_sink_connector_name() when you have a specific config.
 
         NOTE: meaningful only for SOURCE databases. For client-wide operations
         (target-DB credential updates, client/target deletion) use
-        get_all_sink_connector_names(client) to act on every per-source sink.
+        get_all_sink_connector_names(client) to act on every sink.
         """
-        return f"client_{self.client.id}_db_{self.id}_sink"
+        return [config.get_sink_connector_name() for config in self.get_source_connectors()]
 
     @staticmethod
     def get_all_sink_connector_names(client):
         """
-        Return every per-source sink connector name for a client (one per source DB).
+        Return every sink connector name for a client (one per source connector).
 
-        Replaces the old single shared sink for flows that must act on all sinks,
-        e.g. updating connection settings when the target DB changes, or tearing
-        down all sinks when the client/target is deleted.
+        Used by flows that must act on all sinks, e.g. updating connection settings
+        when the target DB changes, or tearing down all sinks when the client/target
+        is deleted.
         """
         source_dbs = client.client_databases.filter(is_target=False)
-        return [db.get_sink_connector_name() for db in source_dbs]
+        return [name for db in source_dbs for name in db.get_sink_connector_names()]
 
     def has_active_connectors(self):
         """
@@ -416,5 +415,5 @@ class ClientDatabase(models.Model):
             'failed_source_connectors': failed_sources,
             'total_tables': self.get_total_replicated_tables_count(),
             'health_status': health_status,
-            'sink_connector_name': self.get_sink_connector_name(),
+            'sink_connector_names': self.get_sink_connector_names(),
         }
