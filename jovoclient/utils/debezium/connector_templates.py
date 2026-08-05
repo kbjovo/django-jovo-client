@@ -187,8 +187,15 @@ def get_mysql_connector_config(
         # when running multiple source connectors for the same database with different table sets
         "schema.history.internal.kafka.bootstrap.servers": kafka_bootstrap_servers,
         "schema.history.internal.kafka.topic": f"schema-history.client_{client.id}_db_{db_config.id}_v_{version or 0}",
-        # Only store DDL for captured tables — prevents crashes from DDL on unmonitored tables in the binlog
-        "schema.history.internal.store.only.captured.tables.ddl": "true",
+        # Store DDL for every table in the captured database, not just the ones currently
+        # in table.include.list.  With "true", a table added to the include list later has
+        # no CREATE TABLE in the history topic, so on the next restart the connector rebuilds
+        # its in-memory schema without it and dies on the first binlog row event for that
+        # table with "Encountered change event for table X whose schema isn't known to this
+        # connector".  DDL on unmonitored tables is safe to store — skip.unparseable.ddl
+        # below handles anything Debezium can't parse, and store.only.captured.databases.ddl
+        # (default true) still scopes history to database.include.list.
+        "schema.history.internal.store.only.captured.tables.ddl": "false",
         # Skip unparseable DDL (e.g. CHANGE COLUMN on a renamed table not in history) instead of crashing
         "schema.history.internal.skip.unparseable.ddl": "true",
 

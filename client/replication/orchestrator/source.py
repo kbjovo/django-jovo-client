@@ -331,6 +331,94 @@ class SourceConnectorMixin:
         return False
 
 
+    def _restart_source_for_new_tables(
+        self, base_config: Optional[Dict[str, Any]] = None, timeout: int = 180
+    ) -> Tuple[bool, str]:
+        """
+        Restart the source connector so it picks up newly added tables — rebuilding
+        the schema history first when the connector needs it.
+
+        A plain restart is NOT enough for MySQL.  The connector rebuilds its in-memory
+        schema by replaying the Kafka schema-history topic, and that topic only contains
+        DDL for tables that were already captured when it was written.  A table added to
+        table.include.list afterwards has no CREATE TABLE anywhere in history, so the
+        connector resumes from its stored binlog offset and fails on the first row event
+        for that table:
+
+            Encountered change event for table <db>.<table> whose schema isn't known
+            to this connector
+
+        Connectors created after the store.only.captured.tables.ddl=false change already
+        have DDL for every table in the database, but existing connectors do not — and we
+        cannot tell them apart from config alone, so MySQL always takes the recovery path.
+        It is a no-op cost when history is already complete.
+
+        Recovery cycle: patch snapshot.mode=recovery -> restart -> Debezium rebuilds the
+        history topic from the live database (SHOW CREATE TABLE for all captured tables,
+        including the new one) while keeping the stored offset -> wait until streaming is
+        live -> revert snapshot.mode.  Non-MySQL sources just get a plain restart.
+
+        Args:
+            base_config: connector config already PUT to Connect; re-read from Connect
+                when omitted.
+            timeout: seconds to wait for streaming to come back up after the restart.
+
+        Returns:
+            (streaming_confirmed, message)
+        """
+        connector_name = self.config.connector_name
+        if not connector_name:
+            return False, "No connector configured"
+
+        db_type = self.config.client_database.db_type.lower()
+
+        if db_type != 'mysql':
+            self.connector_manager.restart_connector(connector_name)
+            ready = self._wait_for_connector_streaming(timeout=timeout)
+            return ready, "Connector restarted" if ready else "Connector restart timed out"
+
+        current_config = base_config or self.connector_manager.get_connector_config(connector_name)
+        if not current_config:
+            return False, "Could not read connector config from Kafka Connect"
+
+        original_snapshot_mode = current_config.get('snapshot.mode', 'initial')
+
+        # Rebuild schema history from the live database, keeping the stored offset.
+        recovery_config = dict(current_config)
+        recovery_config['snapshot.mode'] = 'recovery'
+        ok, err = self.connector_manager.update_connector_config(connector_name, recovery_config)
+        if not ok:
+            return False, f"Failed to set snapshot.mode=recovery: {err}"
+        self._log_info("  → snapshot.mode=recovery — rebuilding schema history for the new table(s)")
+
+        self.connector_manager.restart_connector(connector_name)
+        # A config change restarts tasks, but a task already FAILED on the unknown-table
+        # error needs an explicit kick.
+        _, status_data = self.connector_manager.get_connector_status(connector_name)
+        for task in (status_data or {}).get('tasks', []):
+            if task.get('state') == 'FAILED':
+                self.connector_manager.restart_task(connector_name, task.get('id', 0))
+
+        # Only revert once streaming is live — that is the signal the rebuild finished.
+        # Reverting mid-rebuild would leave the history topic incomplete.
+        ready = self._wait_for_connector_streaming(timeout=timeout)
+
+        revert_config = dict(recovery_config)
+        revert_config['snapshot.mode'] = original_snapshot_mode
+        reverted, revert_err = self.connector_manager.update_connector_config(
+            connector_name, revert_config
+        )
+        if not reverted:
+            # Leaving snapshot.mode=recovery would rebuild history on every future restart.
+            self._log_error(f"⚠️ Failed to revert snapshot.mode to '{original_snapshot_mode}': {revert_err}")
+        else:
+            self._log_info(f"  → snapshot.mode reverted to '{original_snapshot_mode}'")
+
+        if ready:
+            return True, "Schema history rebuilt — connector streaming"
+        return False, "Schema history rebuild did not reach streaming state within timeout"
+
+
     def _verify_incremental_snapshot_started(
         self, signal_id: str, grace_seconds: int = 10, polls: int = 3
     ) -> dict:

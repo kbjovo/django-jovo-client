@@ -557,21 +557,22 @@ class TablesMixin:
             if db_config.db_type == 'postgresql':
                 self._ensure_postgres_publication_tables(db_config, added_tables)
 
-            # Restart the connector so it reloads its table.include.list and
-            # replays the schema history from Kafka for the new table(s).
-            # We must NOT send the snapshot signal until schema replay is done —
-            # doing so causes a NullPointerException in Debezium because the
-            # in-memory schema cache doesn't yet know about the new table.
-            self._log_info("  → Restarting connector to reload schema history...")
-            self.connector_manager.restart_connector(self.config.connector_name)
-
-            # Wait until the streaming MBean reports Connected=True.
-            # That is the authoritative signal that schema history replay is
-            # complete and the binlog connection is live — no hardcoded sleeps.
-            self._log_info("  → Waiting for connector to finish schema history replay...")
-            connector_ready = self._wait_for_connector_streaming(timeout=60)
+            # Restart the connector so it reloads its table.include.list and knows the
+            # schema of the new table(s).  For MySQL a plain restart is not enough — the
+            # schema-history topic has no DDL for a table that wasn't captured when the
+            # history was written, so the connector would resume from its stored binlog
+            # offset and fail with "Encountered change event for table X whose schema
+            # isn't known to this connector".  _restart_source_for_new_tables rebuilds
+            # history from the live database first.  It also blocks until streaming is
+            # live: we must NOT send the snapshot signal before then, or Debezium throws
+            # a NullPointerException because the in-memory schema cache doesn't yet know
+            # about the new table.
+            self._log_info("  → Restarting connector and rebuilding schema history...")
+            connector_ready, restart_msg = self._restart_source_for_new_tables(
+                base_config=source_config, timeout=180
+            )
             if connector_ready:
-                self._log_info("✓ Connector streaming — schema ready for snapshot signal")
+                self._log_info(f"✓ {restart_msg} — schema ready for snapshot signal")
             else:
                 # Check if at least RUNNING before giving up
                 exists, status_data = self.connector_manager.get_connector_status(self.config.connector_name)
@@ -583,7 +584,7 @@ class TablesMixin:
                         'msg': "Connector failed after config update",
                     })
                     return False, "Connector failed after config update", steps
-                self._log_warning("⚠️ Streaming MBean not yet Connected — proceeding anyway")
+                self._log_warning(f"⚠️ {restart_msg} — proceeding anyway")
 
             steps.append({
                 'id': 'src_config',
