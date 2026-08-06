@@ -7,6 +7,7 @@ Provides comprehensive type mappings for:
 - PostgreSQL source types
 """
 
+import re
 from typing import Dict, Type, Any, Optional
 from sqlalchemy import (
     Integer, BigInteger, SmallInteger, Float, Numeric,
@@ -190,6 +191,142 @@ POSTGRESQL_TYPE_MAP: Dict[str, Type] = {
     'xml': Text,
     'oid': Integer,
 }
+
+
+# ---------------------------------------------------------------------------
+# Widening detection
+#
+# Used to decide whether a source column whose name did not change still needs an
+# ALTER on the target — e.g. VARCHAR(50) -> VARCHAR(255).  Only widening changes
+# are applied: narrowing the target could truncate rows that are already
+# replicated, and the sink writes shorter-than-declared values without complaint.
+# ---------------------------------------------------------------------------
+
+# Storage capacity in characters for types whose size is fixed by the type name.
+_FIXED_CAPACITY: Dict[str, int] = {
+    'TINYTEXT': 255,
+    'TEXT': 65535,
+    'MEDIUMTEXT': 16777215,
+    'LONGTEXT': 4294967295,
+    'TINYBLOB': 255,
+    'BLOB': 65535,
+    'MEDIUMBLOB': 16777215,
+    'LONGBLOB': 4294967295,
+    # PostgreSQL unbounded types — larger than any bounded MySQL type.
+    'BYTEA': 4294967295,
+    'JSON': 4294967295,
+    'JSONB': 4294967295,
+}
+
+# Types whose capacity comes from the declared length.
+_SIZED_TYPES = {
+    'VARCHAR', 'CHAR', 'CHARACTER', 'CHARACTER VARYING', 'NVARCHAR', 'NCHAR',
+    'BINARY', 'VARBINARY',
+}
+
+_INTEGER_RANK: Dict[str, int] = {
+    'BIT': 0, 'BOOL': 0, 'BOOLEAN': 0,
+    'TINYINT': 1,
+    'SMALLINT': 2, 'SMALLSERIAL': 2,
+    'MEDIUMINT': 3,
+    'INT': 4, 'INTEGER': 4, 'SERIAL': 4,
+    'BIGINT': 5, 'BIGSERIAL': 5,
+}
+
+_FLOAT_RANK: Dict[str, int] = {
+    'FLOAT': 1, 'REAL': 1,
+    'DOUBLE': 2, 'DOUBLE PRECISION': 2,
+}
+
+_DECIMAL_TYPES = {'DECIMAL', 'NUMERIC', 'DEC'}
+
+
+def parse_sql_type(type_str: str) -> tuple:
+    """
+    Split a SQL type string into (base_type, length, scale).
+
+    Handles the forms produced both by SQLAlchemy's inspector (``VARCHAR(50)``,
+    ``DECIMAL(10, 2)``) and by the target adapters' type mappers.  Non-numeric
+    parameters (``ENUM('a','b')``) yield None for length and scale.
+
+    Returns:
+        (base_type_upper, length_or_None, scale_or_None); base is '' if unparseable.
+    """
+    if not type_str:
+        return '', None, None
+
+    text_value = str(type_str).strip()
+    match = re.match(r'^\s*([A-Za-z_ ]+?)\s*(?:\(([^)]*)\))?\s*$', text_value)
+    if not match:
+        return '', None, None
+
+    base = re.sub(r'\s+', ' ', match.group(1)).strip().upper()
+    params = match.group(2)
+    if not params:
+        return base, None, None
+
+    numbers = [p.strip() for p in params.split(',')]
+    length = int(numbers[0]) if numbers and numbers[0].isdigit() else None
+    scale = int(numbers[1]) if len(numbers) > 1 and numbers[1].isdigit() else None
+    return base, length, scale
+
+
+def _capacity(base: str, length: Optional[int]) -> Optional[int]:
+    """Storage capacity for string/binary types, or None if not such a type."""
+    if base in _FIXED_CAPACITY:
+        return _FIXED_CAPACITY[base]
+    if base in _SIZED_TYPES:
+        return length
+    return None
+
+
+def is_widening_change(current_type: str, new_type: str) -> bool:
+    """
+    Whether changing a column from current_type to new_type only ever makes it
+    hold more, so the ALTER is safe to apply to a target table that already has
+    replicated rows.
+
+    Returns False for identical types, narrowing changes, and any pair we cannot
+    confidently classify — the caller skips those rather than risking data loss.
+
+    Examples:
+        VARCHAR(50) -> VARCHAR(255)   True
+        VARCHAR(255) -> TEXT          True
+        INT -> BIGINT                 True
+        DECIMAL(10,2) -> DECIMAL(12,2) True
+        VARCHAR(255) -> VARCHAR(50)   False
+        TEXT -> VARCHAR(255)          False
+        VARCHAR(50) -> INT            False
+    """
+    cur_base, cur_len, cur_scale = parse_sql_type(current_type)
+    new_base, new_len, new_scale = parse_sql_type(new_type)
+
+    if not cur_base or not new_base:
+        return False
+    if (cur_base, cur_len, cur_scale) == (new_base, new_len, new_scale):
+        return False
+
+    cur_capacity = _capacity(cur_base, cur_len)
+    new_capacity = _capacity(new_base, new_len)
+    if cur_capacity is not None and new_capacity is not None:
+        return new_capacity > cur_capacity
+
+    if cur_base in _INTEGER_RANK and new_base in _INTEGER_RANK:
+        return _INTEGER_RANK[new_base] > _INTEGER_RANK[cur_base]
+
+    if cur_base in _FLOAT_RANK and new_base in _FLOAT_RANK:
+        return _FLOAT_RANK[new_base] > _FLOAT_RANK[cur_base]
+
+    if cur_base in _DECIMAL_TYPES and new_base in _DECIMAL_TYPES:
+        return (new_len or 0) > (cur_len or 0) or (new_scale or 0) > (cur_scale or 0)
+
+    # Integer promoted to a type that can hold fractional values.
+    if cur_base in _INTEGER_RANK and (new_base in _DECIMAL_TYPES or new_base in _FLOAT_RANK):
+        return True
+
+    # Anything else (VARCHAR -> INT, DATE -> DATETIME, unknown vendor types) is a
+    # judgement call we decline to make automatically.
+    return False
 
 
 def get_type_map(source_db_type: str) -> Dict[str, Type]:

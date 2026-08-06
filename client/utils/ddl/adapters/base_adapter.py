@@ -228,6 +228,25 @@ class BaseTargetAdapter(ABC):
             logger.error(f"Error getting table columns: {e}")
             return []
 
+    def map_source_column_type(self, column: Dict) -> Optional[str]:
+        """
+        Target-dialect type string a source column definition should map to.
+
+        Lets callers compare what a column *should* be against what the target
+        actually has, without reimplementing per-dialect type mapping.  Comparing
+        the raw source type would produce false positives whenever source and
+        target dialects spell the same type differently.
+
+        Args:
+            column: Debezium tableChanges column dict (name, typeName, length,
+                scale, sourceDbType)
+
+        Returns:
+            Type string such as 'VARCHAR(255)', or None if this adapter cannot
+            map it — callers must treat None as "don't know, change nothing".
+        """
+        return None
+
     def get_primary_keys(self, table_name: str) -> List[str]:
         """
         Get primary key columns from existing table.

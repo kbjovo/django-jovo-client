@@ -312,6 +312,14 @@ class MySQLTargetAdapter(BaseTargetAdapter):
 
         return ' '.join(filter(None, parts))
 
+    def map_source_column_type(self, column: Dict) -> Optional[str]:
+        """Target-dialect type string for a source column (see base adapter)."""
+        try:
+            return self._map_to_mysql_type(column)
+        except Exception as e:
+            logger.debug(f"Could not map source column {column.get('name')}: {e}")
+            return None
+
     def _map_to_mysql_type(self, column: Dict) -> str:
         """
         Map column to MySQL type string.

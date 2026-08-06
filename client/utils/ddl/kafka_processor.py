@@ -19,7 +19,7 @@ from confluent_kafka.admin import AdminClient
 from sqlalchemy.engine import Engine
 
 from .base_processor import BaseDDLProcessor, DDLOperation, DDLOperationType
-from .type_maps import get_type_map
+from .type_maps import get_type_map, is_widening_change
 from client.models.replication import ReplicationConfig
 
 logger = logging.getLogger(__name__)
@@ -890,6 +890,17 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             if source_name in target_by_name:
                 matched_target.add(source_name)
                 matched_source.add(source_name)
+                # Same name on both sides does not mean the same definition — a
+                # MODIFY that only widens a column (VARCHAR(50) -> VARCHAR(255))
+                # keeps the name, and skipping it leaves the target too narrow.
+                # The sink then dies on "Data too long for column" the first time
+                # an oversized value arrives, because schema.evolution=basic only
+                # adds columns and never alters existing ones.
+                type_op = self._detect_column_type_change(
+                    table_name, target_by_name[source_name], source_col
+                )
+                if type_op:
+                    operations.append(type_op)
                 continue
 
             if pos < len(target_columns):
@@ -940,6 +951,49 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 ))
 
         return operations
+
+    def _detect_column_type_change(
+        self,
+        table_name: str,
+        target_col: Dict,
+        source_col: Dict
+    ) -> Optional[DDLOperation]:
+        """
+        Build a MODIFY_COLUMN operation when a name-matched column outgrew the
+        target definition.
+
+        Compares the target's current type against what the source column *should*
+        map to in the target dialect, so dialect spelling differences (source
+        VARCHAR vs target VARCHAR, source TINYINT vs target SMALLINT) don't read as
+        changes.  Only widening changes are emitted: narrowing the target could
+        truncate rows that are already replicated, and the sink stores
+        shorter-than-declared values without complaint.
+
+        Returns None when nothing needs to change or when the change cannot be
+        classified confidently.
+        """
+        expected_type = self.target_adapter.map_source_column_type(source_col)
+        if not expected_type:
+            return None
+
+        current_type = str(target_col.get('type', '')).strip()
+        if not current_type:
+            return None
+
+        if not is_widening_change(current_type, expected_type):
+            return None
+
+        column_name = source_col.get('name')
+        logger.info(
+            f"Column type widening detected on {table_name}.{column_name}: "
+            f"{current_type} -> {expected_type}"
+        )
+        return DDLOperation(
+            operation_type=DDLOperationType.MODIFY_COLUMN,
+            table_name=table_name,
+            details={'column': source_col, 'old_type': current_type},
+            is_destructive=False
+        )
 
     def _extract_renames_from_ddl(self, ddl: str) -> Dict[str, str]:
         """

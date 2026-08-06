@@ -366,6 +366,8 @@ class SourceConnectorMixin:
         Returns:
             (streaming_confirmed, message)
         """
+        import time
+
         connector_name = self.config.connector_name
         if not connector_name:
             return False, "No connector configured"
@@ -391,7 +393,19 @@ class SourceConnectorMixin:
             return False, f"Failed to set snapshot.mode=recovery: {err}"
         self._log_info("  → snapshot.mode=recovery — rebuilding schema history for the new table(s)")
 
-        self.connector_manager.restart_connector(connector_name)
+        # Connect rejects a restart with HTTP 409 ("stale configuration") while the config
+        # PUT above is still propagating through the config topic, so retry briefly.
+        for attempt in range(10):
+            restarted, restart_err = self.connector_manager.restart_connector(connector_name)
+            if restarted:
+                break
+            if attempt == 0:
+                self._log_info(f"  → Restart not accepted yet ({restart_err}) — retrying")
+            time.sleep(2)
+        else:
+            # Not fatal: the config change alone reconfigures and restarts the tasks.
+            self._log_warning("  → Restart never accepted; relying on the config change to bounce tasks")
+
         # A config change restarts tasks, but a task already FAILED on the unknown-table
         # error needs an explicit kick.
         _, status_data = self.connector_manager.get_connector_status(connector_name)
@@ -414,9 +428,22 @@ class SourceConnectorMixin:
         else:
             self._log_info(f"  → snapshot.mode reverted to '{original_snapshot_mode}'")
 
+        # The streaming MBean can briefly report a stale Connected=True from before the
+        # task bounced, so confirm against Connect itself before claiming success.
+        _, status_data = self.connector_manager.get_connector_status(connector_name)
+        tasks = (status_data or {}).get('tasks', [])
+        failed = [t for t in tasks if t.get('state') == 'FAILED']
+        if failed:
+            trace = (failed[0].get('trace') or '').strip().splitlines()
+            headline = trace[0] if trace else 'no trace available'
+            return False, f"Connector still FAILED after schema history rebuild: {headline}"
+        if not tasks or not all(t.get('state') == 'RUNNING' for t in tasks):
+            states = ', '.join(sorted({t.get('state', 'UNKNOWN') for t in tasks})) or 'no tasks'
+            return False, f"Schema history rebuilt but tasks are not RUNNING ({states})"
+
         if ready:
             return True, "Schema history rebuilt — connector streaming"
-        return False, "Schema history rebuild did not reach streaming state within timeout"
+        return False, "Tasks RUNNING but streaming did not come up within timeout"
 
 
     def _verify_incremental_snapshot_started(
