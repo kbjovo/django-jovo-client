@@ -3,6 +3,7 @@ File: client/utils/table_creator.py
 Create tables in target database based on replication configuration
 """
 
+import hashlib
 import logging
 import re
 from sqlalchemy import MetaData, Table, Column, inspect, text
@@ -581,8 +582,16 @@ def add_foreign_keys_to_target(replication_config, specific_tables=None):
 
         # Create foreign keys on target
         target_db_type = target_db.db_type.lower()
+        if target_db_type not in ('mysql', 'postgresql'):
+            logger.warning(f"   ⚠️ Unsupported target DB type for FK: {target_db_type}")
+            return 0, len(all_foreign_keys), []
 
-        with target_engine.begin() as conn:
+        existing_cache = {}
+
+        # AUTOCOMMIT: each ALTER TABLE stands alone. In one shared transaction a single
+        # PostgreSQL failure aborts every later statement and rolls back earlier ones.
+        with target_engine.connect().execution_options(isolation_level='AUTOCOMMIT') as conn:
+            schema_names = _get_schema_wide_names(conn, target_db_type, 'fk')
             for fk_data in all_foreign_keys:
                 target_table = fk_data['target_table']
                 fk_info = fk_data['fk_info']
@@ -606,8 +615,24 @@ def add_foreign_keys_to_target(replication_config, specific_tables=None):
                         source_db.db_type.lower(), source_db.database_name,
                     )
 
-                    # Generate unique FK name
-                    new_fk_name = f"fk_{target_table}_{constrained_columns[0]}"[:64]
+                    # Match existing FKs by definition, not name, so FKs created under an
+                    # older naming scheme (or by hand) aren't duplicated.
+                    if target_table not in existing_cache:
+                        existing_cache[target_table] = _get_existing_foreign_keys(conn, target_table)
+                    existing = existing_cache[target_table]
+                    signature = _fk_signature(constrained_columns, target_referred_table, referred_columns)
+                    if signature in existing.values():
+                        logger.info(
+                            f"   ℹ️ FK on {target_table} ({', '.join(constrained_columns)}) -> "
+                            f"{target_referred_table} already exists"
+                        )
+                        skipped_count += 1
+                        continue
+
+                    new_fk_name = _target_constraint_name(
+                        'fk', target_table, constrained_columns, schema_names | existing.keys(),
+                        extra=(target_referred_table, ','.join(referred_columns)),
+                    )
 
                     # Build ALTER TABLE statement based on database type
                     if target_db_type == 'mysql':
@@ -619,7 +644,7 @@ def add_foreign_keys_to_target(replication_config, specific_tables=None):
                             FOREIGN KEY ({cols})
                             REFERENCES `{target_referred_table}` ({ref_cols})
                         """
-                    elif target_db_type == 'postgresql':
+                    else:
                         cols = ', '.join(f'"{c}"' for c in constrained_columns)
                         ref_cols = ', '.join(f'"{c}"' for c in referred_columns)
                         alter_sql = f"""
@@ -628,46 +653,11 @@ def add_foreign_keys_to_target(replication_config, specific_tables=None):
                             FOREIGN KEY ({cols})
                             REFERENCES "{target_referred_table}" ({ref_cols})
                         """
-                    else:
-                        logger.warning(f"   ⚠️ Unsupported target DB type for FK: {target_db_type}")
-                        skipped_count += 1
-                        continue
-
-                    # Check if FK already exists
-                    if target_db_type == 'mysql':
-                        check_sql = text(f"""
-                            SELECT CONSTRAINT_NAME
-                            FROM information_schema.TABLE_CONSTRAINTS
-                            WHERE TABLE_SCHEMA = :db_name
-                            AND TABLE_NAME = :table_name
-                            AND CONSTRAINT_TYPE = 'FOREIGN KEY'
-                            AND CONSTRAINT_NAME = :fk_name
-                        """)
-                        result = conn.execute(check_sql, {
-                            'db_name': target_db.database_name,
-                            'table_name': target_table,
-                            'fk_name': new_fk_name
-                        })
-                    elif target_db_type == 'postgresql':
-                        check_sql = text(f"""
-                            SELECT constraint_name
-                            FROM information_schema.table_constraints
-                            WHERE table_name = :table_name
-                            AND constraint_type = 'FOREIGN KEY'
-                            AND constraint_name = :fk_name
-                        """)
-                        result = conn.execute(check_sql, {
-                            'table_name': target_table,
-                            'fk_name': new_fk_name
-                        })
-
-                    if result.fetchone():
-                        logger.info(f"   ℹ️ FK {new_fk_name} already exists on {target_table}")
-                        skipped_count += 1
-                        continue
 
                     # Execute ALTER TABLE
                     conn.execute(text(alter_sql))
+                    existing[new_fk_name] = signature
+                    schema_names.add(new_fk_name)
                     logger.info(f"   ✅ Created FK: {new_fk_name} on {target_table} -> {target_referred_table}")
                     created_count += 1
 
@@ -751,6 +741,131 @@ def add_foreign_keys_after_sink(replication_config_id: int, table_names: list = 
         return False, error_msg, {}
 
 
+# InnoDB (DYNAMIC row format) max index key = 3072 bytes; utf8mb4 = 4 bytes/char → 768 chars.
+MYSQL_MAX_KEY_CHARS = 768
+MYSQL_DEFAULT_PREFIX_CHARS = 255
+
+
+def _get_mysql_column_types(conn, db_name, table_name):
+    """Return {column_name: data_type} (lower-cased) for a MySQL target table."""
+    rows = conn.execute(text("""
+        SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = :db_name AND TABLE_NAME = :table_name
+    """), {'db_name': db_name, 'table_name': table_name}).fetchall()
+    return {r[0]: (r[1] or '').lower() for r in rows}
+
+
+def _build_mysql_index_spec(idx_info, target_col_types):
+    """
+    Build the MySQL CREATE INDEX keyword and column list for a reflected source index.
+
+    MySQL cannot index TEXT/BLOB columns without a prefix length (error 1170), and the
+    sink auto-creates target columns as TEXT whenever the source column is TEXT/unbounded.
+    Prefix lengths from the source index (SQLAlchemy's dialect_options['mysql_length'])
+    are kept; TEXT/BLOB columns without one get a default prefix.
+
+    A UNIQUE index that needs an invented prefix is created as a plain index: uniqueness
+    on only the first N chars would reject rows the source treats as distinct and stall
+    the sink.
+
+    Returns:
+        Tuple[str, str, bool]: (kind_kw, cols_sql, downgraded_unique)
+            kind_kw is 'UNIQUE ', 'FULLTEXT ', 'SPATIAL ' or ''.
+    """
+    col_names = idx_info.get('column_names') or []
+    opts = idx_info.get('dialect_options') or {}
+
+    flavor = (opts.get('mysql_prefix') or opts.get('mariadb_prefix') or '').upper()
+    if flavor in ('FULLTEXT', 'SPATIAL'):
+        # These index types don't take prefix lengths
+        return f"{flavor} ", ', '.join(f"`{c}`" for c in col_names), False
+
+    source_lengths = opts.get('mysql_length') or opts.get('mariadb_length') or {}
+    if isinstance(source_lengths, int):
+        source_lengths = {c: source_lengths for c in col_names}
+
+    needs_prefix = [
+        c for c in col_names
+        if c not in source_lengths
+        and target_col_types.get(c, '').endswith(('text', 'blob'))
+    ]
+    invented_len = min(MYSQL_DEFAULT_PREFIX_CHARS, MYSQL_MAX_KEY_CHARS // len(needs_prefix)) if needs_prefix else 0
+
+    parts = []
+    for c in col_names:
+        if c in source_lengths:
+            parts.append(f"`{c}`({int(source_lengths[c])})")
+        elif c in needs_prefix:
+            parts.append(f"`{c}`({invented_len})")
+        else:
+            parts.append(f"`{c}`")
+
+    is_unique = idx_info.get('unique', False)
+    downgraded_unique = bool(is_unique and needs_prefix)
+    kind_kw = 'UNIQUE ' if is_unique and not downgraded_unique else ''
+    return kind_kw, ', '.join(parts), downgraded_unique
+
+
+def _get_existing_indexes(conn, table_name):
+    """Return {index_name: tuple(column_names)} for a target table (MySQL or PostgreSQL)."""
+    return {
+        idx['name']: tuple(idx.get('column_names') or [])
+        for idx in inspect(conn).get_indexes(table_name)
+    }
+
+
+def _fk_signature(constrained_columns, referred_table, referred_columns):
+    """Identity of a FK by definition (not name), for 'already exists' checks."""
+    return tuple(constrained_columns), (referred_table or '').lower(), tuple(referred_columns)
+
+
+def _get_existing_foreign_keys(conn, table_name):
+    """Return {fk_name: _fk_signature(...)} for a target table (MySQL or PostgreSQL)."""
+    return {
+        fk['name']: _fk_signature(
+            fk.get('constrained_columns') or [], fk.get('referred_table'), fk.get('referred_columns') or []
+        )
+        for fk in inspect(conn).get_foreign_keys(table_name)
+    }
+
+
+def _get_schema_wide_names(conn, target_db_type, kind):
+    """
+    Names that must be unique across the whole target schema, not just one table:
+    MySQL FK constraint names (error 1826) and PostgreSQL index names (indexes are
+    relations, sharing a namespace with tables). Other combinations are per-table.
+    """
+    if target_db_type == 'mysql' and kind == 'fk':
+        sql = """
+            SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS
+            WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+        """
+    elif target_db_type == 'postgresql' and kind == 'index':
+        sql = """
+            SELECT c.relname FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema()
+        """
+    else:
+        return set()
+    return {r[0] for r in conn.execute(text(sql))}
+
+
+def _target_constraint_name(prefix, target_table, col_names, taken_names, extra=()):
+    """
+    Name a target index/FK after ALL its columns, so two source definitions sharing a
+    leading column don't collide. Falls back to a truncated name + hash of the full
+    definition when the name exceeds 63 chars (PostgreSQL limit; MySQL is 64) or is
+    already taken.
+    """
+    base = f"{prefix}_{target_table}_{'_'.join(col_names)}"
+    if len(base) <= 63 and base not in taken_names:
+        return base
+    key = '|'.join([target_table, ','.join(col_names), *extra])
+    digest = hashlib.md5(key.encode()).hexdigest()[:8]
+    return f"{base[:54]}_{digest}"
+
+
 def add_indexes_to_target(replication_config, specific_tables=None):
     """
     Add index definitions from source tables to the corresponding target tables.
@@ -821,61 +936,61 @@ def add_indexes_to_target(replication_config, specific_tables=None):
         logger.info(f"🗂️ Found {len(all_indexes)} total indexes to create")
 
         target_db_type = target_db.db_type.lower()
+        if target_db_type not in ('mysql', 'postgresql'):
+            logger.warning(f"   ⚠️ Unsupported target DB type for index: {target_db_type}")
+            return 0, len(all_indexes), []
 
-        with target_engine.begin() as conn:
+        col_types_cache = {}
+        existing_cache = {}
+
+        # AUTOCOMMIT: each CREATE INDEX stands alone. In one shared transaction a single
+        # PostgreSQL failure aborts every later statement and rolls back earlier ones.
+        with target_engine.connect().execution_options(isolation_level='AUTOCOMMIT') as conn:
+            schema_names = _get_schema_wide_names(conn, target_db_type, 'index')
             for idx_data in all_indexes:
                 target_table = idx_data['target_table']
                 idx_info = idx_data['idx_info']
                 try:
                     col_names = idx_info.get('column_names', [])
                     is_unique = idx_info.get('unique', False)
-
-                    new_idx_name = f"idx_{target_table}_{col_names[0]}"[:64]
                     unique_kw = 'UNIQUE ' if is_unique else ''
 
-                    if target_db_type == 'mysql':
-                        check_sql = text("""
-                            SELECT INDEX_NAME FROM information_schema.STATISTICS
-                            WHERE TABLE_SCHEMA = :db_name
-                              AND TABLE_NAME   = :table_name
-                              AND INDEX_NAME   = :idx_name
-                            LIMIT 1
-                        """)
-                        row = conn.execute(check_sql, {
-                            'db_name': target_db.database_name,
-                            'table_name': target_table,
-                            'idx_name': new_idx_name,
-                        }).fetchone()
-                        if row:
-                            logger.info(f"   ℹ️ Index {new_idx_name} already exists on {target_table}")
-                            skipped_count += 1
-                            continue
-                        cols = ', '.join(f"`{c}`" for c in col_names)
-                        create_sql = f"CREATE {unique_kw}INDEX `{new_idx_name}` ON `{target_table}` ({cols})"
-
-                    elif target_db_type == 'postgresql':
-                        check_sql = text("""
-                            SELECT indexname FROM pg_indexes
-                            WHERE tablename = :table_name
-                              AND indexname  = :idx_name
-                        """)
-                        row = conn.execute(check_sql, {
-                            'table_name': target_table,
-                            'idx_name': new_idx_name,
-                        }).fetchone()
-                        if row:
-                            logger.info(f"   ℹ️ Index {new_idx_name} already exists on {target_table}")
-                            skipped_count += 1
-                            continue
-                        cols = ', '.join(f'"{c}"' for c in col_names)
-                        create_sql = f'CREATE {unique_kw}INDEX "{new_idx_name}" ON "{target_table}" ({cols})'
-
-                    else:
-                        logger.warning(f"   ⚠️ Unsupported target DB type for index: {target_db_type}")
+                    # Match existing indexes by column list, not name, so indexes created
+                    # under an older naming scheme (or by hand) aren't duplicated.
+                    if target_table not in existing_cache:
+                        existing_cache[target_table] = _get_existing_indexes(conn, target_table)
+                    existing = existing_cache[target_table]
+                    if tuple(col_names) in existing.values():
+                        logger.info(f"   ℹ️ Index on {target_table} ({', '.join(col_names)}) already exists")
                         skipped_count += 1
                         continue
 
+                    new_idx_name = _target_constraint_name(
+                        'idx', target_table, col_names, schema_names | existing.keys()
+                    )
+
+                    if target_db_type == 'mysql':
+                        if target_table not in col_types_cache:
+                            col_types_cache[target_table] = _get_mysql_column_types(
+                                conn, target_db.database_name, target_table
+                            )
+                        kind_kw, cols, downgraded_unique = _build_mysql_index_spec(
+                            idx_info, col_types_cache[target_table]
+                        )
+                        if downgraded_unique:
+                            logger.warning(
+                                f"   ⚠️ {new_idx_name}: UNIQUE index on TEXT/BLOB column(s) created as "
+                                f"non-unique prefix index (prefix uniqueness would reject valid rows)"
+                            )
+                        create_sql = f"CREATE {kind_kw}INDEX `{new_idx_name}` ON `{target_table}` ({cols})"
+
+                    else:
+                        cols = ', '.join(f'"{c}"' for c in col_names)
+                        create_sql = f'CREATE {unique_kw}INDEX "{new_idx_name}" ON "{target_table}" ({cols})'
+
                     conn.execute(text(create_sql))
+                    existing[new_idx_name] = tuple(col_names)
+                    schema_names.add(new_idx_name)
                     logger.info(f"   ✅ Created index: {new_idx_name} on {target_table}")
                     created_count += 1
 
@@ -997,7 +1112,14 @@ def preview_indexes(replication_config):
     }
 
     try:
-        with target_engine.connect() as conn:
+        # AUTOCOMMIT so one failed lookup can't abort the rest of a PostgreSQL preview
+        with target_engine.connect().execution_options(isolation_level='AUTOCOMMIT') as conn:
+            try:
+                schema_names = _get_schema_wide_names(conn, target_db_type, 'index')
+            except Exception as e:
+                logger.warning(f"Could not get schema-wide index names: {e}")
+                schema_names = set()
+
             for mapping in table_mappings:
                 source_table = mapping.source_table
                 target_table = mapping.target_table
@@ -1024,14 +1146,28 @@ def preview_indexes(replication_config):
                 if raw_indexes:
                     has_any_indexes = True
 
+                target_col_types = {}
+                if raw_indexes and target_exists and target_db_type == 'mysql':
+                    try:
+                        target_col_types = _get_mysql_column_types(conn, target_db.database_name, target_table)
+                    except Exception as e:
+                        logger.warning(f"Could not get column types for {target_table}: {e}")
+
+                # Same column-based matching + naming as add_indexes_to_target()
+                existing = {}
+                if raw_indexes and target_exists:
+                    try:
+                        existing = _get_existing_indexes(conn, target_table)
+                    except Exception as e:
+                        logger.warning(f"Could not get existing indexes for {target_table}: {e}")
+
                 for idx in raw_indexes:
                     col_names = idx.get('column_names', [])
                     is_unique = idx.get('unique', False)
-                    new_idx_name = f"idx_{target_table}_{col_names[0]}"[:64]
 
                     if not target_exists:
                         indexes_info.append({
-                            'idx_name': new_idx_name,
+                            'idx_name': _target_constraint_name('idx', target_table, col_names, schema_names),
                             'columns': col_names,
                             'unique': is_unique,
                             'status': 'table_not_ready',
@@ -1040,33 +1176,41 @@ def preview_indexes(replication_config):
                         summary['idx_table_not_ready'] += 1
                         continue
 
-                    # Check if index already exists on target
-                    idx_exists = False
-                    try:
-                        if target_db_type == 'mysql':
-                            r = conn.execute(text("""
-                                SELECT INDEX_NAME FROM information_schema.STATISTICS
-                                WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :tbl AND INDEX_NAME = :idx
-                                LIMIT 1
-                            """), {'db': target_db.database_name, 'tbl': target_table, 'idx': new_idx_name})
-                        else:
-                            r = conn.execute(text("""
-                                SELECT indexname FROM pg_indexes
-                                WHERE tablename = :tbl AND indexname = :idx
-                            """), {'tbl': target_table, 'idx': new_idx_name})
-                        idx_exists = r.fetchone() is not None
-                    except Exception as e:
-                        logger.warning(f"Could not check index existence for {new_idx_name}: {e}")
+                    existing_name = next(
+                        (name for name, cols in existing.items() if cols == tuple(col_names)), None
+                    )
+                    idx_exists = existing_name is not None
+                    if idx_exists:
+                        new_idx_name = existing_name
+                    else:
+                        new_idx_name = _target_constraint_name(
+                            'idx', target_table, col_names, schema_names | existing.keys()
+                        )
+                        existing[new_idx_name] = tuple(col_names)
+                        schema_names.add(new_idx_name)
 
                     status = 'already_exists' if idx_exists else 'will_create'
                     summary['idx_already_exists' if idx_exists else 'idx_will_create'] += 1
 
+                    # Show the exact column spec (incl. TEXT/BLOB prefix lengths) that will be created
+                    columns_sql = ', '.join(col_names)
+                    reason = ''
+                    if target_db_type == 'mysql':
+                        kind_kw, cols_sql, downgraded_unique = _build_mysql_index_spec(idx, target_col_types)
+                        columns_sql = cols_sql.replace('`', '')
+                        is_unique = kind_kw == 'UNIQUE '
+                        if downgraded_unique:
+                            reason = 'UNIQUE dropped: prefix index on TEXT/BLOB column'
+                        elif kind_kw.strip() in ('FULLTEXT', 'SPATIAL'):
+                            reason = kind_kw.strip()
+
                     indexes_info.append({
                         'idx_name': new_idx_name,
                         'columns': col_names,
+                        'columns_sql': columns_sql,
                         'unique': is_unique,
                         'status': status,
-                        'reason': '',
+                        'reason': reason,
                     })
 
                 results.append({
@@ -1153,7 +1297,14 @@ def preview_foreign_keys(replication_config):
     }
 
     try:
-        with target_engine.connect() as conn:
+        # AUTOCOMMIT so one failed lookup can't abort the rest of a PostgreSQL preview
+        with target_engine.connect().execution_options(isolation_level='AUTOCOMMIT') as conn:
+            try:
+                schema_names = _get_schema_wide_names(conn, target_db_type, 'fk')
+            except Exception as e:
+                logger.warning(f"Could not get schema-wide FK names: {e}")
+                schema_names = set()
+
             for mapping in table_mappings:
                 source_table = mapping.source_table
                 target_table = mapping.target_table
@@ -1173,6 +1324,14 @@ def preview_foreign_keys(replication_config):
 
                 if foreign_keys:
                     has_any_fks = True
+
+                # Same definition-based matching + naming as add_foreign_keys_to_target()
+                existing = {}
+                if foreign_keys and target_exists:
+                    try:
+                        existing = _get_existing_foreign_keys(conn, target_table)
+                    except Exception as e:
+                        logger.warning(f"Could not get existing FKs for {target_table}: {e}")
 
                 for fk in foreign_keys:
                     fk_name = fk.get('name', '')
@@ -1194,13 +1353,16 @@ def preview_foreign_keys(replication_config):
                         summary['fk_cannot_create'] += 1
                         continue
 
-                    # Generate FK name (same logic as add_foreign_keys_to_target)
-                    new_fk_name = f"fk_{target_table}_{constrained_columns[0]}"[:64]
-
                     # Resolve referred table in target
                     target_referred_table = _resolve_referred_table(
                         referred_table, referred_schema, table_name_map,
                         source_db.db_type.lower(), source_db.database_name,
+                    )
+
+                    # Generate FK name (same logic as add_foreign_keys_to_target)
+                    new_fk_name = _target_constraint_name(
+                        'fk', target_table, constrained_columns, schema_names | existing.keys(),
+                        extra=(target_referred_table, ','.join(referred_columns)),
                     )
 
                     if not target_exists:
@@ -1248,29 +1410,17 @@ def preview_foreign_keys(replication_config):
                         summary['fk_cannot_create'] += 1
                         continue
 
-                    # Check if FK already exists
-                    fk_exists = False
-                    try:
-                        if target_db_type == 'mysql':
-                            r = conn.execute(text("""
-                                SELECT CONSTRAINT_NAME
-                                FROM information_schema.TABLE_CONSTRAINTS
-                                WHERE TABLE_SCHEMA = :db_name
-                                AND TABLE_NAME = :table_name
-                                AND CONSTRAINT_TYPE = 'FOREIGN KEY'
-                                AND CONSTRAINT_NAME = :fk_name
-                            """), {'db_name': target_db.database_name, 'table_name': target_table, 'fk_name': new_fk_name})
-                        elif target_db_type == 'postgresql':
-                            r = conn.execute(text("""
-                                SELECT constraint_name
-                                FROM information_schema.table_constraints
-                                WHERE table_name = :table_name
-                                AND constraint_type = 'FOREIGN KEY'
-                                AND constraint_name = :fk_name
-                            """), {'table_name': target_table, 'fk_name': new_fk_name})
-                        fk_exists = r.fetchone() is not None
-                    except Exception as e:
-                        logger.warning(f"Could not check FK existence for {new_fk_name}: {e}")
+                    # Check if FK already exists (by definition, under any name)
+                    signature = _fk_signature(constrained_columns, target_referred_table, referred_columns)
+                    existing_name = next(
+                        (name for name, sig in existing.items() if sig == signature), None
+                    )
+                    fk_exists = existing_name is not None
+                    if fk_exists:
+                        new_fk_name = existing_name
+                    else:
+                        existing[new_fk_name] = signature
+                        schema_names.add(new_fk_name)
 
                     status = 'already_exists' if fk_exists else 'will_create'
                     if status == 'already_exists':
