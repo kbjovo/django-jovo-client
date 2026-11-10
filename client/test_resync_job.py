@@ -423,3 +423,44 @@ class TruncateAndSignalTests(SimpleTestCase):
 
     def test_delivered_signal_returns_id(self):
         self.assertTrue(self._manager().trigger_adhoc_snapshot(['db.orders']))
+
+
+# --------------------------------------------------------------------------- #
+# refresh_connector_configs merge rules
+# --------------------------------------------------------------------------- #
+class ConfigMergeTests(SimpleTestCase):
+
+    def test_protected_keys_keep_live_values(self):
+        from client.management.commands.refresh_connector_configs import merge_config, protected_reason
+        current = {'errors.tolerance': 'all', 'errors.deadletterqueue.topic.name': 'x.dlq',
+                   'connection.password': 'live', 'key.converter.schema.registry.url': 'http://a',
+                   'connection.url': 'old', 'legacy.key': '1', 'name': 'n'}
+        rendered = {'errors.tolerance': 'none', 'connection.password': 'new',
+                    'key.converter.schema.registry.url': 'http://b', 'connection.url': 'new',
+                    'flush.max.retries': '10', 'name': 'n'}
+        final, kept = merge_config(current, rendered)
+        self.assertEqual(final['errors.tolerance'], 'all')
+        self.assertEqual(final['errors.deadletterqueue.topic.name'], 'x.dlq')
+        self.assertEqual(final['connection.password'], 'live')
+        self.assertEqual(final['key.converter.schema.registry.url'], 'http://a')
+        self.assertEqual(final['connection.url'], 'new')          # not protected
+        self.assertEqual(final['flush.max.retries'], '10')
+        self.assertEqual(final['legacy.key'], '1')                 # no removals by default
+        self.assertNotIn('name', final)
+        self.assertEqual(set(kept), {'errors.tolerance', 'errors.deadletterqueue.topic.name',
+                                     'connection.password', 'key.converter.schema.registry.url'})
+        self.assertIsNone(protected_reason('connection.url'))
+        self.assertEqual(protected_reason('database.hostname'), 'connectivity')
+
+    def test_protected_key_absent_live_is_not_added(self):
+        from client.management.commands.refresh_connector_configs import merge_config
+        final, kept = merge_config({'a': '1'}, {'a': '1', 'errors.deadletterqueue.topic.name': 'x.dlq'})
+        self.assertNotIn('errors.deadletterqueue.topic.name', final)
+        self.assertIn('errors.deadletterqueue.topic.name', kept)
+
+    def test_overrides(self):
+        from client.management.commands.refresh_connector_configs import merge_config
+        final, kept = merge_config({'errors.tolerance': 'all', 'old': '1'}, {'errors.tolerance': 'none'},
+                                   overwrite_protected=True, allow_removals=True)
+        self.assertEqual(final, {'errors.tolerance': 'none'})
+        self.assertEqual(kept, {})

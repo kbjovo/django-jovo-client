@@ -223,3 +223,60 @@ class RefreshConnectorConfigsCommandTests(TestCase):
         out = self._run('--apply')
         self.assertIn('SKIPPED — resync job in progress', out)
         self.put_cfg.assert_not_called()
+
+    # --- Regression: the 2026-11-10 rollout run from the host (.env lacks
+    #     SINK_ERRORS_TOLERANCE) flipped errors.tolerance all→none and dropped the DLQ.
+    def _live_sink(self, **extra):
+        live = {
+            'connection.url': 'jdbc:mysql://t:3306/dwh?connectTimeout=30000',
+            'errors.tolerance': 'all',
+            'errors.deadletterqueue.topic.name': 'client_1_db_1_v_1.dlq',
+            'errors.deadletterqueue.topic.replication.factor': '3',
+            'errors.deadletterqueue.context.headers.enable': 'true',
+            'value.converter.schema.registry.url': 'http://schema-registry:8081',
+            'some.live.only.key': 'keep-me',
+            'name': 'c1_sink',
+        }
+        live.update(extra)
+        self.get_cfg.side_effect = lambda name: dict(live)
+        return live
+
+    @override_settings(SINK_CONNECTOR_CONFIG={'ERRORS_TOLERANCE': 'none', 'DLQ_ENABLED': True,
+                                              'DLQ_REPLICATION_FACTOR': 3, 'DLQ_CONTEXT_HEADERS': True})
+    def test_live_error_handling_and_extra_keys_survive(self):
+        self._live_sink()
+        out = self._run('--sink-only', '--apply')
+        _, cfg = self.put_cfg.call_args[0]
+        self.assertEqual(cfg['errors.tolerance'], 'all')
+        self.assertEqual(cfg['errors.deadletterqueue.topic.name'], 'client_1_db_1_v_1.dlq')
+        self.assertEqual(cfg['errors.deadletterqueue.topic.replication.factor'], '3')
+        self.assertEqual(cfg['value.converter.schema.registry.url'], 'http://schema-registry:8081')
+        self.assertEqual(cfg['some.live.only.key'], 'keep-me')
+        self.assertIn('rewriteBatchedStatements=true', cfg['connection.url'])   # the intended change
+        self.assertIn('protected — live value kept', out)
+        self.assertIn('errors.tolerance [error handling]', out)
+        self.assertIn('SINK_ERRORS_TOLERANCE=none', out)                         # environment shown
+        self.assertNotIn('- errors.', out)
+
+    @override_settings(SINK_CONNECTOR_CONFIG={'ERRORS_TOLERANCE': 'all', 'DLQ_ENABLED': True,
+                                              'DLQ_REPLICATION_FACTOR': 3, 'DLQ_CONTEXT_HEADERS': True})
+    def test_overwrite_protected_restores_error_handling(self):
+        # State left behind by the bad run: tolerance none, DLQ keys gone.
+        live = self._live_sink(**{'errors.tolerance': 'none'})
+        for k in [k for k in live if k.startswith('errors.deadletterqueue')]:
+            live.pop(k)
+        self.get_cfg.side_effect = lambda name: dict(live)
+
+        self._run('--sink-only', '--apply', '--overwrite-protected')
+        _, cfg = self.put_cfg.call_args[0]
+        self.assertEqual(cfg['errors.tolerance'], 'all')
+        prefix = f"client_{self.config.client_database.client_id}_db_{self.config.client_database_id}_v_{self.config.connector_version}"
+        self.assertEqual(cfg['errors.deadletterqueue.topic.name'], f"{prefix}.dlq")
+        self.assertEqual(cfg['errors.deadletterqueue.topic.replication.factor'], '3')
+
+    def test_allow_removals_drops_live_only_keys(self):
+        self._live_sink()
+        self._run('--sink-only', '--apply', '--allow-removals')
+        _, cfg = self.put_cfg.call_args[0]
+        self.assertNotIn('some.live.only.key', cfg)
+        self.assertEqual(cfg['errors.tolerance'], 'all')   # still protected
