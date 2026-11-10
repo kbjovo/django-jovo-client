@@ -630,6 +630,7 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
             if not change_topics:
                 return
 
+            from client.utils.ddl.kafka_processor import TRUNCATE_WATCHER_MEMORY_LIMITS
             self.truncate_consumer = Consumer({
                 'bootstrap.servers': bootstrap_servers,
                 'group.id': f'{schema_group_id}-truncate-watcher',
@@ -637,6 +638,7 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
                 'enable.auto.commit': False,
                 'session.timeout.ms': 30000,
                 'max.poll.interval.ms': 300000,
+                **TRUNCATE_WATCHER_MEMORY_LIMITS,
             })
             self.truncate_consumer.subscribe(change_topics)
             logger.info(f"Truncate watcher initialized — watching {len(change_topics)} change topic(s)")
@@ -653,7 +655,8 @@ class PostgreSQLKafkaDDLProcessor(BaseDDLProcessor):
 
         handled = 0
         try:
-            msgs = self.truncate_consumer.consume(num_messages=50, timeout=timeout_sec)
+            from client.utils.ddl.kafka_processor import TRUNCATE_WATCHER_BATCH
+            msgs = self.truncate_consumer.consume(num_messages=TRUNCATE_WATCHER_BATCH, timeout=timeout_sec)
             last_msg = None
             for msg in msgs:
                 if msg.error():

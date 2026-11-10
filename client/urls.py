@@ -64,6 +64,8 @@ from .views.connector_action_views import (
     check_oracle_privileges_api,
     apply_oracle_privileges_api,
     resync_table,
+    resync_tables,
+    resync_job_cancel,
 )
 
 # Import provision/edit step endpoints (modal AJAX flow)
@@ -225,6 +227,14 @@ urlpatterns = [
     path('connector/<int:config_pk>/resync-table/',
          resync_table,
          name='resync_table'),
+
+    path('connector/<int:config_pk>/resync-tables/',
+         resync_tables,
+         name='resync_tables'),
+
+    path('connector/<int:config_pk>/resync-jobs/<int:job_pk>/cancel/',
+         resync_job_cancel,
+         name='resync_job_cancel'),
 
     # AJAX: PostgreSQL privilege check (used by connector_add form)
     path('database/<int:database_pk>/check-postgresql-privileges/',

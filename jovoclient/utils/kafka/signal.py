@@ -119,7 +119,12 @@ class KafkaSignalManager:
             'client.id': 'debezium-signal-manager',
             'acks': 'all',  # Wait for all replicas to acknowledge
             'retries': 3,
+            # Bound how long a signal may sit in the producer queue. Callers flush with
+            # a 10 s budget; without this an undeliverable message lingers for the
+            # librdkafka default of 300 s (and close() used to block on it).
+            'message.timeout.ms': 15000,
         })
+        self._delivery_errors = []
 
         logger.info(f"Initialized KafkaSignalManager for connector: {connector_name}")
         logger.info(f"  Signal topic: {signal_topic}")
@@ -168,8 +173,19 @@ class KafkaSignalManager:
             logger.info(f"signal-msg= topic: {self.signal_topic}, \
                         key={self.connector_name.encode('utf-8')}, value={json.dumps(signal_message).encode('utf-8')},")
 
-            # Wait for message to be delivered
-            self.producer.flush(timeout=10)
+            # Wait for the broker to acknowledge. A signal that is not delivered must
+            # NOT be reported as sent: callers truncate the target first and rely on
+            # this signal to refill it.
+            remaining = self.producer.flush(timeout=10)
+            if remaining:
+                raise RuntimeError(
+                    f"Signal '{signal_type}' not acknowledged by Kafka within 10s "
+                    f"({remaining} message(s) still queued for {self.signal_topic})"
+                )
+            if self._delivery_errors:
+                err = self._delivery_errors.pop()
+                self._delivery_errors.clear()
+                raise RuntimeError(f"Signal '{signal_type}' delivery failed: {err}")
 
             logger.info(f"✅ Kafka signal '{signal_type}' sent successfully")
             logger.info(f"   Connector: {self.connector_name}")
@@ -187,6 +203,7 @@ class KafkaSignalManager:
         """Callback for Kafka message delivery confirmation."""
         if err:
             logger.error(f"❌ Signal delivery failed: {err}")
+            self._delivery_errors.append(str(err))
         else:
             logger.debug(f"✅ Signal delivered to {msg.topic()} [{msg.partition()}] @ offset {msg.offset()}")
 
@@ -238,9 +255,11 @@ class KafkaSignalManager:
         return self._send_signal("stop-snapshot", payload)
 
     def close(self):
-        """Close the Kafka producer connection."""
+        """Close the Kafka producer connection (bounded wait — never blocks a request)."""
         if hasattr(self, 'producer'):
-            self.producer.flush()
+            remaining = self.producer.flush(timeout=10)
+            if remaining:
+                logger.warning(f"Kafka signal producer closed with {remaining} undelivered message(s)")
             logger.info("Kafka producer closed")
 
 
@@ -435,29 +454,31 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
 
     # Database-based signaling (PostgreSQL, MS SQL)
     if db_type in ['postgresql', 'mssql']:
-        db_engine = get_database_engine(database)
+        db_engine = get_database_engine(database, pool_size=1, connect_timeout=10)
+        try:
+            signal_tables = {
+                'postgresql': 'public.debezium_signal',
+                'mssql': 'dbo.debezium_signal',
+            }
+            signal_table = signal_tables.get(db_type, 'debezium_signal')
 
-        signal_tables = {
-            'postgresql': 'public.debezium_signal',
-            'mssql': 'dbo.debezium_signal',
-        }
-        signal_table = signal_tables.get(db_type, 'debezium_signal')
+            # Auto-create signal table if it doesn't exist yet
+            if db_type == 'mssql':
+                _ensure_mssql_signal_table(db_engine, schema='dbo')
+            elif db_type == 'postgresql':
+                _ensure_postgres_signal_table(db_engine, schema='public')
 
-        # Auto-create signal table if it doesn't exist yet
-        if db_type == 'mssql':
-            _ensure_mssql_signal_table(db_engine, schema='dbo')
-        elif db_type == 'postgresql':
-            _ensure_postgres_signal_table(db_engine, schema='public')
+            signal_manager = DebeziumSignalManager(
+                db_engine=db_engine,
+                signal_table=signal_table
+            )
 
-        signal_manager = DebeziumSignalManager(
-            db_engine=db_engine,
-            signal_table=signal_table
-        )
+            signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
+            logger.info(f"Database signal sent - ID: {signal_id}, table: {signal_table}")
 
-        signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
-        logger.info(f"Database signal sent - ID: {signal_id}, table: {signal_table}")
-
-        return signal_id, 'database'
+            return signal_id, 'database'
+        finally:
+            db_engine.dispose()
 
     # Kafka-based signaling (MySQL + Oracle)
     # Oracle uses Kafka channel to avoid needing INSERT on the data schema's signal table.
@@ -481,8 +502,10 @@ def send_incremental_snapshot_signal(database, replication_config, tables: List[
             connector_name=topic_prefix
         )
 
-        signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
-        signal_manager.close()
+        try:
+            signal_id = signal_manager.trigger_adhoc_snapshot(formatted_tables)
+        finally:
+            signal_manager.close()
 
         logger.info(f"Kafka signal sent - ID: {signal_id}, topic: {signal_topic}")
 

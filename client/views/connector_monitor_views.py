@@ -12,7 +12,6 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse
 from django.contrib import messages
 from client.models.replication import ReplicationConfig
-from client.utils.database_utils import get_row_count
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +83,7 @@ def connector_monitor(request, config_pk):
             'connector_history': connector_history,
             'sink_connector_history': sink_connector_history,
             'has_binlog_error': has_binlog_error,
+            'resync_job': _safe_job_summary(replication_config.pk),
         }
 
         return render(request, 'client/connectors/connector_monitor.html', context)
@@ -92,6 +92,15 @@ def connector_monitor(request, config_pk):
         logger.error(f'Failed to get connector status: {e}', exc_info=True)
         messages.error(request, f'Failed to get connector status: {str(e)}')
         return redirect('connector_list', database_pk=database.id)
+
+
+def _safe_job_summary(config_pk):
+    try:
+        from client.replication.resync import job_summary
+        return job_summary(config_pk)
+    except Exception as e:
+        logger.warning(f'Resync job summary failed for config {config_pk}: {e}')
+        return None
 
 
 def connector_status_api(request, config_pk):
@@ -107,7 +116,9 @@ def connector_status_api(request, config_pk):
         orchestrator = ReplicationOrchestrator(replication_config)
         unified_status = orchestrator.get_unified_status()
 
-        return JsonResponse({'success': True, 'status': unified_status})
+        resync_job = _safe_job_summary(replication_config.pk)
+
+        return JsonResponse({'success': True, 'status': unified_status, 'resync_job': resync_job})
 
     except Exception as e:
         logger.error(f'Failed to get connector status: {e}', exc_info=True)
@@ -116,122 +127,52 @@ def connector_status_api(request, config_pk):
 
 def connector_table_rows_api(request, config_pk):
     """
-    AJAX endpoint returning row counts for all enabled tables
-    from both source and target databases.
-    Opens one connection per database and runs all queries through it.
+    AJAX endpoint returning row counts for all enabled tables (source + target).
+
+    Counts are NOT run inline: this returns the last result computed by the
+    ``refresh_row_counts`` Celery task (see client/utils/row_counts.py) and
+    enqueues a refresh when there is none yet or when ``?refresh=1`` is passed.
+    ``refreshing`` tells the page to re-fetch shortly.
     """
-    from client.utils.database_utils import get_database_connection
-    from sqlalchemy import text as sa_text
-
-    def _count_query(db_config, table_name, schema=None):
-        """Build a COUNT(*) query string for the given db type."""
-        db_type = db_config.db_type.lower()
-        if db_type == 'mssql':
-            if '.' in table_name:
-                schema_name, tbl = table_name.split('.', 1)
-            else:
-                schema_name, tbl = (schema or 'dbo'), table_name
-            return f"SELECT COUNT(*) FROM [{schema_name}].[{tbl}]"
-        elif db_type == 'postgresql':
-            if '.' in table_name:
-                schema_name, tbl = table_name.rsplit('.', 1)
-            else:
-                schema_name, tbl = (schema or 'public'), table_name
-            return f'SELECT COUNT(*) FROM "{schema_name}"."{tbl}"'
-        elif db_type == 'oracle':
-            if '.' in table_name:
-                schema_name, tbl = table_name.rsplit('.', 1)
-                schema_name, tbl = schema_name.upper(), tbl.upper()
-            else:
-                schema_name = (schema or db_config.username).upper()
-                tbl = table_name.upper()
-            return f"SELECT COUNT(*) FROM {schema_name}.{tbl}"
-        else:  # mysql and generic
-            return f"SELECT COUNT(*) FROM `{table_name}`"
-
-    def _is_not_found_error(err_str):
-        keywords = ("doesn't exist", 'not exist', 'not found', 'unknown table', 'invalid object')
-        return any(k in err_str for k in keywords)
+    from client.utils import row_counts
 
     try:
         config = get_object_or_404(ReplicationConfig, pk=config_pk)
-        source_db = config.client_database
-        target_db = source_db.client.get_target_database()
+        force = request.GET.get('refresh') == '1'
 
-        mappings = list(config.table_mappings.filter(is_enabled=True).order_by('source_table'))
+        payload = row_counts.get_cached(config.pk)
+        if force or payload is None:
+            row_counts.request_refresh(config.pk, force=force)
 
-        # ── Source counts (single connection for all tables) ─────────────────
-        source_reachable = True
-        source_counts = {}   # mapping.pk → (count, error)
-        try:
-            with get_database_connection(source_db, connect_timeout=5) as conn:
-                for mapping in mappings:
-                    try:
-                        q = _count_query(source_db, mapping.source_table, schema=mapping.source_schema)
-                        row = conn.execute(sa_text(q)).fetchone()
-                        source_counts[mapping.pk] = (row[0] if row else 0, None)
-                    except Exception as e:
-                        err_str = str(e).lower()
-                        error = 'table_not_found' if _is_not_found_error(err_str) else 'error'
-                        source_counts[mapping.pk] = (None, error)
-                        logger.warning(f'Source row count failed for {mapping.source_table}: {e}')
-        except Exception as e:
-            source_reachable = False
-            logger.warning(f'Source database unreachable ({source_db.connection_name}): {e}')
+        payload = payload or {}
 
-        # ── Target counts (single connection for all tables) ─────────────────
-        target_reachable = True
-        target_counts = {}   # mapping.pk → (count, error)
-        if target_db:
-            try:
-                with get_database_connection(target_db, connect_timeout=5) as conn:
-                    for mapping in mappings:
-                        try:
-                            q = _count_query(target_db, mapping.target_table, schema=mapping.target_schema or None)
-                            row = conn.execute(sa_text(q)).fetchone()
-                            target_counts[mapping.pk] = (row[0] if row else 0, None)
-                        except Exception as e:
-                            err_str = str(e).lower()
-                            if _is_not_found_error(err_str):
-                                target_counts[mapping.pk] = (None, 'table_not_found')
-                                logger.debug(f'Target table not yet created: {mapping.target_table}')
-                            else:
-                                target_counts[mapping.pk] = (None, 'error')
-                                logger.warning(f'Target row count failed for {mapping.target_table}: {e}')
-            except Exception as e:
-                target_reachable = False
-                logger.warning(f'Target database unreachable ({target_db.connection_name}): {e}')
-
-        # ── Build response rows ───────────────────────────────────────────────
+        # Always list every enabled mapping (the page builds its resync checkboxes from
+        # this list); overlay cached counts where we have them.
+        cached_by_table = {t.get('source_table'): t for t in payload.get('tables', [])}
         rows = []
-        for mapping in mappings:
-            if not source_reachable:
-                src_count, src_error = None, 'db_unreachable'
+        for m in config.table_mappings.filter(is_enabled=True).order_by('source_table').values('source_table', 'target_table'):
+            cached = cached_by_table.get(m['source_table'])
+            if cached:
+                rows.append({**cached, 'target_table': m['target_table']})
             else:
-                src_count, src_error = source_counts.get(mapping.pk, (None, 'error'))
-
-            if not target_db:
-                tgt_count, tgt_error = None, 'no_target_db'
-            elif not target_reachable:
-                tgt_count, tgt_error = None, 'db_unreachable'
-            else:
-                tgt_count, tgt_error = target_counts.get(mapping.pk, (None, 'error'))
-
-            rows.append({
-                'source_table': mapping.source_table,
-                'target_table': mapping.target_table,
-                'source_rows': src_count,
-                'target_rows': tgt_count,
-                'source_error': src_error,
-                'target_error': tgt_error,
-            })
+                rows.append({
+                    'source_table': m['source_table'],
+                    'target_table': m['target_table'],
+                    'source_rows': None,
+                    'target_rows': None,
+                    'source_error': 'pending',
+                    'target_error': 'pending',
+                })
 
         return JsonResponse({
             'success': True,
+            'status': payload.get('status', 'pending'),
             'tables': rows,
-            'source_reachable': source_reachable,
-            'target_reachable': target_reachable,
-            'has_target_db': target_db is not None,
+            'source_reachable': payload.get('source_reachable', True),
+            'target_reachable': payload.get('target_reachable', True),
+            'has_target_db': payload.get('has_target_db', True),
+            'as_of': payload.get('as_of'),
+            'refreshing': row_counts.is_refresh_pending(config.pk),
         })
 
     except Exception as e:
@@ -243,140 +184,71 @@ def connector_dashboard_card_api(request, config_pk):
     """
     Combined AJAX endpoint for monitoring dashboard card updates.
     Returns connector card health (state, tasks) + row-level sync status.
-    Polled every 15s per card by the monitoring dashboard.
+
+    Polled by the monitoring dashboard, so it must stay cheap:
+      * connector state comes from the Redis status cache (refreshed by beat),
+      * row-sync status comes from the cached background row counts — a refresh
+        is only *requested* when the cached result is stale.
     """
-    from django.utils import timezone
-    from datetime import timedelta
-    from client.utils.database_utils import get_database_connection
-    from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
+    from client.utils import row_counts
+    from client.utils.connector_status_cache import get_statuses
+    from client.replication.resync import has_active_job
 
     try:
         config = get_object_or_404(ReplicationConfig, pk=config_pk)
 
-        # ── 1. Connector state via Debezium ────────────────────────────────
+        # ── 1. Connector + sink state from the status cache ────────────────
+        names = [n for n in (config.connector_name, config.sink_connector_name) if n]
         try:
-            manager = DebeziumConnectorManager()
-            exists, status_data = manager.get_connector_status(config.connector_name)
-            if exists and status_data:
-                connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-                tasks = status_data.get('tasks', [])
-                has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
-                card = {
-                    'connector_state': connector_state,
-                    'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
-                    'error_count': sum(1 for t in tasks if t.get('state') == 'FAILED'),
-                    'tasks': tasks,
-                    'connector_trace': status_data.get('connector', {}).get('trace', ''),
-                    'error_message': '',
-                }
-            else:
-                card = {
-                    'connector_state': 'NOT_FOUND',
-                    'is_healthy': False,
-                    'error_count': 1,
-                    'tasks': [],
-                    'connector_trace': '',
-                    'error_message': '',
-                }
+            statuses = get_statuses(names)
+            status_error = ''
         except Exception as e:
+            statuses = {}
+            status_error = str(e)
+
+        status_data = statuses.get(config.connector_name) if config.connector_name else None
+        if status_data:
+            connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
+            tasks = status_data.get('tasks', [])
+            has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
             card = {
-                'connector_state': 'ERROR',
+                'connector_state': connector_state,
+                'is_healthy': connector_state in ('RUNNING', 'PAUSED') and not has_failed_task,
+                'error_count': sum(1 for t in tasks if t.get('state') == 'FAILED'),
+                'tasks': tasks,
+                'connector_trace': status_data.get('connector', {}).get('trace', ''),
+                'error_message': '',
+            }
+        else:
+            card = {
+                'connector_state': 'ERROR' if status_error else 'NOT_FOUND',
                 'is_healthy': False,
                 'error_count': 1,
                 'tasks': [],
                 'connector_trace': '',
-                'error_message': str(e),
+                'error_message': status_error,
             }
 
-        connector_state = card['connector_state']
-
-        # ── 1b. Sink connector state (shared sink, controlled via toggle) ──
         sink_state = 'NOT_CONFIGURED'
         if config.sink_connector_name:
-            try:
-                s_mgr = DebeziumConnectorManager()
-                s_exists, s_data = s_mgr.get_connector_status(config.sink_connector_name)
-                sink_state = s_data.get('connector', {}).get('state', 'UNKNOWN') if (s_exists and s_data) else 'NOT_FOUND'
-            except Exception:
-                sink_state = 'ERROR'
+            s_data = statuses.get(config.sink_connector_name)
+            sink_state = s_data.get('connector', {}).get('state', 'UNKNOWN') if s_data else 'NOT_FOUND'
         card['sink_state'] = sink_state
 
-        # ── 2. Snapshot detection (only connectors created < 24h ago) ──────
-        is_new = (timezone.now() - config.created_at) < timedelta(hours=24)
-        if is_new:
-            try:
-                from client.replication.orchestrator import ReplicationOrchestrator
-                orchestrator = ReplicationOrchestrator(config)
-                snapshot = orchestrator._get_snapshot_progress()
-                if snapshot and snapshot.get('running'):
-                    return JsonResponse({
-                        'success': True,
-                        'card': card,
-                        'sync': {'status': 'snapshot_in_progress'},
-                    })
-            except Exception:
-                pass
+        # ── 2. Row-sync status (cached; never counted inline) ──────────────
+        if has_active_job(config.pk):
+            sync = {'status': row_counts.STATUS_SNAPSHOT}
+        else:
+            payload = row_counts.get_cached(config.pk)
+            age = row_counts.age_seconds(payload)
+            # A cached "snapshot running" goes stale quickly; real counts after 5 min.
+            max_age = 60 if (payload or {}).get('status') == row_counts.STATUS_SNAPSHOT else row_counts.DASHBOARD_MAX_AGE_S
+            if payload is None or age is None or age > max_age:
+                row_counts.request_refresh(config.pk)
 
-        # ── 3. Row count sync status ───────────────────────────────────────
-        try:
-            source_db = config.client_database
-            target_db = source_db.client.get_target_database()
-
-            source_reachable = True
-            try:
-                with get_database_connection(source_db):
-                    pass
-            except Exception:
-                source_reachable = False
-
-            target_reachable = True
-            if target_db:
-                try:
-                    with get_database_connection(target_db):
-                        pass
-                except Exception:
-                    target_reachable = False
-
-            if not source_reachable or not target_db or not target_reachable:
-                sync = {'status': 'unable_to_check'}
-            else:
-                mappings = config.table_mappings.filter(is_enabled=True)
-                total_count = mappings.count()
-
-                if total_count == 0:
-                    sync = {'status': 'unable_to_check'}
-                else:
-                    in_sync_count = 0
-                    for mapping in mappings:
-                        try:
-                            source_count = get_row_count(source_db, mapping.source_table, schema=mapping.source_schema)
-                            target_count = get_row_count(target_db, mapping.target_table, schema=mapping.target_schema or None)
-                            if source_count == target_count:
-                                in_sync_count += 1
-                        except Exception:
-                            pass  # table unreachable counts as not in sync
-
-                    not_synced_count = total_count - in_sync_count
-
-                    if in_sync_count == total_count:
-                        status = 'rows_in_sync'
-                        config.last_success_at = timezone.now()
-                        config.save(update_fields=['last_success_at'])
-                    else:
-                        status = 'not_synced'
-
-                    sync = {
-                        'status': status,
-                        'in_sync_count': in_sync_count,
-                        'total_count': total_count,
-                        'synced': in_sync_count,
-                        'not_synced': not_synced_count,
-                        'last_fully_synced': config.last_success_at.isoformat() if config.last_success_at else None,
-                    }
-
-        except Exception as e:
-            logger.warning(f'Sync status check failed for config {config_pk}: {e}')
-            sync = {'status': 'unable_to_check'}
+            sync = row_counts.summarize_sync(payload) or {'status': 'checking'}
+            if sync.get('status') in ('rows_in_sync', 'not_synced'):
+                sync['last_fully_synced'] = config.last_success_at.isoformat() if config.last_success_at else None
 
         return JsonResponse({'success': True, 'card': card, 'sync': sync})
 

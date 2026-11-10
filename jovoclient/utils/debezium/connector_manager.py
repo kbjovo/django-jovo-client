@@ -49,6 +49,31 @@ def _connect_host(url: str) -> str:
         return url
 
 
+def _invalidate_cached_status(method: str, url: str) -> None:
+    """
+    Drop the Redis-cached status of a connector after a mutating call to it
+    (pause/resume/restart/stop/config/delete), so dashboards that read the cache
+    (client.utils.connector_status_cache) show the new state on their next poll
+    instead of waiting for the 30 s beat refresh.
+    """
+    if method not in ('POST', 'PUT', 'DELETE'):
+        return
+    try:
+        from urllib.parse import unquote
+        parts = urlparse(url).path.strip('/').split('/')
+        if 'connectors' not in parts:
+            return
+        idx = parts.index('connectors')
+        if idx + 1 >= len(parts):
+            return
+        name = unquote(parts[idx + 1])
+        from django.core.cache import cache
+        from client.utils.connector_status_cache import _key
+        cache.delete(_key(name))
+    except Exception as e:
+        logger.debug(f"Status cache invalidation skipped for {url}: {e}")
+
+
 def _note_connect_reachable(url: str) -> None:
     """Called whenever an HTTP response comes back (any status = TCP is up).
 
@@ -170,6 +195,7 @@ class DebeziumConnectorManager:
             # Check if request was successful
             # 200: OK, 201: Created, 202: Accepted (async operations), 204: No Content
             if response.status_code in [200, 201, 202, 204]:
+                _invalidate_cached_status(method, url)
                 # Some DELETE requests return 204 with no content
                 if response.status_code == 204:
                     return True, {}, None
@@ -288,6 +314,33 @@ class DebeziumConnectorManager:
             logger.error(f"Error getting connector status: {str(e)}")
             return False, None
     
+    def get_connector_status_detailed(self, connector_name: str, timeout: int = 30) -> Tuple[str, Optional[Dict]]:
+        """
+        Like get_connector_status(), but distinguishes *why* there is no status.
+
+        Returns:
+            ('ok', status_data)      — Connect answered with the status
+            ('not_found', None)      — Connect answered 404: the connector really is gone
+            ('unreachable', None)    — timeout / connection error / 5xx: we don't know
+
+        Callers that act on a missing connector (mark config 'error', send a
+        "Connector Missing" email, stop DDL threads) must only do so on
+        'not_found' — a busy Kafka Connect timing out under snapshot load is not
+        a missing connector.
+        """
+        try:
+            url = f"{self.connectors_url}/{connector_name}/status"
+            success, data, error = self._make_request('GET', url, timeout=timeout)
+            if success and data:
+                return 'ok', data
+            if error and 'HTTP 404' in str(error):
+                return 'not_found', None
+            logger.warning(f"Connector {connector_name} status unavailable: {error}")
+            return 'unreachable', None
+        except Exception as e:
+            logger.warning(f"Error getting connector status for {connector_name}: {e}")
+            return 'unreachable', None
+
     def get_connector_config(self, connector_name: str) -> Optional[Dict]:
         """
         Get connector configuration

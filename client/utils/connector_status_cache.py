@@ -64,16 +64,30 @@ def _normalize(value):
     return value
 
 
+# Marker for "Kafka Connect didn't answer" — never cached as NOT_FOUND.
+_UNREACHABLE = object()
+
+
 def _live_fetch(name):
-    """Fetch a single connector's status live from Kafka Connect (cache miss path)."""
+    """
+    Fetch a single connector's status live from Kafka Connect (cache miss path).
+
+    Returns (name, data) where data is the status dict, None for a real 404, or
+    _UNREACHABLE when Connect timed out / errored (so callers don't cache a
+    connector as missing just because Connect was slow).
+    """
     from jovoclient.utils.debezium.connector_manager import DebeziumConnectorManager
     try:
         manager = DebeziumConnectorManager()
-        exists, data = manager.get_connector_status(name, timeout=STATUS_TIMEOUT)
-        return name, (data if (exists and data) else None)
+        outcome, data = manager.get_connector_status_detailed(name, timeout=STATUS_TIMEOUT)
+        if outcome == 'ok':
+            return name, data
+        if outcome == 'not_found':
+            return name, None
+        return name, _UNREACHABLE
     except Exception as e:
         logger.warning(f"Live status fetch failed for {name}: {e}")
-        return name, None
+        return name, _UNREACHABLE
 
 
 def set_status(name, status_data):
@@ -126,6 +140,9 @@ def get_statuses(names, allow_live_fallback=True):
     to_cache = {}
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(misses))) as pool:
         for name, data in pool.map(_live_fetch, misses):
+            if data is _UNREACHABLE:
+                result[name] = None      # unknown right now; don't cache it
+                continue
             result[name] = data
             to_cache[_key(name)] = data if data is not None else NOT_FOUND
     if to_cache:
@@ -152,6 +169,8 @@ def refresh_all():
     payload = {}
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(names))) as pool:
         for name, data in pool.map(_live_fetch, names):
+            if data is _UNREACHABLE:
+                continue  # keep the previous cached value until Connect answers
             payload[_key(name)] = data if data is not None else NOT_FOUND
 
     if payload:

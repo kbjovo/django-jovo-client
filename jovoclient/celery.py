@@ -18,36 +18,51 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 app.autodiscover_tasks()
 
 # Configure Celery Beat schedule
+# Every entry carries `expires`: if the workers stall, queued copies of a periodic
+# task are discarded instead of all running at once when the workers recover.
 app.conf.beat_schedule = {
     'monitor-debezium-connectors': {
         'task': 'client.tasks.monitor_connectors',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
+        'options': {'expires': 280},
     },
     # Comprehensive health monitoring with auto-fix (connector status only)
     'monitor-replication-health': {
         'task': 'client.replication.monitor_replication_health',
         'schedule': crontab(minute='*/1'),  # Every 1 minute
+        'options': {'expires': 55},
     },
     # Ensure continuous DDL consumers are always running (every 30 seconds)
     'ensure-continuous-ddl-consumers': {
         'task': 'client.tasks.ensure_continuous_ddl_consumers',
         'schedule': 30.0,  # Every 30 seconds
+        'options': {'expires': 28},
     },
     # Batch DDL fallback: fires for configs whose continuous consumer is down
     'schedule-ddl-processing-all': {
         'task': 'client.tasks.schedule_ddl_processing_all',
         'schedule': crontab(minute='*/1'),  # Every 1 minute
+        'options': {'expires': 55},
     },
     # PostgreSQL schema sync (every 5 minutes)
     'sync-postgresql-schemas': {
         'task': 'client.tasks.sync_postgresql_schemas',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
+        'options': {'expires': 280},
     },
     # Refresh the Redis-cached Debezium connector status served to dashboards, so
     # page loads never block on per-connector Kafka Connect REST calls.
     'refresh-connector-status-cache': {
         'task': 'client.tasks.refresh_connector_status_cache',
         'schedule': 30.0,  # Every 30 seconds
+        'options': {'expires': 28},
+    },
+    # Sequential table resync jobs: one short step per connector per tick
+    # (see client/replication/resync.py).
+    'advance-resync-jobs': {
+        'task': 'client.tasks.advance_resync_jobs',
+        'schedule': 20.0,  # Every 20 seconds
+        'options': {'expires': 18},
     },
 }
 

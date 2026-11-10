@@ -198,7 +198,19 @@ def get_mysql_sink_connector_config(
     # autoReconnect dropped: Connector/J advises against it (can resurrect a connection in a
     # bad state). c3p0 testConnectionOnCheckout below is the correct liveness mechanism.
     # connectTimeout fails fast when the target is down so control returns to the retry loop.
-    jdbc_url = f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}?connectTimeout=30000"
+    # rewriteBatchedStatements: Connector/J sends each JDBC batch as multi-row
+    #   INSERT ... ON DUPLICATE KEY UPDATE instead of one round trip + one statement per
+    #   row — the dominant cost of a multi-million-row (re)snapshot into MySQL.
+    # sessionVariables=foreign_key_checks=0: CDC cannot order parent rows before child
+    #   rows across tables (snapshots run table by table), so target-side FKs (added by
+    #   the Combined Keys feature) made the sink fail with 1452 and loop on restarts.
+    #   FKs stay defined on the target; the source remains the integrity authority.
+    jdbc_url = (
+        f"jdbc:mysql://{db_config.host}:{db_config.port}/{db_config.database_name}"
+        f"?connectTimeout=30000"
+        f"&rewriteBatchedStatements=true"
+        f"&sessionVariables=foreign_key_checks=0"
+    )
 
     # Scopes this sink to a single source connector's topics (one sink per source connector).
     topic_prefix_regex, dlq_topic = _get_sink_topic_scope(client, replication_config)
@@ -259,6 +271,11 @@ def get_mysql_sink_connector_config(
         "retry.backoff.ms": "30000",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
+        # Debezium JDBC sink's own write-retry: a transient failure (lock wait timeout,
+        # deadlock while the target is under snapshot load) is retried in place instead
+        # of failing the task and triggering a restart + replay of the whole batch.
+        "flush.max.retries": "10",
+        "flush.retry.delay.ms": "5000",
         "topic.tracking.refresh.interval.ms": "5000",
         # Must exceed the retry window: while put() is blocked retrying a downed target the
         # task isn't polling, and if that gap exceeds max.poll.interval.ms the consumer is
@@ -427,6 +444,11 @@ def get_postgresql_sink_connector_config(
         "retry.backoff.ms": "30000",
         "connection.attempts": "3",
         "connection.backoff.ms": "10000",
+        # Debezium JDBC sink's own write-retry: a transient failure (lock wait timeout,
+        # deadlock while the target is under snapshot load) is retried in place instead
+        # of failing the task and triggering a restart + replay of the whole batch.
+        "flush.max.retries": "10",
+        "flush.retry.delay.ms": "5000",
         "topic.tracking.refresh.interval.ms": "5000",
         # Must exceed the retry window: while put() is blocked retrying a downed target the
         # task isn't polling, and if that gap exceeds max.poll.interval.ms the consumer is

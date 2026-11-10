@@ -747,3 +747,78 @@ class TableMapping(models.Model):
             return f"{self.source_table}"
         return f"{self.source_table} → {self.target_table}"
     
+
+
+class TableResyncJob(models.Model):
+    """
+    A queued truncate + re-snapshot of one or more tables of a connector.
+
+    Executed by ``client.replication.resync`` from a short, beat-driven Celery task:
+    ONE table at a time — truncate the target table, send one incremental-snapshot
+    signal, wait until Debezium reports that table's snapshot finished, then move on.
+    Only one target table is empty at any moment and the snapshot load is bounded.
+    Every truncate+re-snapshot path (manual UI, auto TRUNCATE detection, deferred
+    truncates on resume) goes through this queue.
+
+    ``tables`` is a list of per-table entries::
+
+        {"table": "orders", "state": "pending|truncated|snapshotting|done|failed|skipped",
+         "truncate_attempts": 0, "signals_sent": 0, "signal_attempts": 0,
+         "signal_id": "...", "baseline": [...], "rows": 123,
+         "truncated_at": iso, "signaled_at": iso, "started_at": iso,
+         "last_progress_at": iso, "finished_at": iso, "error": ""}
+    """
+
+    STATUS_QUEUED = 'queued'
+    STATUS_RUNNING = 'running'
+    STATUS_WAITING_PAUSED = 'waiting_paused'
+    STATUS_COMPLETED = 'completed'
+    STATUS_FAILED = 'failed'
+    STATUS_CANCELLED = 'cancelled'
+
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, 'Queued'),
+        (STATUS_RUNNING, 'Running'),
+        (STATUS_WAITING_PAUSED, 'Waiting (pipeline paused)'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_FAILED, 'Failed'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+    ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING, STATUS_WAITING_PAUSED)
+
+    SOURCE_MANUAL = 'manual'
+    SOURCE_AUTO_TRUNCATE = 'auto_truncate'
+    SOURCE_PENDING_RESUME = 'pending_resume'
+    SOURCE_CHOICES = [
+        (SOURCE_MANUAL, 'Manual resync'),
+        (SOURCE_AUTO_TRUNCATE, 'Source TRUNCATE detected'),
+        (SOURCE_PENDING_RESUME, 'Deferred TRUNCATE applied on resume'),
+    ]
+
+    replication_config = models.ForeignKey(
+        ReplicationConfig,
+        on_delete=models.CASCADE,
+        related_name='resync_jobs',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default=SOURCE_MANUAL)
+    tables = models.JSONField(default=list, blank=True)
+    status_message = models.CharField(max_length=500, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "table_resync_job"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['replication_config', 'status'], name='resync_job_cfg_status_idx'),
+        ]
+
+    def __str__(self):
+        return f"Resync job #{self.pk} ({self.status}) — {len(self.tables or [])} table(s)"
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in self.ACTIVE_STATUSES

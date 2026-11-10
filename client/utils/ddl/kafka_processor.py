@@ -24,6 +24,18 @@ from client.models.replication import ReplicationConfig
 
 logger = logging.getLogger(__name__)
 
+# The truncate watcher reads every record of every change topic (to find op='t').
+# During a (re)snapshot those topics fill with millions of records, so:
+#  * read in large batches (was 50 per ~12 s → weeks of lag after a big resync);
+#  * cap librdkafka's prefetch queue (default ~64 MiB per consumer) so several
+#    watchers in one 512 MiB-1 GiB worker can't OOM it.
+TRUNCATE_WATCHER_BATCH = 1000
+TRUNCATE_WATCHER_MEMORY_LIMITS = {
+    'queued.max.messages.kbytes': 16384,   # 16 MiB prefetch per consumer
+    'queued.min.messages': 10000,
+    'fetch.max.bytes': 8388608,            # 8 MiB per fetch response
+}
+
 
 class KafkaDDLProcessor(BaseDDLProcessor):
     """
@@ -147,7 +159,8 @@ class KafkaDDLProcessor(BaseDDLProcessor):
 
         try:
             # Batch-fetch up to max_messages within timeout_sec in a single call.
-            # Returns immediately when the partition is at EOF.
+            # NOTE: blocks for the full timeout when the topic is idle
+            # (enable.partition.eof is off) — keep timeout_sec short.
             messages = self.consumer.consume(num_messages=max_messages, timeout=timeout_sec)
 
             for msg in messages:
@@ -1135,6 +1148,7 @@ class KafkaDDLProcessor(BaseDDLProcessor):
                 'enable.auto.commit': False,
                 'session.timeout.ms': 30000,
                 'max.poll.interval.ms': 300000,
+                **TRUNCATE_WATCHER_MEMORY_LIMITS,
             })
             self._watched_topics = set(change_topics)
             self._last_topic_refresh = time.monotonic()
@@ -1221,7 +1235,7 @@ class KafkaDDLProcessor(BaseDDLProcessor):
             handled += self._retry_pending_truncates()
 
             # 2) Consume new change-topic messages and dispatch op="t" events.
-            msgs = self.truncate_consumer.consume(num_messages=50, timeout=timeout_sec)
+            msgs = self.truncate_consumer.consume(num_messages=TRUNCATE_WATCHER_BATCH, timeout=timeout_sec)
             for msg in msgs:
                 if msg.error() or msg.value() is None:
                     continue  # error / tombstone

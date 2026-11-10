@@ -263,6 +263,16 @@ def get_mysql_connector_config(
         "max.queue.size": str(replication_config.max_queue_size) if replication_config and hasattr(replication_config, 'max_queue_size') else "8192",
         "max.batch.size": str(replication_config.max_batch_size) if replication_config and hasattr(replication_config, 'max_batch_size') else "2048",
         "poll.interval.ms": str(replication_config.poll_interval_ms) if replication_config and hasattr(replication_config, 'poll_interval_ms') else "500",
+        # Byte cap on the in-memory queue in addition to the record cap above: with wide
+        # rows 8192 queued records can take a large share of the 2 GB Connect heap during
+        # an incremental snapshot.
+        "max.queue.size.in.bytes": "268435456",
+
+        # Heartbeats (PostgreSQL/SQL Server/Oracle templates already have them). Keeps
+        # offsets moving on quiet sources and lets the read-only (GTID-watermark)
+        # incremental snapshot close chunk windows without waiting for unrelated binlog
+        # traffic. Topic __debezium-heartbeat.<prefix> is pre-created by KafkaTopicManager.
+        "heartbeat.interval.ms": "10000",
 
         "key.converter": "io.confluent.connect.avro.AvroConverter",
         "key.converter.schema.registry.url": schema_registry_url,

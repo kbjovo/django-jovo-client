@@ -294,12 +294,20 @@ class BaseDDLProcessor(ABC):
         return target_db.db_type.lower() if target_db else 'unknown'
 
 
-def _apply_truncate_and_snapshot(replication_config, source_table: str, table_mapping=None) -> bool:
+def _apply_truncate_and_snapshot(replication_config, source_table: str, table_mapping=None,
+                                 source: str = 'auto_truncate') -> bool:
     """
-    Truncate the sink table for *source_table* and fire an incremental snapshot.
+    Queue a truncate + incremental re-snapshot of *source_table*'s target table.
 
     Used by _handle_truncate_for_table (immediate path) and by the orchestrator
     when draining pending_truncates after a connector resume.
+
+    The work itself is done by the sequential resync job runner
+    (client/replication/resync.py): one table at a time, bounded lock waits,
+    verified signal delivery, and nothing while the pipeline is paused. Returns
+    True once the table is durably queued (or already queued) — the caller's
+    "pending / retry" bookkeeping then treats it as handled. Returns False only if
+    it could not be queued, so the caller retries later.
     """
     if table_mapping is None:
         table_mapping = replication_config.table_mappings.filter(
@@ -310,37 +318,14 @@ def _apply_truncate_and_snapshot(replication_config, source_table: str, table_ma
             logger.debug(f"TRUNCATE apply: untracked table '{source_table}' — skipping")
             return True
 
-    target_db = replication_config.client_database.client.client_databases.filter(
-        is_target=True
-    ).first()
-    if not target_db:
-        logger.error(f"No target database found — cannot apply TRUNCATE for '{source_table}'")
-        return False
-
-    from client.utils.table_creator import truncate_tables_for_mappings
-    ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
-    if not ok:
-        logger.error(f"Failed to truncate target table '{table_mapping.target_table}': {msg}")
-        return False
-
-    logger.info(f"  ✓ Target table '{table_mapping.target_table}' truncated")
-
-    # The target is now empty; the snapshot signal is what refills it. If the signal
-    # fails we MUST report failure so the caller retries the whole truncate+snapshot
-    # (the watcher keeps it pending; the orchestrator keeps it in pending_truncates).
-    # Returning success here would leave the target permanently empty.
     try:
-        from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
-        signal_id, method = send_incremental_snapshot_signal(
-            replication_config.client_database,
-            replication_config,
-            [source_table]
-        )
-        logger.info(f"  ✓ Snapshot signal sent (ID: {signal_id}, via {method})")
+        from client.replication.resync import enqueue_resync
+        job, added, skipped = enqueue_resync(replication_config, [source_table], source=source)
+        if added:
+            logger.info(f"  ✓ '{source_table}' queued for resync (job #{job.pk})")
+        else:
+            logger.info(f"  ✓ '{source_table}' not re-queued: {skipped}")
         return True
     except Exception as e:
-        logger.error(
-            f"  ✗ Snapshot signal failed for '{source_table}': {e} "
-            f"— target is truncated and empty; resync will be retried"
-        )
+        logger.error(f"  ✗ Could not queue resync for '{source_table}': {e} — will be retried")
         return False

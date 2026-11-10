@@ -354,7 +354,14 @@ def schedule_ddl_processing_all():
 
 
 
-@shared_task(bind=True, queue='ddl_consumer', time_limit=None, soft_time_limit=None)
+# Long-running tasks: time_limit=None does NOT disable limits — billiard falls back
+# to the global CELERY_TASK_TIME_LIMIT (2 h), which killed the supervisor every ~2 h
+# (consumer-group rebalances, leaked engines, fallback-task storms). Use explicit,
+# effectively infinite limits instead.
+_LONG_RUNNING_LIMIT = 30 * 24 * 3600  # 30 days
+
+
+@shared_task(bind=True, queue='ddl_consumer', time_limit=_LONG_RUNNING_LIMIT, soft_time_limit=_LONG_RUNNING_LIMIT - 60)
 def start_ddl_supervisor(self):
     """
     Single supervisor task that manages DDL consumers for ALL active configs.
@@ -431,9 +438,12 @@ def start_ddl_supervisor(self):
 
             while not stop_event.is_set():
                 try:
-                    # Long-poll: Kafka blocks up to timeout_sec when the topic is
-                    # empty, so no extra sleep is needed between iterations.
-                    processed, errors = processor.process(timeout_sec=10, max_messages=50)
+                    # Long-poll: Kafka blocks up to timeout_sec when the schema/DDL topic
+                    # is empty, so no extra sleep is needed between iterations. Kept short
+                    # (1 s): each iteration also drains a batch of the truncate watcher,
+                    # and a 10 s block here throttled it to ~5 records/s — weeks of lag
+                    # after a multi-million-row resync.
+                    processed, errors = processor.process(timeout_sec=1, max_messages=50)
                     if errors:
                         logger.warning(
                             f"[Supervisor] Config {config_id}: "
@@ -587,7 +597,7 @@ def stop_ddl_supervisor():
     return {'success': False, 'error': 'Supervisor not running'}
 
 
-@shared_task(bind=True, queue='ddl_consumer', time_limit=None, soft_time_limit=None)
+@shared_task(bind=True, queue='ddl_consumer', time_limit=_LONG_RUNNING_LIMIT, soft_time_limit=_LONG_RUNNING_LIMIT - 60)
 def start_continuous_ddl_consumer(self, config_id: int):
     """
     Start a continuous Kafka consumer for a single config.
@@ -768,6 +778,73 @@ def refresh_connector_status_cache():
         return {'refreshed': 0, 'error': str(e)}
 
 
+@shared_task(ignore_result=True, soft_time_limit=240, time_limit=300)
+def advance_resync_jobs(job_id: int = None):
+    """
+    Advance sequential table-resync jobs by one step (see client/replication/resync.py).
+
+    Runs from beat every 20 s for all active jobs, and is kicked immediately with a
+    job_id when a job is queued or a table finishes. Each tick is short (bounded
+    truncate lock wait + one signal), so it never holds a worker for long and the
+    job survives worker restarts and closed browser tabs.
+    """
+    from client.replication import resync
+    if job_id:
+        resync.advance_job(job_id)
+    else:
+        resync.advance_active_jobs()
+
+
+@shared_task(ignore_result=True, soft_time_limit=600, time_limit=660)
+def refresh_row_counts(config_id: int, force: bool = False):
+    """
+    Compute source/target row counts for one connector and cache them.
+
+    Enqueued on demand by the monitor views (client.utils.row_counts.request_refresh);
+    never run per HTTP request. At most one sweep per connector runs at a time.
+
+    Automatic refreshes are skipped while an incremental snapshot / resync job is
+    running (counting tables that are being bulk-refilled only adds load). An explicit
+    user refresh (force=True) still runs — the per-statement timeout and the lock keep
+    it bounded.
+    """
+    from client.utils import row_counts
+
+    if not row_counts.acquire_lock(config_id):
+        logger.debug(f"Row-count refresh already running for config {config_id}")
+        return
+
+    try:
+        try:
+            config = ReplicationConfig.objects.select_related(
+                'client_database', 'client_database__client'
+            ).get(pk=config_id)
+        except ReplicationConfig.DoesNotExist:
+            return
+
+        if not force and row_counts.snapshot_busy(config):
+            previous = row_counts.get_cached(config_id) or {}
+            row_counts.set_cached(config_id, {
+                **previous,
+                'status': row_counts.STATUS_SNAPSHOT,
+                'as_of': timezone.now().isoformat(),
+            })
+            logger.info(f"Row counts skipped for config {config_id}: snapshot/resync in progress")
+            return
+
+        payload = row_counts.compute_row_counts(config)
+        row_counts.set_cached(config_id, payload)
+
+        summary = row_counts.summarize_sync(payload)
+        if summary and summary.get('status') == 'rows_in_sync':
+            # update() not save(): never overwrite fields changed concurrently elsewhere.
+            ReplicationConfig.objects.filter(pk=config_id).update(last_success_at=timezone.now())
+    except Exception as e:
+        logger.warning(f"Row-count refresh failed for config {config_id}: {e}", exc_info=True)
+    finally:
+        row_counts.release_lock(config_id)
+
+
 @shared_task
 def monitor_connectors():
     """
@@ -803,10 +880,21 @@ def monitor_connectors():
             if not config.connector_name:
                 continue
 
-            # Check connector status
-            exists, status_data = manager.get_connector_status(config.connector_name)
+            # Check connector status. Only a real 404 means "missing" — a timeout under
+            # load must not flip the config to 'error' (that also stops its DDL thread).
+            outcome, status_data = manager.get_connector_status_detailed(
+                config.connector_name,
+                timeout=int(getattr(settings, 'CONNECTOR_STATUS_TIMEOUT', 8)),
+            )
 
-            if not exists:
+            if outcome == 'unreachable':
+                issues.append({
+                    'config_id': config.id,
+                    'connector': config.connector_name,
+                    'issue': 'Status unavailable (Kafka Connect not responding)'
+                })
+
+            elif outcome == 'not_found':
                 issues.append({
                     'config_id': config.id,
                     'connector': config.connector_name,
@@ -814,7 +902,7 @@ def monitor_connectors():
                 })
 
                 config.status = 'error'
-                config.save()
+                config.save(update_fields=['status'])
 
             elif status_data:
                 connector_state = status_data.get('connector', {}).get('state', 'UNKNOWN')
@@ -828,7 +916,7 @@ def monitor_connectors():
 
                     if connector_state == 'FAILED':
                         config.status = 'error'
-                        config.save()
+                        config.save(update_fields=['status'])
 
             # Check DLQ for messages
             dlq_count = _get_dlq_count(config)

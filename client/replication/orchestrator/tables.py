@@ -25,57 +25,34 @@ logger = logging.getLogger("client.replication.orchestrator")
 
 class TablesMixin:
     def resync_table(self, table_name: str) -> Tuple[bool, str]:
+        """Queue one table for resync. See resync_tables()."""
+        return self.resync_tables([table_name])
+
+
+    def resync_tables(self, table_names: list) -> Tuple[bool, str]:
         """
-        Manually resync a single table after a source TRUNCATE + repopulate.
+        Queue tables for a sequential resync (truncate target + incremental re-snapshot).
 
-        Use this for PostgreSQL and SQL Server sources where TRUNCATE events are
-        not automatically detected by the DDL processor (MySQL and Oracle handle
-        this automatically via the schema history topic).
-
-        Steps:
-          1. Truncate target table (clears stale rows, keeps schema).
-          2. Send incremental snapshot signal so Debezium re-reads the source.
-
-        Args:
-            table_name: Source table name (unqualified, e.g. 'orders')
+        Nothing is truncated here: the job runner (client/replication/resync.py)
+        processes ONE table at a time in the background — truncate (bounded lock
+        wait), signal, wait for Debezium to finish that table, then the next — and
+        waits while the source or sink connector is paused.
 
         Returns:
-            Tuple[bool, str]: (success, message)
+            Tuple[bool, str]: (queued_anything, message)
         """
-        from client.utils.table_creator import truncate_tables_for_mappings
-        from jovoclient.utils.kafka.signal import send_incremental_snapshot_signal
+        from client.replication.resync import enqueue_resync
 
-        table_mapping = self.config.table_mappings.filter(
-            source_table=table_name,
-            is_enabled=True
-        ).first()
-        if not table_mapping:
-            return False, f"No enabled mapping found for table '{table_name}'"
-
-        target_db = self.config.client_database.client.client_databases.filter(
-            is_target=True
-        ).first()
-        if not target_db:
-            return False, "No target database configured"
-
-        # Step 1: truncate target
-        self._log_info(f"Resync '{table_name}': truncating target table '{table_mapping.target_table}'")
-        ok, msg = truncate_tables_for_mappings(target_db, [table_mapping])
-        if not ok:
-            return False, f"Failed to truncate target table: {msg}"
-
-        # Step 2: incremental snapshot signal
-        self._log_info(f"Resync '{table_name}': sending incremental snapshot signal")
-        try:
-            signal_id, method = send_incremental_snapshot_signal(
-                self.config.client_database,
-                self.config,
-                [table_name]
-            )
-        except Exception as e:
-            return False, f"Target truncated but snapshot signal failed: {e}"
-
-        return True, f"Resync triggered for '{table_name}' (signal {signal_id} via {method})"
+        job, added, skipped = enqueue_resync(self.config, table_names, source='manual')
+        parts = []
+        if added:
+            parts.append(f"Queued {len(added)} table(s) for resync (job #{job.pk})")
+            self._log_info(f"Resync queued for {added} (job #{job.pk})")
+        if skipped:
+            parts.append("skipped: " + ", ".join(f"{t} ({why})" for t, why in skipped))
+        if not added:
+            return False, "Nothing queued — " + ("; ".join(parts) or "no tables given")
+        return True, "; ".join(parts)
 
 
     def remove_tables(self, table_names: list, target_action: str = 'truncate', allow_empty: bool = False) -> Tuple[bool, str, list]:
@@ -755,7 +732,7 @@ class TablesMixin:
         applied = []
         for table_name in pending:
             try:
-                ok = _apply_truncate_and_snapshot(self.config, table_name)
+                ok = _apply_truncate_and_snapshot(self.config, table_name, source='pending_resume')
                 if ok:
                     applied.append(table_name)
                 else:

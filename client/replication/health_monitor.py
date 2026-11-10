@@ -8,10 +8,51 @@ Uses JDBC Sink Connectors for data replication (no Celery-based consumers).
 """
 
 import logging
+import time
 from celery import shared_task
+from django.core.cache import cache
 from client.utils.notification_utils import maybe_send_alert, resolve_alert
 
 logger = logging.getLogger(__name__)
+
+# One run at a time: a run can take minutes when Kafka Connect is slow (e.g. under
+# snapshot load) and overlapping runs used to fill every Celery worker slot.
+_RUN_LOCK_KEY = 'health-monitor-lock'
+_RUN_LOCK_TTL = 300
+
+# Auto-restart budget per connector. A failure that repeats on the same data (FK
+# violation, bad row, ...) used to be restarted every minute forever — each restart
+# replays thousands of upserts into the target before failing again.
+_RESTART_KEY_PREFIX = 'autorestart:'
+_RESTART_MAX = 3
+_RESTART_WINDOW_S = 1800
+
+
+def _restart_allowed(connector_name: str) -> bool:
+    """True if this connector may be auto-restarted now (records the attempt)."""
+    key = f'{_RESTART_KEY_PREFIX}{connector_name}'
+    now = time.time()
+    try:
+        history = [t for t in (cache.get(key) or []) if now - t < _RESTART_WINDOW_S]
+        if len(history) >= _RESTART_MAX:
+            logger.warning(
+                f"[{connector_name}] Auto-restart suppressed: {len(history)} restarts in the last "
+                f"{_RESTART_WINDOW_S // 60} min. Fix the underlying error (see Kafka Connect logs) "
+                f"and restart manually from the monitor page."
+            )
+            return False
+        history.append(now)
+        cache.set(key, history, _RESTART_WINDOW_S)
+    except Exception as e:
+        logger.debug(f"Restart budget unavailable for {connector_name}: {e}")
+    return True
+
+
+def _reset_restart_budget(*connector_names) -> None:
+    try:
+        cache.delete_many([f'{_RESTART_KEY_PREFIX}{n}' for n in connector_names if n])
+    except Exception:
+        pass
 
 
 @shared_task(name='client.replication.monitor_replication_health')
@@ -26,6 +67,22 @@ def monitor_replication_health():
 
     This is a Celery periodic task configured in celery.py
     """
+    try:
+        if not cache.add(_RUN_LOCK_KEY, 1, _RUN_LOCK_TTL):
+            logger.info("Health monitoring already running — skipping this cycle")
+            return
+    except Exception as e:
+        logger.warning(f"Health monitor lock unavailable ({e}) — running without it")
+    try:
+        _monitor_replication_health()
+    finally:
+        try:
+            cache.delete(_RUN_LOCK_KEY)
+        except Exception:
+            pass
+
+
+def _monitor_replication_health():
     from client.models import ReplicationConfig
     from .orchestrator import ReplicationOrchestrator
 
@@ -61,9 +118,15 @@ def monitor_replication_health():
                        f"(Source: {'✓' if source_connector_health else '✗'}, "
                        f"Sink: {'✓' if sink_connector_health else '✗'})")
 
+            # Kafka Connect didn't answer: don't flip status, alert, or restart on a guess.
+            if overall_health == 'unknown':
+                logger.warning(f"[{config.connector_name}] Status unknown (Kafka Connect not responding) — skipping this cycle")
+                continue
+
             # Track health statistics
             if overall_health == 'healthy':
                 healthy_count += 1
+                _reset_restart_budget(config.connector_name, config.sink_connector_name)
                 if config.status == 'error':
                     config.status = 'active'
                     config.save(update_fields=['status'])
@@ -84,9 +147,10 @@ def monitor_replication_health():
                 failed_count += 1
                 # Send alerts for specific failure states
                 _check_and_alert(config, status['source_connector'], status['sink_connector'])
-                # Update config to error state
+                # Update config to error state. update_fields: never write back a stale
+                # copy of pending_truncates / connector_state / sink_connector_state.
                 config.status = 'error'
-                config.save()
+                config.save(update_fields=['status'])
 
         except Exception as e:
             logger.error(f"[{config.connector_name}] Error monitoring health: {e}")
@@ -225,6 +289,8 @@ def _fix_sink_connector(config, sink_status):
 
     # Connector-level FAILED → restart the whole connector
     elif sink_state == 'FAILED':
+        if not _restart_allowed(config.sink_connector_name):
+            return False
         logger.warning(f"[{config.sink_connector_name}] Sink connector is FAILED, restarting...")
 
         try:
@@ -278,6 +344,8 @@ def _fix_source_connector(config, connector_status):
 
     # Connector-level FAILED → restart the whole connector
     elif connector_state == 'FAILED':
+        if not _restart_allowed(config.connector_name):
+            return False
         logger.warning(f"[{config.connector_name}] Connector is FAILED, restarting...")
 
         try:
@@ -305,6 +373,9 @@ def _restart_failed_tasks(config, connector_name, status) -> bool:
     Returns True if the restart succeeded.
     """
     if not _has_failed_task(status):
+        return False
+
+    if not _restart_allowed(connector_name):
         return False
 
     from .orchestrator import ReplicationOrchestrator

@@ -1455,16 +1455,115 @@ def preview_foreign_keys(replication_config):
     }
 
 
-def truncate_tables_for_mappings(target_db, table_mappings):
+# Default upper bound on how long a TRUNCATE may wait for a metadata / table lock.
+# MySQL's own default lock_wait_timeout is ONE YEAR: a TRUNCATE queued behind any
+# open reader (a COUNT(*), the sink's in-flight batch) blocks every later statement
+# on that table — sink writes and page queries alike — until it gets the lock.
+TRUNCATE_LOCK_WAIT_SECONDS = 30
+
+
+def _is_lock_timeout_error(err: str) -> bool:
+    err = (err or '').lower()
+    return any(k in err for k in (
+        'lock wait timeout',          # MySQL 1205 (also used for MDL waits)
+        '(1205',
+        'lock timeout',               # PostgreSQL 55P03 "canceling statement due to lock timeout"
+        'lock request time out',      # SQL Server 1222
+        'ora-00054',                  # Oracle "resource busy ... DDL_LOCK_TIMEOUT expired"
+    ))
+
+
+def _prepare_truncate_session(conn, db_type: str, lock_wait_seconds: int) -> None:
+    """
+    Bound lock waits for this session and, on MySQL, disable FK checks so a parent
+    table referenced by target-side foreign keys can be truncated (InnoDB refuses
+    with error 1701 otherwise). The source remains the integrity authority; the
+    target is a replica that is refilled by the snapshot right after.
+    """
+    wait = max(1, int(lock_wait_seconds))
+    statements = {
+        'mysql': [f"SET SESSION lock_wait_timeout = {wait}",
+                  f"SET SESSION innodb_lock_wait_timeout = {wait}",
+                  "SET SESSION foreign_key_checks = 0"],
+        'postgresql': [f"SET lock_timeout = '{wait}s'"],
+        'mssql': [f"SET LOCK_TIMEOUT {wait * 1000}"],
+        'oracle': [f"ALTER SESSION SET DDL_LOCK_TIMEOUT = {wait}"],
+    }.get(db_type, [])
+    for stmt in statements:
+        try:
+            conn.execute(text(stmt))
+        except Exception as e:
+            logger.warning(f"Could not apply truncate session setting ({stmt}): {e}")
+
+
+def _truncate_sql(db_type: str, target_table: str, target_schema=None) -> str:
+    if db_type == 'mysql':
+        return f"TRUNCATE TABLE `{target_table}`"
+    if db_type == 'postgresql':
+        if target_schema:
+            return f'TRUNCATE TABLE "{target_schema}"."{target_table}" CASCADE'
+        return f'TRUNCATE TABLE "{target_table}" CASCADE'
+    if db_type == 'mssql':
+        if target_schema:
+            return f"TRUNCATE TABLE [{target_schema}].[{target_table}]"
+        return f"TRUNCATE TABLE [{target_table}]"
+    if db_type == 'oracle':
+        if target_schema:
+            return f'TRUNCATE TABLE "{target_schema}"."{target_table}"'
+        return f'TRUNCATE TABLE "{target_table}"'
+    return f"TRUNCATE TABLE {target_table}"
+
+
+def truncate_target_table(target_db, table_mapping, lock_wait_seconds: int = TRUNCATE_LOCK_WAIT_SECONDS):
+    """
+    Truncate ONE target table with a bounded lock wait.
+
+    Returns:
+        Tuple[bool, Optional[str], str]: (ok, kind, message) where kind is
+          None          — truncated
+          'not_found'   — target table doesn't exist yet (ok=True; the snapshot creates it)
+          'lock_timeout'— could not get the table lock in time (retry later)
+          'error'       — any other failure
+    """
+    engine = get_database_engine(target_db, pool_size=1, connect_timeout=10)
+    db_type = target_db.db_type.lower()
+    target_table = table_mapping.target_table
+    target_schema = table_mapping.target_schema or None
+    full_name = f"{target_schema}.{target_table}" if target_schema else target_table
+    try:
+        with engine.connect() as conn:
+            _prepare_truncate_session(conn, db_type, lock_wait_seconds)
+            conn.execute(text(_truncate_sql(db_type, target_table, target_schema)))
+            conn.commit()
+        logger.info(f"  Truncated table: {full_name}")
+        return True, None, f"Truncated {full_name}"
+    except Exception as e:
+        err = str(e)
+        if 'does not exist' in err or 'ORA-00942' in err or "doesn't exist" in err:
+            logger.info(f"  Table not found, skipping truncate: {full_name}")
+            return True, 'not_found', f"Target table {full_name} does not exist yet"
+        if _is_lock_timeout_error(err):
+            logger.warning(f"  Truncate of {full_name} timed out waiting for a lock ({lock_wait_seconds}s)")
+            return False, 'lock_timeout', f"Timed out after {lock_wait_seconds}s waiting for a lock on {full_name}"
+        logger.warning(f"  Failed to truncate {full_name}: {e}")
+        return False, 'error', f"{full_name}: {err}"
+    finally:
+        engine.dispose()
+
+
+def truncate_tables_for_mappings(target_db, table_mappings, lock_wait_seconds: int = TRUNCATE_LOCK_WAIT_SECONDS):
     """
     Truncate specific target tables given table mappings.
 
     Supports: MySQL, PostgreSQL, MS SQL, Oracle
-    Uses database-specific TRUNCATE syntax with proper error handling.
+    Uses database-specific TRUNCATE syntax with proper error handling. Lock waits
+    are bounded by *lock_wait_seconds* and MySQL FK checks are disabled for the
+    session (see _prepare_truncate_session).
 
     Args:
         target_db: ClientDatabase instance for the target database
         table_mappings: QuerySet or list of TableMapping objects
+        lock_wait_seconds: max seconds each TRUNCATE may wait for its table lock
 
     Returns:
         Tuple[bool, str]: (success, message)
@@ -1483,6 +1582,7 @@ def truncate_tables_for_mappings(target_db, table_mappings):
 
     try:
         with engine.connect() as conn:
+            _prepare_truncate_session(conn, db_type, lock_wait_seconds)
             for table_mapping in mappings_list:
                 target_table = table_mapping.target_table
                 target_schema = table_mapping.target_schema or None
@@ -1493,30 +1593,7 @@ def truncate_tables_for_mappings(target_db, table_mappings):
                     else:
                         full_table_name = target_table
 
-                    if db_type == 'mysql':
-                        truncate_sql = f"TRUNCATE TABLE `{target_table}`"
-
-                    elif db_type == 'postgresql':
-                        if target_schema:
-                            truncate_sql = f'TRUNCATE TABLE "{target_schema}"."{target_table}" CASCADE'
-                        else:
-                            truncate_sql = f'TRUNCATE TABLE "{target_table}" CASCADE'
-
-                    elif db_type == 'mssql':
-                        if target_schema:
-                            truncate_sql = f"TRUNCATE TABLE [{target_schema}].[{target_table}]"
-                        else:
-                            truncate_sql = f"TRUNCATE TABLE [{target_table}]"
-
-                    elif db_type == 'oracle':
-                        if target_schema:
-                            truncate_sql = f'TRUNCATE TABLE "{target_schema}"."{target_table}"'
-                        else:
-                            truncate_sql = f'TRUNCATE TABLE "{target_table}"'
-
-                    else:
-                        truncate_sql = f"TRUNCATE TABLE {target_table}"
-
+                    truncate_sql = _truncate_sql(db_type, target_table, target_schema)
                     conn.execute(text(truncate_sql))
                     conn.commit()
 
@@ -1525,6 +1602,10 @@ def truncate_tables_for_mappings(target_db, table_mappings):
 
                 except Exception as e:
                     error_str = str(e)
+                    try:
+                        conn.rollback()  # PostgreSQL: keep the connection usable for the next table
+                    except Exception:
+                        pass
                     # Table doesn't exist — skip gracefully
                     if ('does not exist' in error_str or 'ORA-00942' in error_str
                             or "doesn't exist" in error_str):

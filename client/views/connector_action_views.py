@@ -184,12 +184,67 @@ def sink_restart_all_tasks(request, config_pk):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
+def _queue_resync(config, tables):
+    """Queue tables for the sequential resync job runner and build the JSON reply."""
+    from client.replication.resync import enqueue_resync
+
+    job, added, skipped = enqueue_resync(config, tables, source='manual')
+    already = [t for t, why in skipped if why == 'already queued']
+    invalid = [f"{t} ({why})" for t, why in skipped if why != 'already queued']
+
+    parts = []
+    if added:
+        parts.append(
+            f"Queued {len(added)} table(s) for resync. They are emptied and refilled "
+            f"one at a time in the background."
+        )
+    if already:
+        parts.append(f"Already queued: {', '.join(already)}.")
+    if invalid:
+        parts.append(f"Skipped: {', '.join(invalid)}.")
+
+    success = bool(added or already)
+    return JsonResponse({
+        'success': success,
+        'message': ' '.join(parts) if success else None,
+        'error': None if success else (' '.join(parts) or 'No tables given'),
+        'job_id': job.pk if job else None,
+        'queued': added,
+        'skipped': [{'table': t, 'reason': why} for t, why in skipped],
+    })
+
+
+def resync_tables(request, config_pk):
+    """
+    AJAX POST: queue tables for a sequential resync (truncate target + re-snapshot).
+
+    Body JSON: {"tables": ["orders", "customers", ...]}
+
+    Returns immediately — the work runs in Celery (client/replication/resync.py),
+    one table at a time. Progress is reported by connector_status_api.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        import json
+        body = json.loads(request.body or b'{}')
+        tables = body.get('tables') or []
+        if isinstance(tables, str):
+            tables = [tables]
+        tables = [str(t).strip() for t in tables if str(t).strip()]
+        if not tables:
+            return JsonResponse({'success': False, 'error': 'tables required'}, status=400)
+
+        config = get_object_or_404(ReplicationConfig, pk=config_pk)
+        return _queue_resync(config, tables)
+    except Exception as e:
+        logger.error(f'resync_tables failed for config {config_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
 def resync_table(request, config_pk):
     """
-    AJAX POST: Manually resync a single table after a source TRUNCATE + repopulate.
-
-    Used for PostgreSQL and SQL Server where TRUNCATE is not auto-detected.
-    MySQL and Oracle handle this automatically via the DDL processor.
+    AJAX POST: queue a single table for resync (kept for backward compatibility).
 
     Body JSON: {"table": "orders"}
     """
@@ -197,18 +252,32 @@ def resync_table(request, config_pk):
         return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
     try:
         import json
-        body = json.loads(request.body)
-        table_name = body.get('table', '').strip()
+        body = json.loads(request.body or b'{}')
+        table_name = (body.get('table') or '').strip()
         if not table_name:
             return JsonResponse({'success': False, 'error': 'table name required'}, status=400)
 
         config = get_object_or_404(ReplicationConfig, pk=config_pk)
-        from client.replication.orchestrator import ReplicationOrchestrator
-        orchestrator = ReplicationOrchestrator(config)
-        success, message = orchestrator.resync_table(table_name)
-        return JsonResponse({'success': success, 'message': message})
+        return _queue_resync(config, [table_name])
     except Exception as e:
         logger.error(f'resync_table failed for config {config_pk}: {e}', exc_info=True)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+def resync_job_cancel(request, config_pk, job_pk):
+    """AJAX POST: skip the not-yet-started tables of a resync job."""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST required'}, status=405)
+    try:
+        from client.models.replication import TableResyncJob
+        from client.replication.resync import cancel_job
+
+        get_object_or_404(TableResyncJob, pk=job_pk, replication_config_id=config_pk)
+        success, message = cancel_job(job_pk)
+        return JsonResponse({'success': success, 'message': message if success else None,
+                             'error': None if success else message})
+    except Exception as e:
+        logger.error(f'resync_job_cancel failed for job {job_pk}: {e}', exc_info=True)
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 

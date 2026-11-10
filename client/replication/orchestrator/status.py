@@ -109,19 +109,22 @@ class StatusMixin:
             return None
 
 
-    def _get_connector_status(self) -> Dict[str, Any]:
-        """Get Debezium source connector status."""
+    def _status_for_connector(self, name: str) -> Dict[str, Any]:
+        """
+        Status dict for one connector.
+
+        A timeout / connection error is reported as UNREACHABLE (unknown), never
+        as NOT_FOUND: under snapshot load Kafka Connect can be slow to answer, and
+        treating that as "connector missing" flipped configs to 'error', sent
+        "Connector Missing" emails and stopped their DDL threads.
+        """
         try:
-            result = self.connector_manager.get_connector_status(self.config.connector_name)
-            
-            if isinstance(result, tuple):
-                success, status_data = result
-                if not success or not status_data:
-                    return {'state': 'NOT_FOUND', 'healthy': False}
-            else:
-                status_data = result
-                if not status_data:
-                    return {'state': 'NOT_FOUND', 'healthy': False}
+            timeout = int(getattr(settings, 'CONNECTOR_STATUS_TIMEOUT', 8))
+            outcome, status_data = self.connector_manager.get_connector_status_detailed(name, timeout=timeout)
+            if outcome == 'not_found':
+                return {'state': 'NOT_FOUND', 'healthy': False}
+            if outcome != 'ok' or not status_data:
+                return {'state': 'UNREACHABLE', 'healthy': False, 'unknown': True}
 
             state = status_data.get('connector', {}).get('state', 'UNKNOWN')
             tasks = status_data.get('tasks', [])
@@ -133,39 +136,22 @@ class StatusMixin:
             }
         except Exception as e:
             return {'state': 'ERROR', 'healthy': False, 'message': str(e)}
+
+
+    def _get_connector_status(self) -> Dict[str, Any]:
+        """Get Debezium source connector status."""
+        return self._status_for_connector(self.config.connector_name)
 
 
     def _get_sink_connector_status(self) -> Dict[str, Any]:
         """Get JDBC Sink connector status."""
-        try:
-            if not self.config.sink_connector_name:
-                return {'state': 'NOT_CONFIGURED', 'healthy': False}
-
-            result = self.connector_manager.get_connector_status(self.config.sink_connector_name)
-
-            if isinstance(result, tuple):
-                success, status_data = result
-                if not success or not status_data:
-                    return {'state': 'NOT_FOUND', 'healthy': False}
-            else:
-                status_data = result
-                if not status_data:
-                    return {'state': 'NOT_FOUND', 'healthy': False}
-
-            state = status_data.get('connector', {}).get('state', 'UNKNOWN')
-            tasks = status_data.get('tasks', [])
-            has_failed_task = any(t.get('state') == 'FAILED' for t in tasks)
-            return {
-                'state': state,
-                'healthy': state in ('RUNNING', 'PAUSED') and not has_failed_task,
-                'tasks': tasks,
-            }
-        except Exception as e:
-            return {'state': 'ERROR', 'healthy': False, 'message': str(e)}
+        if not self.config.sink_connector_name:
+            return {'state': 'NOT_CONFIGURED', 'healthy': False}
+        return self._status_for_connector(self.config.sink_connector_name)
 
 
     def _calculate_overall_health(self, connector_status: Dict, sink_status: Dict) -> str:
-        """Calculate overall health: 'healthy', 'degraded', or 'unhealthy'.
+        """Calculate overall health: 'healthy', 'degraded', 'unhealthy' or 'unknown'.
 
         'degraded' means at least one side is unhealthy but in a state the health
         monitor can auto-recover (PAUSED, FAILED, or RUNNING with a FAILED task —
@@ -178,6 +164,10 @@ class StatusMixin:
 
         if connector_healthy and sink_healthy:
             return 'healthy'
+
+        # Kafka Connect didn't answer for one side: we genuinely don't know.
+        if connector_status.get('unknown') or sink_status.get('unknown'):
+            return 'unknown'
 
         if self._is_recoverable(connector_status) and self._is_recoverable(sink_status):
             return 'degraded'

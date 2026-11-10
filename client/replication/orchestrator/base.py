@@ -39,8 +39,25 @@ It ensures connector and consumer are always in sync."""
         self.config = replication_config
         self.validator = ReplicationValidator(replication_config)
         self.connector_manager = DebeziumConnectorManager()
-        self.topic_manager = KafkaTopicManager()
+        self._topic_manager = None
         self.jolokia = JolokiaClient()
+
+    @property
+    def topic_manager(self):
+        """
+        Kafka AdminClient wrapper, created on first use.
+
+        Building it eagerly spun up librdkafka threads and a broker connection for
+        every orchestrator — including the status endpoint polled every few seconds
+        and the health monitor — none of which touch topics.
+        """
+        if self._topic_manager is None:
+            self._topic_manager = KafkaTopicManager()
+        return self._topic_manager
+
+    @topic_manager.setter
+    def topic_manager(self, value):
+        self._topic_manager = value
 
 
     def _update_status(self, status: str, message: Optional[str] = None):

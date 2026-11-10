@@ -251,8 +251,8 @@
   <div class="bg-white dark:bg-gray-800 rounded-lg shadow px-4 py-2 mb-6 flex items-center justify-between text-xs">
     <div class="flex items-center gap-4">
       <span class="text-gray-500 dark:text-gray-400">Task Health:</span>
-      <span id="task-health-status" class="font-bold {% if unified_status.overall == 'healthy' %}text-green-600 dark:text-green-400{% elif unified_status.overall == 'degraded' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
-        {% if unified_status.overall == 'healthy' %}All Running{% elif unified_status.overall == 'degraded' %}Degraded{% else %}Failed{% endif %}
+      <span id="task-health-status" class="font-bold {% if unified_status.overall == 'healthy' %}text-green-600 dark:text-green-400{% elif unified_status.overall == 'degraded' or unified_status.overall == 'unknown' %}text-yellow-600 dark:text-yellow-400{% else %}text-red-600 dark:text-red-400{% endif %}">
+        {% if unified_status.overall == 'healthy' %}All Running{% elif unified_status.overall == 'degraded' %}Degraded{% elif unified_status.overall == 'unknown' %}Unknown (Kafka Connect not responding){% else %}Failed{% endif %}
       </span>
     </div>
     <div class="flex items-center gap-3 text-gray-500 dark:text-gray-400">
@@ -276,6 +276,29 @@
   {% endif %}
 
 
+  <!-- Resync Job Panel (filled by renderResyncJob from the status poll) -->
+  <div id="resync-job-panel" class="mb-6 hidden">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-700">
+        <div class="flex items-center gap-3 min-w-0">
+          <svg class="w-5 h-5 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+          <span class="text-sm font-semibold text-gray-900 dark:text-white">Resync job</span>
+          <span id="resync-job-status" class="text-xs"></span>
+        </div>
+        <button id="resync-job-cancel" type="button" onclick="cancelResyncJob()"
+          class="hidden px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition">
+          Cancel remaining
+        </button>
+      </div>
+      <div class="px-6 py-3">
+        <p id="resync-job-message" class="text-xs text-gray-500 dark:text-gray-400 mb-2"></p>
+        <div id="resync-job-tables" class="divide-y divide-gray-100 dark:divide-gray-700"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Table Rows Panel (collapsible, auto-loads) -->
   <div class="mb-6">
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow" x-data="{ rowsOpen: true }">
@@ -296,7 +319,7 @@
             </svg>
             Resync Selected
           </button>
-          <button id="btn-refresh-rows" @click.stop="fetchTableRows()" title="Refresh row counts"
+          <button id="btn-refresh-rows" @click.stop="fetchTableRows(true)" title="Recount rows (runs in the background)"
             class="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition">
             <svg id="refresh-rows-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
@@ -418,11 +441,16 @@
           <li><strong class="text-gray-800 dark:text-gray-200">Truncate</strong> the target table — clears stale rows, keeps structure.</li>
           <li><strong class="text-gray-800 dark:text-gray-200">Re-snapshot</strong> from source — Debezium re-reads all current rows.</li>
         </ol>
+        <p class="text-gray-600 dark:text-gray-400">
+          Runs in the background, <strong class="text-gray-800 dark:text-gray-200">one table at a time</strong>: the next table is
+          only truncated after the previous one has been refilled. It waits while the connector or sink is paused.
+          You can close this page — progress is shown in the <em>Resync job</em> panel.
+        </p>
         <div class="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400">
           <svg class="w-3.5 h-3.5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/>
           </svg>
-          <span x-text="resyncModal.tables.length === 1 ? 'The target table will be empty until the snapshot completes.' : 'Each target table will be empty until its snapshot completes.'"></span>
+          <span x-text="resyncModal.tables.length === 1 ? 'The target table will be empty until the snapshot completes.' : 'Each target table is empty only while its own snapshot runs.'"></span>
         </div>
       </div>
 
@@ -438,7 +466,7 @@
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
           </svg>
-          <span x-text="resyncModal.loading ? 'Resyncing...' : (resyncModal.tables.length === 1 ? 'Resync Table' : 'Resync ' + resyncModal.tables.length + ' Tables')"></span>
+          <span x-text="resyncModal.loading ? 'Queuing...' : (resyncModal.tables.length === 1 ? 'Resync Table' : 'Resync ' + resyncModal.tables.length + ' Tables')"></span>
         </button>
       </div>
     </div>
@@ -446,6 +474,7 @@
 
 </div>
 
+{{ resync_job|json_script:"resync-job-data" }}
 <!-- AJAX Polling Script -->
 <script>
 // CSRF token for POST requests
@@ -457,7 +486,7 @@ function refreshMonitor() {
   if (icon) icon.classList.add('animate-spin');
   if (btn)  btn.disabled = true;
 
-  fetchTableRows();
+  fetchTableRows(true);
   pollNow();
 
   setTimeout(function() {
@@ -492,7 +521,29 @@ function connectorAction(url, loadingMsg) {
 // Table Rows - fetch source & target row counts
 const TABLE_ROWS_URL = '{% url "connector_table_rows_api" replication_config.pk %}';
 
-function fetchTableRows() {
+// Row counts are computed in the background (Celery) and served from cache.
+// force=true asks the server to recount; while a count is running the page
+// re-fetches every 5 s (bounded) instead of blocking a request on COUNT(*).
+const ROWS_REFETCH_MS = 5000;
+const ROWS_REFETCH_MAX = 12;
+let _rowsInFlight = false;
+let _rowsRefetchTimer = null;
+let _rowsRefetchCount = 0;
+
+function _timeAgoShort(iso) {
+  if (!iso) return '';
+  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.round(secs / 60) + ' min ago';
+  return Math.round(secs / 3600) + ' h ago';
+}
+
+function fetchTableRows(force) {
+  if (_rowsInFlight) return;
+  _rowsInFlight = true;
+  clearTimeout(_rowsRefetchTimer);
+  if (force) _rowsRefetchCount = 0;
+
   const body = document.getElementById('table-rows-body');
   const countEl = document.getElementById('table-rows-count');
   const refreshIcon = document.getElementById('refresh-rows-icon');
@@ -500,15 +551,23 @@ function fetchTableRows() {
   // Show spinner on refresh icon
   if (refreshIcon) refreshIcon.classList.add('animate-spin');
 
-  // Show loading state
-  body.innerHTML = '<div class="flex items-center justify-center py-6 gap-2 text-sm text-gray-400 dark:text-gray-500">'
-    + '<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>'
-    + 'Loading row counts...</div>';
+  // Big loading placeholder only on the very first load (re-fetches update in place)
+  if (!body.dataset.loaded) {
+    body.innerHTML = '<div class="flex items-center justify-center py-6 gap-2 text-sm text-gray-400 dark:text-gray-500">'
+      + '<svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>'
+      + 'Loading row counts...</div>';
+  }
 
-  fetch(TABLE_ROWS_URL)
+  fetch(TABLE_ROWS_URL + (force ? '?refresh=1' : ''))
     .then(r => r.json())
     .then(data => {
-      if (refreshIcon) refreshIcon.classList.remove('animate-spin');
+      if (!data.refreshing && refreshIcon) refreshIcon.classList.remove('animate-spin');
+      if (data.success && data.refreshing && _rowsRefetchCount < ROWS_REFETCH_MAX) {
+        _rowsRefetchCount++;
+        _rowsRefetchTimer = setTimeout(() => fetchTableRows(false), ROWS_REFETCH_MS);
+      } else if (refreshIcon) {
+        refreshIcon.classList.remove('animate-spin');
+      }
       if (!data.success) {
         body.innerHTML = '<p class="text-sm text-red-500 text-center py-4">Failed to load row counts</p>';
         return;
@@ -528,7 +587,8 @@ function fetchTableRows() {
         if (error === 'db_unreachable') return '<span class="text-red-500 text-xs" title="Database is unreachable">DB offline</span>';
         if (error === 'table_not_found') return '<span class="text-yellow-500 text-xs" title="Table does not exist">Not found</span>';
         if (error === 'no_target_db') return '<span class="text-gray-400 text-xs" title="No target database configured">No target DB</span>';
-        if (error === 'error') return '<span class="text-red-400 text-xs" title="Query failed">Error</span>';
+        if (error === 'error') return '<span class="text-red-400 text-xs" title="Query failed or timed out">Error</span>';
+        if (error === 'pending') return '<span class="text-gray-400 text-xs" title="Row counts are computed in the background">counting…</span>';
         return '<span class="text-gray-400">--</span>';
       }
 
@@ -550,10 +610,22 @@ function fetchTableRows() {
           + 'No target database configured for this client</div>';
       }
 
+      if (data.status === 'snapshot_in_progress') {
+        warnings += '<div class="flex items-center gap-2 px-3 py-2 mb-3 rounded-lg bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 text-xs">'
+          + '<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
+          + 'Automatic row counts are paused while a snapshot / resync is running. Click refresh to count anyway.</div>';
+      }
+      if (data.as_of || data.refreshing) {
+        warnings += '<p class="text-xs text-gray-400 dark:text-gray-500 mb-2">'
+          + (data.as_of ? 'Counted ' + _timeAgoShort(data.as_of) : 'Not counted yet')
+          + (data.refreshing ? ' · recounting…' : '') + '</p>';
+      }
+
       const showResync = ['postgresql', 'postgres', 'mssql', 'sqlserver', 'mysql', 'oracle'].includes('{{ database.db_type|lower }}');
 
-      // Reset selection when table is refreshed
-      _selectedTables = [];
+      // Keep the user's selection across background re-fetches (drop tables that vanished)
+      const _present = new Set(tables.map(t => t.source_table));
+      _selectedTables = _selectedTables.filter(t => _present.has(t));
       updateResyncBtn();
 
       const selectAllCheckbox = showResync
@@ -589,7 +661,7 @@ function fetchTableRows() {
         const checkboxCell = showResync
           ? '<td class="py-2 pr-2">'
             + '<input type="checkbox" class="table-row-checkbox w-3.5 h-3.5 rounded border-gray-300 dark:border-gray-600 text-blue-600 cursor-pointer"'
-            + ' data-table=\'' + escapedTable + '\' onchange="toggleTableSelect(this)">'
+            + ' data-table=\'' + escapedTable + '\'' + (_selectedTables.includes(t.source_table) ? ' checked' : '') + ' onchange="toggleTableSelect(this)">'
             + '</td>'
           : '';
 
@@ -620,12 +692,19 @@ function fetchTableRows() {
 
       html += '</tbody></table>';
       body.innerHTML = html;
+      body.dataset.loaded = '1';
+      const selectAll = document.getElementById('select-all-tables');
+      if (selectAll && tables.length) {
+        selectAll.checked = _selectedTables.length === tables.length;
+        selectAll.indeterminate = _selectedTables.length > 0 && _selectedTables.length < tables.length;
+      }
     })
     .catch(err => {
       if (refreshIcon) refreshIcon.classList.remove('animate-spin');
       body.innerHTML = '<p class="text-sm text-red-500 text-center py-4">Failed to load row counts</p>';
       console.warn('Table rows fetch failed:', err);
-    });
+    })
+    .finally(() => { _rowsInFlight = false; });
 }
 
 // Auto-load row counts on page load
@@ -669,30 +748,118 @@ function openResyncModal() {
 
 async function confirmResync(tables) {
   window.dispatchEvent(new CustomEvent('resync-loading', { detail: true }));
-  const errors = [];
-  for (const tableName of tables) {
-    try {
-      const r = await fetch('{% url "resync_table" replication_config.pk %}', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}'},
-        body: JSON.stringify({table: tableName}),
-      });
-      const data = await r.json();
-      if (!data.success) errors.push(tableName + ': ' + (data.error || data.message || 'Unknown error'));
-    } catch (err) {
-      errors.push(tableName + ': ' + String(err));
-    }
+  let data = null;
+  try {
+    const r = await fetch('{% url "resync_tables" replication_config.pk %}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}'},
+      body: JSON.stringify({tables: tables}),
+    });
+    data = await r.json();
+  } catch (err) {
+    data = { success: false, error: String(err) };
   }
   window.dispatchEvent(new CustomEvent('resync-loading', { detail: false }));
   window.dispatchEvent(new CustomEvent('close-resync-modal'));
-  if (errors.length) {
-    showErrorModal('Resync failed', errors.join('\n'));
-  } else {
-    _selectedTables = [];
-    updateResyncBtn();
-    setTimeout(fetchTableRows, 3000);
+  if (!data.success) {
+    showErrorModal('Resync failed', data.error || data.message || 'Unknown error');
+    return;
   }
+  showToast('success', data.message || 'Resync queued');
+  _selectedTables = [];
+  document.querySelectorAll('.table-row-checkbox').forEach(cb => { cb.checked = false; });
+  const selectAll = document.getElementById('select-all-tables');
+  if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+  updateResyncBtn();
+  if (typeof window.pollNow === 'function') setTimeout(window.pollNow, 1000);
 }
+
+// ─── Resync job panel ──────────────────────────────────────────────────────────
+let _resyncJobId = null;
+const RESYNC_CANCEL_URL_TMPL = '{% url "resync_job_cancel" replication_config.pk 0 %}';
+
+function _escHtml(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+const RESYNC_STATE_STYLE = {
+  pending:      ['Queued',        'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'],
+  truncated:    ['Truncated',     'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'],
+  snapshotting: ['Snapshotting',  'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'],
+  done:         ['Done',          'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'],
+  failed:       ['Failed',        'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'],
+  skipped:      ['Skipped',       'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'],
+};
+const RESYNC_JOB_STYLE = {
+  queued:         ['Queued',            'text-gray-500 dark:text-gray-400'],
+  running:        ['Running',           'text-blue-600 dark:text-blue-400'],
+  waiting_paused: ['Waiting — paused',  'text-yellow-600 dark:text-yellow-400'],
+  completed:      ['Completed',         'text-green-600 dark:text-green-400'],
+  failed:         ['Finished with errors', 'text-red-600 dark:text-red-400'],
+  cancelled:      ['Cancelled',         'text-gray-500 dark:text-gray-400'],
+};
+
+window.renderResyncJob = function(job) {
+  const panel = document.getElementById('resync-job-panel');
+  if (!panel) return;
+  if (!job) { panel.classList.add('hidden'); _resyncJobId = null; return; }
+  const wasActive = _resyncJobId === job.id;
+  _resyncJobId = job.active ? job.id : null;
+  panel.classList.remove('hidden');
+
+  const [label, cls] = RESYNC_JOB_STYLE[job.status] || [job.status, 'text-gray-500'];
+  const c = job.counts || {};
+  const total = (job.tables || []).length;
+  const statusEl = document.getElementById('resync-job-status');
+  statusEl.className = 'text-xs font-medium ' + cls;
+  statusEl.textContent = label + ' · ' + (c.done || 0) + '/' + total + ' done' + (c.failed ? ' · ' + c.failed + ' failed' : '');
+
+  document.getElementById('resync-job-message').textContent = job.message || '';
+  document.getElementById('resync-job-cancel').classList.toggle('hidden', !(job.active && (c.pending || 0) > 0));
+
+  document.getElementById('resync-job-tables').innerHTML = (job.tables || []).map(function(t) {
+    const [sl, scls] = RESYNC_STATE_STYLE[t.state] || [t.state, 'bg-gray-100 text-gray-600'];
+    const spin = t.state === 'snapshotting'
+      ? '<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>'
+      : '';
+    const rows = (t.rows !== null && t.rows !== undefined) ? Number(t.rows).toLocaleString() + ' rows' : '';
+    const err = t.error ? '<p class="text-xs text-red-500 dark:text-red-400 mt-0.5 break-words">' + _escHtml(t.error) + '</p>' : '';
+    return '<div class="py-2">'
+      + '<div class="flex items-center justify-between gap-3 text-sm">'
+      +   '<span class="font-mono text-gray-900 dark:text-white truncate">' + _escHtml(t.table) + '</span>'
+      +   '<span class="flex items-center gap-2 flex-shrink-0">'
+      +     '<span class="text-xs text-gray-400 dark:text-gray-500">' + rows + '</span>'
+      +     '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ' + scls + '">' + spin + sl + '</span>'
+      +   '</span>'
+      + '</div>' + err + '</div>';
+  }).join('');
+
+  // Job just finished → refresh the counts table once (the server recounts in the background)
+  if (wasActive && !job.active) fetchTableRows(false);
+};
+
+async function cancelResyncJob() {
+  if (!_resyncJobId) return;
+  if (!confirm('Skip all tables that have not started yet? The table currently being resynced will finish.')) return;
+  try {
+    const r = await fetch(RESYNC_CANCEL_URL_TMPL.replace('/0/cancel/', '/' + _resyncJobId + '/cancel/'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}'},
+    });
+    const data = await r.json();
+    showToast(data.success ? 'success' : 'error', data.message || data.error || 'Done');
+  } catch (err) {
+    showToast('error', 'Cancel failed');
+  }
+  if (typeof window.pollNow === 'function') window.pollNow();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  const el = document.getElementById('resync-job-data');
+  if (el) {
+    try { window.renderResyncJob(JSON.parse(el.textContent)); } catch (e) {}
+  }
+});
 
 (function() {
   const STATUS_URL = '{% url "connector_status_api" replication_config.pk %}';
@@ -710,6 +877,7 @@ async function confirmResync(tables) {
 
   function healthColor(h) {
     if (h === 'healthy') return 'text-green-600 dark:text-green-400';
+    if (h === 'unknown' || h === 'degraded') return 'text-yellow-600 dark:text-yellow-400';
     return 'text-red-600 dark:text-red-400';
   }
 
@@ -848,26 +1016,50 @@ async function confirmResync(tables) {
     toggleBtn('btn-sink-resume', sinkPaused);
   }
 
+  // Single polling loop. `inFlight` guarantees pollNow() can never start a second
+  // concurrent loop (previously each click while a request was pending forked one).
+  let inFlight = false;
+
   // Expose pollNow for action buttons to trigger immediate refresh
   window.pollNow = function() {
+    if (inFlight) return;          // the running request will reschedule itself
     if (timer) clearTimeout(timer);
     poll();
   };
 
+  function schedule(delay) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(poll, delay);
+  }
+
   function poll() {
+    if (inFlight) return;
+    if (document.hidden) {          // don't poll from background tabs
+      schedule(currentInterval);
+      return;
+    }
+    inFlight = true;
     fetch(STATUS_URL, { cache: 'no-store' })
       .then(r => r.json())
       .then(data => {
         if (data.success) updateStatus(data);
+        if (data.success && typeof window.renderResyncJob === 'function') {
+          window.renderResyncJob(data.resync_job || null);
+        }
       })
       .catch(err => console.warn('Status poll failed:', err))
       .finally(() => {
-        timer = setTimeout(poll, currentInterval);
+        inFlight = false;
+        schedule(currentInterval);
       });
   }
 
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) window.pollNow();
+  });
+
   // Start polling
-  timer = setTimeout(poll, POLL_INTERVAL);
+  schedule(POLL_INTERVAL);
 })();
 </script>
 

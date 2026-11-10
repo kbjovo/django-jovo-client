@@ -260,6 +260,9 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'  # Your SMTP server
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
+# Bound SMTP calls: alert emails are sent from Celery health checks, and a hung SMTP
+# connection would otherwise block the task (and its worker slot) indefinitely.
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '10'))
 EMAIL_HOST_USER = 'jovo@kaybeebio.com'
 EMAIL_HOST_PASSWORD = 'dchj gcgb hbgh xraf'
 DEFAULT_FROM_EMAIL = 'noreply@yourcompany.com'
